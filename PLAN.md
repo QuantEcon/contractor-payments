@@ -114,12 +114,9 @@ contractor:
 
 admin: mmcky
 payments_manager: psl-payments-handle  # GitHub handle, used in @-mentions
-
-defaults:
-  currency: AUD
 ```
 
-Written once by the onboarding script; rarely changes afterwards.
+Written once by the onboarding script; rarely changes afterwards. Currency is **not** a global default — it lives on each contract (§4.2).
 
 ### 4.2 `contracts/{contract-id}.yml` — contract terms
 
@@ -133,6 +130,7 @@ end_date: 2025-12-31
 
 terms:
   hourly_rate: 45.00
+  currency: AUD               # ISO 4217 — AUD | USD | JPY supported in v1
   max_hours_per_month: 40
 
 project: python-lectures      # free-form
@@ -141,7 +139,9 @@ notes: |
   Continuing from 2024 contract.
 ```
 
-One file per contract. To renew, the admin copies an existing contract file, edits the dates and rate, gives it a new `contract_id`, and marks the old one `ended`. Currency comes from `settings.yml` unless overridden.
+One file per contract. To renew, the admin copies an existing contract file, edits the dates and rate, gives it a new `contract_id`, and marks the old one `ended`.
+
+**Currency handling:** each contract specifies its own currency. Supported ISO 4217 codes in v1: `AUD`, `USD`, `JPY`. The Typst template renders amounts with the ISO code as a suffix (e.g. `45.00 AUD`, `30.00 USD`, `5000 JPY`) — clean and unambiguous, no symbol conventions. `JPY` is rendered without decimal places; `AUD` and `USD` use two. Other ISO codes can be added when a real contractor needs one.
 
 The `contracts/` directory is the source of truth for which contracts an issue-form dropdown should list — the workflow generates the dropdown from active contracts at submission time.
 
@@ -158,7 +158,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
    - Real name
    - Email
    - Payments manager GitHub handle (defaulted from a config or prior run)
-   - First contract: type, start date, end date, rate (or milestone list), project name
+   - First contract: type, start date, end date, rate (or milestone list), **currency** (AUD / USD / JPY; validates against the v1 supported list), project name
 2. Creates `QuantEcon/contractor-{handle}` as a private repo.
 3. Seeds the repo from `ra-template/`, substituting prompted values into `config/settings.yml`, `README.md`, `CODEOWNERS`, and the contract YAML.
 4. Generates `contracts/{contract-id}.yml` from the prompted contract details.
@@ -196,7 +196,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Onboarding | Interactive Python script | See §5. |
 | Encryption at rest | None | Each repo is one contractor; blast radius is naturally scoped. |
 | Receipts | Out of scope | No reimbursements in v1. |
-| Currency | AUD default | Set in `config/settings.yml`. |
+| Currency | Per-contract; AUD, USD, JPY supported in v1 | Specified in each contract YAML (§4.2). JPY rendered without decimals; AUD/USD with two. ISO code as suffix, no symbols. |
 | Cross-contractor reporting | Out of scope | Captured in the broader admin infrastructure issue. |
 
 ---
@@ -301,6 +301,7 @@ Build everything against one disposable test repo before generalising to reusabl
 | v1 submission types | Hourly timesheets only | Prove the loop end-to-end on the simplest case. |
 | Ledger in v1 | Yes | Cheap now; expensive to backfill later. |
 | Encryption at rest | None | Each repo holds one contractor's data; access is naturally scoped. Revisit if a centralized store is later built. |
+| Currency | Per-contract field; AUD / USD / JPY in v1 | QuantEcon already has real contractors in all three. Currency lives on each contract; PDF renders ISO code as suffix, no symbols; JPY without decimals. |
 | External Actions | None on the financial-data path | Inherited from source issue. |
 
 ---
