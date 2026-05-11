@@ -1,0 +1,12 @@
+[project]
+name = "quantecon-timesheets"
+version = "0.0.1"
+description = "Engine for the QuantEcon contractor timesheets system. See PLAN.md."
+requires-python = ">=3.12"
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
