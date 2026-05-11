@@ -2,7 +2,7 @@
 
 **Status:** Working draft. Tightened to v1 timesheet processing only.
 **Source issue:** [QuantEcon/admin#3 — PRJ: QuantEcon Timesheet Management System](https://github.com/QuantEcon/admin/issues/3)
-**Related (broader vision, separate track):** to be linked once the parent QuantEcon admin infrastructure issue is opened.
+**Related (broader vision, separate track):** [QuantEcon/admin#5 — PRJ: QuantEcon admin infrastructure](https://github.com/QuantEcon/admin/issues/5)
 
 ---
 
@@ -242,7 +242,7 @@ That's the renewal flow. No CLI, no ceremony. The dropdown on the issue form pic
 ### Phase 0 — Planning (in progress)
 - [x] Create `QuantEcon/timesheets`
 - [x] Tighten `PLAN.md` to v1 scope
-- [ ] Open broader infrastructure issue in `QuantEcon/admin`
+- [x] Open broader infrastructure issue in `QuantEcon/admin` ([#5](https://github.com/QuantEcon/admin/issues/5))
 - [ ] Freeze v1 decisions
 
 ### Phase 1 — Timesheets engine in a single test repo
