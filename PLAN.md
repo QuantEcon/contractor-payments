@@ -143,7 +143,169 @@ One file per contract. To renew, the admin copies an existing contract file, edi
 
 **Currency handling:** each contract specifies its own currency. Supported ISO 4217 codes in v1: `AUD`, `USD`, `JPY`. The Typst template renders amounts with the ISO code as a suffix (e.g. `45.00 AUD`, `30.00 USD`, `5000 JPY`) — clean and unambiguous, no symbol conventions. `JPY` is rendered without decimal places; `AUD` and `USD` use two. Other ISO codes can be added when a real contractor needs one.
 
-The `contracts/` directory is the source of truth for which contracts an issue-form dropdown should list — the workflow generates the dropdown from active contracts at submission time.
+### 4.3 `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — the submission form
+
+The interface contractors interact with. GitHub renders this YAML as a web form on the "New Issue" page; on submit, GitHub serialises the field values into the issue body as markdown. `scripts/parse_issue.py` then parses that markdown into a structured submission YAML.
+
+**Form fields:**
+
+1. **Contract** (dropdown, required) — populated with the contractor's active contract IDs. Onboarding script writes the initial list; admin edits the list when a contract is renewed.
+2. **Period** (dropdown, required) — month in `YYYY-MM` form. Twelve options per year; admin edits the list annually.
+3. **Time Entries** (textarea, required) — **one row per day worked**, pipe-delimited `YYYY-MM-DD | hours | description`. Variable rows: contractor only enters days they actually worked, not a fixed grid of 30 rows.
+4. **Additional notes** (textarea, optional) — free text.
+5. **Confirmation** (checkbox, required) — single ack of accuracy.
+
+**The form file** (post-substitution example):
+
+```yaml
+name: 📋 Hourly Timesheet
+description: Submit a monthly timesheet for hours worked on an hourly contract.
+title: "Timesheet submission"
+labels: ["timesheet", "pending-review"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Hourly Timesheet Submission
+
+        Fill out the fields below. On submission, a Pull Request will be
+        automatically created with the structured data. An admin will
+        review and merge; on merge a PDF is generated and the payments
+        manager is notified.
+
+        **Corrections after submitting:** edit this issue (the PR will
+        be regenerated), or edit the PR branch directly if you're
+        comfortable with git.
+
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Contract
+      description: Which contract does this timesheet apply to?
+      options:
+        - jane-doe-hourly-2025   # populated by onboarding/new-contractor.py
+    validations:
+      required: true
+
+  - type: dropdown
+    id: period
+    attributes:
+      label: Period
+      description: Which month is this timesheet for?
+      options:
+        - "2025-01"
+        - "2025-02"
+        # ... twelve months for the current year
+        - "2025-12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: entries
+    attributes:
+      label: Time Entries
+      description: |
+        Enter one row per day worked, in the format:
+        `YYYY-MM-DD | hours | description`
+
+        Hours may be fractional (e.g. 4.5). Descriptions may contain
+        any text — the parser splits on the first two `|` only.
+      placeholder: |
+        2025-01-06 | 3.5 | NumPy lecture exercises review
+        2025-01-13 | 5.0 | Plotting examples
+        2025-01-20 | 4.0 | CI pipeline fixes
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes (optional)
+      placeholder: e.g. "Travel time on the 15th not included."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm that the hours and descriptions above are accurate.
+          required: true
+```
+
+A sibling `config.yml` disables blank issues and points contractors at the guide:
+
+```yaml
+# .github/ISSUE_TEMPLATE/config.yml
+blank_issues_enabled: false
+contact_links:
+  - name: How to submit a timesheet
+    url: https://github.com/QuantEcon/timesheets/blob/main/docs/CONTRACTOR_GUIDE.md
+    about: Step-by-step guide with screenshots
+```
+
+**Parser tolerances** — `parse_issue.py` accepts common variations:
+
+- Date formats: `YYYY-MM-DD` canonical; also accept `YYYY/MM/DD` and `DD-MM-YYYY` if the month is unambiguous.
+- Hour-unit suffixes stripped: `4.5`, `4.5h`, `4.5 hrs` all parse to `4.5`.
+- Delimiters: `|` canonical; also accept `,` or tab if consistently used in the input (emit a non-blocking warning comment to the issue).
+- Whitespace normalised; blank lines and obvious header rows skipped.
+- **Description content may contain `|`** — parser splits on the first two pipes only, so the third "field" captures everything after.
+
+**Parser must reject** with line-specific errors:
+
+- Date that can't be parsed at all.
+- Date outside the selected `Period`.
+- Two rows with the same date (duplicate-day check).
+- Hours ≤ 0 or > 24.
+- Missing fields (fewer than three pipe-separated segments).
+
+### 4.4 Submission validation and failure handling
+
+Validation runs across three layers so that good submissions sail through, bad submissions get specific feedback, and admins only see well-formed PRs.
+
+**Layer 1 — Form constraints.** Dropdowns for `Contract` and `Period` make those fields typo-proof. Required fields and the confirmation checkbox are enforced by GitHub at submit time.
+
+**Layer 2 — CI parsing.** On `issues: opened` and `issues: edited`, the workflow runs `parse_issue.py`. Outcomes:
+
+- **Parse succeeds, no PR exists:** workflow creates a branch, commits the structured submission YAML, opens a PR with `Closes #{issue-number}` in the body. Removes any previous error comment from the issue.
+- **Parse succeeds, PR already exists** (contractor edited the issue to fix something post-submission): workflow regenerates the submission YAML on the existing PR branch, force-pushes, posts a comment on the PR noting the regeneration. *Deferred from first ship — until built, contractors fix post-submission issues by editing the PR branch directly.*
+- **Parse fails:** no PR is created or modified. Workflow posts an error comment on the issue (or updates the existing one) and applies a `parse-error` label. Issue stays open.
+
+**Layer 3 — PR review.** Admin merges or requests changes via standard PR review. Catches semantic errors (hours don't match the work described, wrong period selected, etc.) that no parser can detect.
+
+**Error comment format.** Comments are written by the workflow with an HTML sentinel marker. On re-run after a failed edit, the workflow finds the previous comment by the sentinel and edits it in place — no comment spam.
+
+```markdown
+🤖 **Submission needs a fix**
+
+I couldn't parse the time entries. Here's what I found:
+
+- **Line 3:** couldn't read a date from `2025/01/05` — please use
+  hyphens, e.g. `2025-01-05`.
+- **Line 7:** date `2025-02-03` is outside the selected period
+  `2025-01`. Either change the date or pick a different period.
+
+To fix, **edit this issue** (click the ⋯ menu → Edit) and update
+those lines. I'll re-check automatically when you save.
+
+<!-- timesheet-parse-error -->
+```
+
+**Triggers and what the workflow ignores.**
+
+- Re-runs on `issues: opened` and `issues: edited` only.
+- Does not run on new comments — the issue body is the form data; comments are for human conversation.
+- Does not auto-close issues on failure. Issues close only when the linked PR merges (via `Closes #N`).
+
+**State cleanup on successful re-parse.**
+
+- `parse-error` label removed.
+- Previous error comment removed (or rewritten as a success acknowledgement — exact wording decided during build).
+- PR opens at most once per issue (creation on first successful parse; updates via force-push on subsequent successful parses, once that path is built).
 
 ---
 
@@ -189,7 +351,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Submission types | Hourly timesheets only | Invoices and reimbursements deferred. |
 | Per-contractor repo name | `QuantEcon/contractor-{github-handle}` | Future-proof for other contractor artefacts. |
 | Contract data | Plaintext YAML in each contractor's repo | Admin-edited by hand. |
-| Contract listing on issue form | Auto-generated from `contracts/*.yml` with `status: active` | Workflow regenerates dropdown when contracts change. |
+| Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list from this contractor's active contracts; admin edits on contract renewal. See §4.3. |
 | Approval notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
 | PDF generation | Typst in CI on PR merge | Committed to `generated_pdfs/<YYYY-MM>/` + uploaded as artifact. |
 | Ledger / running totals | Yes | One `ledger/<contract-id>.yml` per contract; updated on merge. |
@@ -247,11 +409,14 @@ That's the renewal flow. No CLI, no ceremony. The dropdown on the issue form pic
 
 ### Phase 1 — Timesheets engine in a single test repo
 Build everything against one disposable test repo before generalising to reusable workflows.
-- [ ] `scripts/parse_issue.py` — parse Issue Form body
+- [ ] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
+- [ ] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
+- [ ] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
+- [ ] `tests/test_parse_issue.py` — unit tests covering malformed inputs and edge cases
 - [ ] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`
-- [ ] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml`
-- [ ] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable)
-- [ ] End-to-end test: open an issue → PR appears with correct YAML
+- [ ] `scripts/post_error_comment.py` — sentinel-marked error comment on parse failure; updates in place on re-run (§4.4)
+- [ ] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`
+- [ ] End-to-end test: valid issue → PR appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
 
 ### Phase 2 — Merge processing
 - [ ] `templates/timesheet.typ` — QuantEcon-branded Typst template
