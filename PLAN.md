@@ -36,7 +36,7 @@ Selected: one private repo per contractor under the QuantEcon org, named `QuantE
 Two repos:
 
 ```
-QuantEcon/timesheets                  ← engine: workflows, scripts, Typst, ra-template, onboarding script
+QuantEcon/timesheets                  ← engine: workflows, scripts, Typst, contractor-template, onboarding script
 QuantEcon/contractor-{handle}         ← per-contractor private repo
 ```
 
@@ -57,17 +57,21 @@ QuantEcon/timesheets/
 │   └── new-contractor.py             ← interactive setup script (see §5)
 ├── templates/
 │   └── timesheet.typ                 (Typst PDF template)
-├── ra-template/                      ← files seeded into each new contractor repo
-│   ├── .github/ISSUE_TEMPLATE/hourly-timesheet.yml
-│   ├── .github/workflows/issue-to-pr.yml          (thin caller of the reusable)
-│   ├── .github/workflows/process-approved.yml     (thin caller of the reusable)
-│   ├── .github/CODEOWNERS
-│   ├── config/settings.yml.template               (contractor identity, admin, payments manager)
+├── contractor-template/              ← files seeded into each new contractor repo
+│   │                                   (onboarding script applies string.Template
+│   │                                    substitution to every text file at copy time —
+│   │                                    no `.template` suffix convention needed)
+│   ├── .github/ISSUE_TEMPLATE/hourly-timesheet.yml   (contains $CONTRACT_OPTIONS)
+│   ├── .github/ISSUE_TEMPLATE/config.yml
+│   ├── .github/workflows/issue-to-pr.yml             (thin caller of the reusable)
+│   ├── .github/workflows/process-approved.yml        (thin caller of the reusable)
+│   ├── .github/CODEOWNERS                            (contains $ADMIN)
+│   ├── config/settings.yml                           (contains $CONTRACTOR_NAME etc.)
 │   ├── contracts/.gitkeep
 │   ├── submissions/.gitkeep
 │   ├── ledger/.gitkeep
 │   ├── generated_pdfs/.gitkeep
-│   └── README.md.template            (contractor-facing how-to)
+│   └── README.md                                     (contractor-facing how-to)
 ├── docs/
 │   ├── CONTRACTOR_GUIDE.md           (for the submitting contractor)
 │   └── ADMIN_GUIDE.md                (onboarding, reviewing, editing contracts)
@@ -100,9 +104,9 @@ Access control:
 
 ---
 
-## 4. Data inside a contractor repo
+## 4. Inside a contractor repo
 
-Two configuration files. Both admin-edited by hand. No CLI, no central store — they live where the submissions live.
+Four kinds of files shape how a contractor repo works: identity/routing config (§4.1), contract terms (§4.2), the submission form (§4.3), and the validation behaviour wired around the form (§4.4). The first three are admin-authored; the contractor only interacts with the form itself.
 
 ### 4.1 `config/settings.yml` — contractor identity + routing
 
@@ -322,7 +326,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
    - Payments manager GitHub handle (defaulted from a config or prior run)
    - First contract: type, start date, end date, rate (or milestone list), **currency** (AUD / USD / JPY; validates against the v1 supported list), project name
 2. Creates `QuantEcon/contractor-{handle}` as a private repo.
-3. Seeds the repo from `ra-template/`, substituting prompted values into `config/settings.yml`, `README.md`, `CODEOWNERS`, and the contract YAML.
+3. Seeds the repo from `contractor-template/`, substituting prompted values into `config/settings.yml`, `README.md`, `CODEOWNERS`, and the contract YAML.
 4. Generates `contracts/{contract-id}.yml` from the prompted contract details.
 5. Adds the contractor (Write), admin (Admin), and payments manager (Read) as collaborators via `gh api`.
 6. Sets branch protection on `main` (PR required, 1 review).
@@ -334,7 +338,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 - No contract PDF generation (contracts are YAML metadata; no signed PDF in v1).
 - No contract renewal / end automation — admin edits YAML by hand.
 - No central record of which contractors exist (you can `gh repo list QuantEcon --topic contractor` if you tag the repos, or list `contractor-*` repos via `gh repo list`).
-- No batch operations or template re-sync — when workflows in `QuantEcon/timesheets` change, contractor repos that reference them via reusable workflows pick up the change automatically. Files copied from `ra-template/` are only re-synced manually if needed.
+- No batch operations or template re-sync — when workflows in `QuantEcon/timesheets` change, contractor repos that reference them via reusable workflows pick up the change automatically. Files copied from `contractor-template/` are only re-synced manually if needed.
 
 ### Implementation notes
 
@@ -393,9 +397,10 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 1. In the contractor's repo, copy `contracts/{old-contract-id}.yml` to `contracts/{new-contract-id}.yml`.
 2. Edit dates / rate / status as needed.
 3. Mark the old contract `status: ended`.
-4. Commit and push.
+4. Edit `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — add the new contract ID to the `Contract` dropdown options, remove the ended one if appropriate.
+5. Commit and push.
 
-That's the renewal flow. No CLI, no ceremony. The dropdown on the issue form picks up the change next time it runs.
+No CLI, no ceremony. One additional file to edit beyond the contract YAML (the form's dropdown), captured here so it doesn't get missed.
 
 ---
 
@@ -405,10 +410,12 @@ That's the renewal flow. No CLI, no ceremony. The dropdown on the issue form pic
 - [x] Create `QuantEcon/timesheets`
 - [x] Tighten `PLAN.md` to v1 scope
 - [x] Open broader infrastructure issue in `QuantEcon/admin` ([#5](https://github.com/QuantEcon/admin/issues/5))
-- [ ] Freeze v1 decisions
+- [x] Consistency pass on `PLAN.md`
+- [ ] Resolve open items in §10 (payments manager handle, admin handle/team, org-level reusable-workflow setting, runner-minutes budget)
 
 ### Phase 1 — Timesheets engine in a single test repo
-Build everything against one disposable test repo before generalising to reusable workflows.
+Build everything against one disposable test repo before generalising to reusable workflows. The Phase 1 / Phase 2 test repo is `QuantEcon/contractor-engine-test`; Phase 3 spins up a separate test repo (`QuantEcon/contractor-onboarding-test`) to exercise the onboarding script independently.
+- [ ] Create `QuantEcon/contractor-engine-test` (private, disposable) with a hand-written `config/settings.yml` and one `contracts/*.yml` for testing
 - [ ] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
 - [ ] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
 - [ ] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
@@ -426,12 +433,12 @@ Build everything against one disposable test repo before generalising to reusabl
 - [ ] `.github/workflows/process-approved.yml`
 - [ ] End-to-end test: merge a PR → PDF + ledger + comment + label
 
-### Phase 3 — Reusable workflows + ra-template + onboarding
+### Phase 3 — Reusable workflows + contractor-template + onboarding
 - [ ] Convert both workflows to `workflow_call` reusable form
 - [ ] Verify private-repo reusable workflow permissions at the org level
-- [ ] Build `ra-template/` (thin caller workflows + templated config + READMEs)
+- [ ] Build `contractor-template/` (thin caller workflows + templated config + READMEs)
 - [ ] `onboarding/new-contractor.py`
-- [ ] Onboard one disposable real `contractor-test` repo end-to-end
+- [ ] Spin up `QuantEcon/contractor-onboarding-test` via the onboarding script and run the full submit → merge loop end-to-end
 
 ### Phase 4 — Docs + first real contractors
 - [ ] `docs/CONTRACTOR_GUIDE.md`
