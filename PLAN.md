@@ -120,6 +120,8 @@ QuantEcon/contractors/                ← private, admin-only
 
 No GitHub Actions in this repo for v1 — `qemanager` runs Typst locally on the admin's machine and commits YAML + PDF in one go. Single execution path. (A CI consistency check that re-renders and diffs is a nice-to-have we can add later.)
 
+**Encryption at rest.** The directories `contractors/`, `contracts/`, and `contract_pdfs/` are encrypted in git using [`git-crypt`](https://github.com/AGWA/git-crypt). A `.gitattributes` rule configures the relevant paths; admins with a registered GPG key see plaintext transparently after `git-crypt unlock`; GitHub stores ciphertext. The repo's README and `.gitattributes` itself remain plaintext. See §11 for the full posture.
+
 ### 3.3 `QuantEcon/timesheets-{ra-handle}` — per RA, private
 
 ```
@@ -267,6 +269,7 @@ Implementation: Python stdlib `argparse` + `pyyaml` + `subprocess` to `gh` and `
 - The CLI commits + pushes on each operation. No long-running state; every command is idempotent if re-run.
 - Substitution into `ra-template/` uses stdlib `string.Template` (`$variable` / `${variable}`). No Jinja2.
 - Contract PDF generation: CLI renders Typst locally and commits the PDF in the same commit as the YAML. Admin needs `typst` installed locally.
+- `qemanager` requires `QuantEcon/contractors` to be `git-crypt unlock`'d before any contract operations. The CLI verifies this on start (checks that a known sentinel file is plaintext) and prints a clear error if the working tree contains ciphertext.
 
 ---
 
@@ -283,6 +286,8 @@ Implementation: Python stdlib `argparse` + `pyyaml` + `subprocess` to `gh` and `
 | Receipts | Out of scope | Timesheets don't need them; revisit with reimbursements. |
 | Currency | AUD default | Multi-currency deferred. |
 | Cross-RA reporting | Out of scope | Easy to add later; data model supports it. |
+| Sensitive payment credentials | **Not stored in git** — kept in 1Password (or equivalent) and referenced by stable ID from the contract YAML only if needed | Best defence is not collecting the data. |
+| Encryption at rest | `git-crypt` over `contractors/**`, `contracts/**`, `contract_pdfs/**` in `QuantEcon/contractors` | Per-admin GPG keys; paper master-key backup. See §11. |
 
 ---
 
@@ -326,7 +331,10 @@ Implementation: Python stdlib `argparse` + `pyyaml` + `subprocess` to `gh` and `
 - [x] Create `QuantEcon/timesheets`
 - [x] Draft `PLAN.md`
 - [ ] Finalise contractor / contract schemas with Matt
+- [ ] Generate admin GPG key for `mmcky` (one-time, on local machine)
 - [ ] Create `QuantEcon/contractors` (empty private repo)
+- [ ] Initialise `git-crypt` on `QuantEcon/contractors`, commit `.gitattributes` rules
+- [ ] Print and securely store the git-crypt master recovery key
 - [ ] Freeze v1 decisions
 
 ### Phase 1 — Data model + CLI foundations
@@ -393,6 +401,8 @@ Build the submission loop against one disposable test repo before generalising.
 | Ledger in v1 | Yes | Adding it later means re-running history; cheaper now. |
 | Submission method | Issue Form → auto-PR | Inherited from source issue. |
 | External Actions | None | Inherited from source issue; financial-data path stays in-house. |
+| Sensitive payment credentials | Not stored in `QuantEcon/contractors` at all; reference external store (1Password) by stable ID | Best defence is not collecting it; we only need rates and dates to process timesheets. |
+| Encryption at rest for contractor data | `git-crypt` over `contractors/**`, `contracts/**`, `contract_pdfs/**`; per-admin GPG keys; paper master-key backup | Defence against accidental publication and GitHub-side incidents. Well-established tool (v0.8.0 released 2025-09-24; widely deployed in DevOps and security-sensitive open-source projects). |
 
 ---
 
@@ -400,7 +410,7 @@ Build the submission loop against one disposable test repo before generalising.
 
 - **Payments manager handle.** GitHub username for the PSL Foundation payments manager — needed for `$PAYMENTS_MANAGER` in CODEOWNERS and notifications. Matt to confirm.
 - **Admin handle(s).** Just `mmcky`, or also a team handle? Affects CODEOWNERS.
-- **Sensitive payment details** (bank accounts, tax IDs). Do these belong in `QuantEcon/contractors` (private GitHub repo is reasonable access control but not encryption-at-rest), or in an external store (1Password, etc.)? Recommend: **out of git** for v1; the contractor record carries a pointer or note, not the data itself.
+- **Second admin / git-crypt keyholder for `QuantEcon/contractors`.** Strongly recommended for robustness — if `mmcky` is unavailable when a payroll cycle needs to run, a second keyholder can process. Not a strict security requirement (git-crypt works with one key + the paper backup), but a real operational one. Who would this be?
 - **Contract template content.** What should `templates/contract.typ` actually contain? Need a real example contract to model the layout on. Matt to share a recent paper contract or sketch the required fields.
 - **Org-level setting: reusable workflows in private repos.** Needs to be enabled on QuantEcon before Phase 4. Org admin action.
 - **Actions on private repos / runner-minute budget.** Confirm Actions are enabled and there's headroom.
@@ -411,12 +421,31 @@ Build the submission loop against one disposable test repo before generalising.
 
 ## 11. Security posture
 
-- All three repo types are private. Engine repo (`QuantEcon/timesheets`) could later be made public as a reference implementation — by design it contains no contractor or financial data.
+### Data handling
+
+- **Payment credentials are not stored in git.** Bank accounts, tax IDs, and similar are kept in 1Password (or an equivalent external store) and referenced from a contract record by stable ID only if needed. The simplest control is to not have the data.
+- **Contractor and contract data at rest is encrypted** in `QuantEcon/contractors` using [`git-crypt`](https://github.com/AGWA/git-crypt). Encrypted paths: `contractors/**`, `contracts/**`, `contract_pdfs/**`. GitHub stores ciphertext; admins with a registered GPG key see plaintext transparently after `git-crypt unlock`.
+- The engine repo (`QuantEcon/timesheets`) holds no contractor or contract data — it contains tooling, templates, and reusable workflows only.
+- Per-RA repos (`QuantEcon/timesheets-{handle}`) hold one RA's name and rate (plaintext, in the deployed contract YAML), plus their submissions and ledger. These repos are private and access-restricted to that RA + admin + payments manager; the data is intrinsically scoped to people who already have a legitimate need to see it.
+
+### Key management
+
+- One GPG key per admin. Each key is registered with git-crypt via `git-crypt add-gpg-user <key-id>`.
+- Admin private keys live on the admin's machine; backup in the admin's 1Password vault.
+- **Master recovery key** — exported from git-crypt and printed to paper, stored in a physical safe. Recovers the data if all admin keys are lost.
+- Admin departure: `git-crypt rm-gpg-user <id>` revokes future access. Past data the departing admin had access to is, as with any access revocation, their memory to retain.
+
+### Repos and access
+
+- All three repo types are private. The engine repo could later be made public as a reference implementation — by design it contains no data.
+- Branch protection on `main` for every RA repo: PR required, 1 review required, no force-push, no direct push. Same protection on `QuantEcon/contractors`.
+
+### Workflows
+
 - No third-party GitHub Actions on any financial-data path. Only `actions/checkout` and `actions/setup-python` from first-party `actions/*`.
-- Branch protection on `main` for every RA repo: PR required, 1 review required, no force-push, no direct push.
+- GitHub Actions in RA repos **do not need git-crypt keys** — they operate on plaintext timesheet data (the RA's name and rate are already deployed to the RA repo as plaintext by `qemanager sync`). `QuantEcon/contractors` has no Actions in v1.
 - GitHub Secrets only for credentials the workflow needs (none in v1; SMTP credentials when email arrives in v2).
 - Python deps minimal: stdlib + `pyyaml`. No transitive footprint.
-- Contractor data store (`QuantEcon/contractors`) does not hold sensitive payment details in v1 — see Open Items.
 
 ---
 
@@ -426,4 +455,5 @@ Build the submission loop against one disposable test repo before generalising.
   - `/Users/mmcky/work/quantecon/timesheets/` (this repo)
   - `/Users/mmcky/work/quantecon/contractors/` (to be cloned once the repo exists)
   - `/Users/mmcky/work/quantecon/timesheets-{handle}/` (per-RA, auto-cloned by `qemanager` when needed)
+- Local toolchain (admin one-time install): `brew install git-crypt gnupg typst`, plus Python 3.12+. The `gh` CLI is assumed already installed.
 - This `PLAN.md` is the source of truth for the project plan. Update it in PRs as decisions evolve; don't let conversation context become the only record.
