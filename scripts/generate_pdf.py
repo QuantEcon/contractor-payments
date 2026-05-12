@@ -108,35 +108,32 @@ def _stage_working_dir(template_dir: Path, data: dict) -> Path:
     return work_dir / "timesheet.typ"
 
 
-def render_submission_pdf(
-    submission_path: Path,
-    settings_path: Path,
-    template_dir: Path,
-    output_path: Path,
-) -> None:
-    """Render `submission_path` into a PDF at `output_path`.
+DEFAULT_PNG_PPI = 200  # Higher than Typst's 144 default for crisp inline preview.
 
-    Pure-ish: reads files, invokes Typst, writes the PDF. The temp working
-    directory is cleaned up after a successful render.
-    """
+
+def _load_data(submission_path: Path, settings_path: Path) -> dict:
+    """Load submission + settings and produce the data dict the template wants."""
     with open(submission_path, encoding="utf-8") as f:
         submission = yaml.safe_load(f)
     with open(settings_path, encoding="utf-8") as f:
         settings = yaml.safe_load(f)
-
     data = _merge_contractor(submission, settings)
     data = _add_display_strings(data)
+    return data
 
-    staged_typ = _stage_working_dir(template_dir, data)
+
+def _run_typst(staged_typ: Path, output_path: Path, fmt: str, ppi: Optional[int]) -> None:
+    """Invoke `typst compile` with the requested format. Raises on failure."""
     work_dir = staged_typ.parent
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    cmd = ["typst", "compile", "--format", fmt]
+    if ppi is not None:
+        cmd.extend(["--ppi", str(ppi)])
+    cmd.extend([str(staged_typ), str(output_path)])
+
     try:
-        result = subprocess.run(
-            ["typst", "compile", str(staged_typ), str(output_path)],
-            capture_output=True, text=True, check=False,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)
@@ -145,9 +142,33 @@ def render_submission_pdf(
                 f"Working dir kept for inspection: {work_dir}"
             )
     finally:
-        # On success we clean up; on failure we keep the dir (see above).
         if output_path.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def render_submission_pdf(
+    submission_path: Path,
+    settings_path: Path,
+    template_dir: Path,
+    output_path: Path,
+) -> None:
+    """Render `submission_path` into a PDF at `output_path`."""
+    data = _load_data(submission_path, settings_path)
+    staged_typ = _stage_working_dir(template_dir, data)
+    _run_typst(staged_typ, output_path, fmt="pdf", ppi=None)
+
+
+def render_submission_png(
+    submission_path: Path,
+    settings_path: Path,
+    template_dir: Path,
+    output_path: Path,
+    ppi: int = DEFAULT_PNG_PPI,
+) -> None:
+    """Render `submission_path` into a PNG at `output_path` (single page)."""
+    data = _load_data(submission_path, settings_path)
+    staged_typ = _stage_working_dir(template_dir, data)
+    _run_typst(staged_typ, output_path, fmt="png", ppi=ppi)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -159,15 +180,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--templates", required=True, type=Path,
                    help="Templates directory (contains timesheet.typ + assets/).")
     p.add_argument("--output", required=True, type=Path,
-                   help="Output PDF path.")
+                   help="Output path. Format inferred from extension (.pdf or .png).")
+    p.add_argument("--ppi", type=int, default=DEFAULT_PNG_PPI,
+                   help=f"PNG resolution in pixels per inch (default: {DEFAULT_PNG_PPI}). Ignored for PDF output.")
     args = p.parse_args(argv)
 
-    render_submission_pdf(
-        submission_path=args.submission,
-        settings_path=args.settings,
-        template_dir=args.templates,
-        output_path=args.output,
-    )
+    suffix = args.output.suffix.lower()
+    if suffix == ".pdf":
+        render_submission_pdf(
+            submission_path=args.submission,
+            settings_path=args.settings,
+            template_dir=args.templates,
+            output_path=args.output,
+        )
+    elif suffix == ".png":
+        render_submission_png(
+            submission_path=args.submission,
+            settings_path=args.settings,
+            template_dir=args.templates,
+            output_path=args.output,
+            ppi=args.ppi,
+        )
+    else:
+        print(f"ERROR: --output must end in .pdf or .png (got {suffix})", file=sys.stderr)
+        return 2
+
     print(f"Rendered: {args.output}")
     return 0
 

@@ -32,7 +32,7 @@ from typing import Optional
 
 import yaml
 
-from scripts.generate_pdf import render_submission_pdf
+from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_submission_png
 
 
 # ─── Pure data transformations (testable) ───────────────────────────────────
@@ -126,9 +126,14 @@ def render_pr_body(
     submission: dict,
     submission_path_rel: str,
     pdf_path_rel: Optional[str] = None,
+    png_url: Optional[str] = None,
     warnings: Optional[list[dict]] = None,
 ) -> str:
-    """Compose the PR body. Includes `Closes #N` so merge closes the issue."""
+    """Compose the PR body. Includes `Closes #N` so merge closes the issue.
+
+    `png_url` is a full raw URL to the rendered preview image so reviewers
+    see it inline in the PR description without leaving the review surface.
+    """
     totals = submission["totals"]
     lines = [
         f"Auto-generated from issue #{issue_number} (@{submitter}).",
@@ -139,12 +144,17 @@ def render_pr_body(
         f"**Total amount:** {totals['amount']} {totals['currency']}",
         "",
     ]
+    if png_url:
+        lines.extend([
+            "### Preview",
+            "",
+            f"![Timesheet preview]({png_url})",
+            "",
+        ])
     if pdf_path_rel:
         lines.extend([
-            f"📄 **PDF preview:** [`{pdf_path_rel}`]({pdf_path_rel})",
-            f"📋 Submission YAML: [`{submission_path_rel}`]({submission_path_rel})",
-            "",
-            "_Click the PDF in the file tree to review what will be sent to the payments manager on approval._",
+            f"📄 **PDF (authoritative):** [`{pdf_path_rel}`]({pdf_path_rel})  ·  "
+            f"📋 [YAML]({submission_path_rel})",
         ])
     else:
         lines.append(f"Submission YAML: [`{submission_path_rel}`]({submission_path_rel})")
@@ -235,10 +245,38 @@ def write_submission_yaml(submission: dict, repo_root: Path) -> Path:
 
 
 def submission_pdf_path(submission: dict, repo_root: Path) -> Path:
-    """Mirror the submission YAML path under generated_pdfs/."""
+    """Mirror the submission YAML path under generated_pdfs/ as PDF."""
     period = submission["period"]
     submission_id = submission["submission_id"]
     return repo_root / "generated_pdfs" / period / f"{submission_id}.pdf"
+
+
+def submission_png_path(submission: dict, repo_root: Path) -> Path:
+    """Mirror the submission YAML path under generated_pdfs/ as PNG preview."""
+    period = submission["period"]
+    submission_id = submission["submission_id"]
+    return repo_root / "generated_pdfs" / period / f"{submission_id}.png"
+
+
+def detect_repo_owner_name(cwd: Path) -> Optional[str]:
+    """Return `owner/name` for the current repo via `gh`, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            capture_output=True, text=True, check=True, cwd=cwd,
+        )
+        return result.stdout.strip() or None
+    except subprocess.CalledProcessError:
+        return None
+
+
+def raw_url(owner_name: str, branch: str, path_in_repo: str) -> str:
+    """GitHub raw-content URL for a file on a specific branch.
+
+    For private repos this URL requires the viewer to be authenticated to
+    the repo, which is the case for anyone reviewing the PR — so markdown
+    image embeds in PR bodies resolve correctly."""
+    return f"https://github.com/{owner_name}/raw/{branch}/{path_in_repo}"
 
 
 def load_contract(repo_root: Path, contract_id: str) -> dict:
@@ -273,7 +311,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--settings-file", default="config/settings.yml",
                    help="Path to settings.yml (relative to --repo-root). Default: config/settings.yml.")
     p.add_argument("--skip-pdf", action="store_true",
-                   help="Skip PDF rendering (useful for local dry-runs without typst installed).")
+                   help="Skip PDF and PNG rendering (useful for local dry-runs without typst installed).")
+    p.add_argument("--png-ppi", type=int, default=DEFAULT_PNG_PPI,
+                   help=f"PNG preview resolution in pixels per inch (default: {DEFAULT_PNG_PPI}).")
     args = p.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -317,20 +357,41 @@ def main(argv: Optional[list[str]] = None) -> int:
     yaml_rel = yaml_path.relative_to(repo_root).as_posix()
     print(f"Wrote {yaml_rel}")
 
-    # Render the PDF (preview state — approval block will say "PENDING REVIEW").
+    # Render the PDF + PNG preview (both in pending state — approval block
+    # says "PENDING REVIEW"). PDF is the authoritative artifact for the
+    # payments manager; PNG is the inline preview embedded in the PR body
+    # so reviewers see it without leaving the PR.
     pdf_rel: Optional[str] = None
+    png_url: Optional[str] = None
     paths_to_stage: list[Path] = [yaml_path]
     if not args.skip_pdf:
         pdf_path = submission_pdf_path(submission, repo_root)
+        png_path = submission_png_path(submission, repo_root)
         render_submission_pdf(
             submission_path=yaml_path,
             settings_path=settings_path,
             template_dir=templates_dir,
             output_path=pdf_path,
         )
+        render_submission_png(
+            submission_path=yaml_path,
+            settings_path=settings_path,
+            template_dir=templates_dir,
+            output_path=png_path,
+            ppi=args.png_ppi,
+        )
         pdf_rel = pdf_path.relative_to(repo_root).as_posix()
-        paths_to_stage.append(pdf_path)
+        png_rel = png_path.relative_to(repo_root).as_posix()
+        paths_to_stage.extend([pdf_path, png_path])
         print(f"Wrote {pdf_rel}")
+        print(f"Wrote {png_rel}")
+
+        # Compose the raw URL for the PNG so it embeds inline in the PR body.
+        # Relative paths in PR bodies resolve against the default branch, so
+        # we need an absolute raw URL pointing at this PR's branch.
+        owner_name = detect_repo_owner_name(repo_root)
+        if owner_name:
+            png_url = raw_url(owner_name, branch, png_rel)
 
     # Git: branch, commit, push.
     create_branch(branch, cwd=repo_root)
@@ -344,6 +405,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         submission=submission,
         submission_path_rel=yaml_rel,
         pdf_path_rel=pdf_rel,
+        png_url=png_url,
         warnings=warnings,
     )
     pr_url = open_pr(args.issue_title, body, cwd=repo_root)
