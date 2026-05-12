@@ -30,8 +30,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install pyyaml
+
+      - name: Install Typst
+        run: |
+          TYPST_VERSION="0.13.0"
+          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo mv /tmp/typst-*/typst /usr/local/bin/typst
+          typst --version
 
       - name: Configure git identity
         run: |
@@ -67,7 +75,7 @@ jobs:
           ISSUE_CREATED_AT: ${{ github.event.issue.created_at }}
         run: |
           SUBMITTED_DATE="$(date -u -d "$ISSUE_CREATED_AT" '+%Y-%m-%d')"
-          python scripts/create_submission_pr.py \
+          python -m scripts.create_submission_pr \
             --submission-file /tmp/submission.json \
             --errors-file /tmp/errors.json \
             --issue-number "$ISSUE_NUMBER" \

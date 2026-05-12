@@ -32,6 +32,8 @@ from typing import Optional
 
 import yaml
 
+from scripts.generate_pdf import render_submission_pdf
+
 
 # ─── Pure data transformations (testable) ───────────────────────────────────
 
@@ -123,6 +125,7 @@ def render_pr_body(
     submitter: str,
     submission: dict,
     submission_path_rel: str,
+    pdf_path_rel: Optional[str] = None,
     warnings: Optional[list[dict]] = None,
 ) -> str:
     """Compose the PR body. Includes `Closes #N` so merge closes the issue."""
@@ -135,10 +138,17 @@ def render_pr_body(
         f"**Total hours:** {totals['hours']}",
         f"**Total amount:** {totals['amount']} {totals['currency']}",
         "",
-        f"Submission file: [`{submission_path_rel}`]({submission_path_rel})",
-        "",
-        f"Closes #{issue_number}",
     ]
+    if pdf_path_rel:
+        lines.extend([
+            f"📄 **PDF preview:** [`{pdf_path_rel}`]({pdf_path_rel})",
+            f"📋 Submission YAML: [`{submission_path_rel}`]({submission_path_rel})",
+            "",
+            "_Click the PDF in the file tree to review what will be sent to the payments manager on approval._",
+        ])
+    else:
+        lines.append(f"Submission YAML: [`{submission_path_rel}`]({submission_path_rel})")
+    lines.extend(["", f"Closes #{issue_number}"])
     if warnings:
         lines.append("")
         lines.append("**Parse warnings (non-blocking):**")
@@ -167,8 +177,9 @@ def create_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", "-b", branch], cwd=cwd)
 
 
-def stage_and_commit(submission_path: Path, issue_number: int, cwd: Optional[Path] = None) -> None:
-    _run(["git", "add", str(submission_path)], cwd=cwd)
+def stage_and_commit(paths: list[Path], issue_number: int, cwd: Optional[Path] = None) -> None:
+    for p in paths:
+        _run(["git", "add", str(p)], cwd=cwd)
     _run([
         "git", "commit", "-m",
         f"Add timesheet submission from #{issue_number}",
@@ -223,6 +234,13 @@ def write_submission_yaml(submission: dict, repo_root: Path) -> Path:
     return out_path
 
 
+def submission_pdf_path(submission: dict, repo_root: Path) -> Path:
+    """Mirror the submission YAML path under generated_pdfs/."""
+    period = submission["period"]
+    submission_id = submission["submission_id"]
+    return repo_root / "generated_pdfs" / period / f"{submission_id}.pdf"
+
+
 def load_contract(repo_root: Path, contract_id: str) -> dict:
     path = repo_root / "contracts" / f"{contract_id}.yml"
     if not path.exists():
@@ -250,9 +268,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="ISO date for `submitted_date` (default: today).")
     p.add_argument("--repo-root", default=".",
                    help="Working tree root (default: current directory).")
+    p.add_argument("--templates-dir", default="templates",
+                   help="Templates directory (relative to --repo-root). Default: templates.")
+    p.add_argument("--settings-file", default="config/settings.yml",
+                   help="Path to settings.yml (relative to --repo-root). Default: config/settings.yml.")
+    p.add_argument("--skip-pdf", action="store_true",
+                   help="Skip PDF rendering (useful for local dry-runs without typst installed).")
     args = p.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
+    templates_dir = (repo_root / args.templates_dir).resolve()
+    settings_path = (repo_root / args.settings_file).resolve()
 
     # Bail early if a branch already exists for this issue. Phase 1 doesn't
     # handle regeneration; that's deferred per PLAN §4.4.
@@ -287,13 +313,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     # Write the YAML.
-    out_path = write_submission_yaml(submission, repo_root)
-    rel_path = out_path.relative_to(repo_root).as_posix()
-    print(f"Wrote {rel_path}")
+    yaml_path = write_submission_yaml(submission, repo_root)
+    yaml_rel = yaml_path.relative_to(repo_root).as_posix()
+    print(f"Wrote {yaml_rel}")
+
+    # Render the PDF (preview state — approval block will say "PENDING REVIEW").
+    pdf_rel: Optional[str] = None
+    paths_to_stage: list[Path] = [yaml_path]
+    if not args.skip_pdf:
+        pdf_path = submission_pdf_path(submission, repo_root)
+        render_submission_pdf(
+            submission_path=yaml_path,
+            settings_path=settings_path,
+            template_dir=templates_dir,
+            output_path=pdf_path,
+        )
+        pdf_rel = pdf_path.relative_to(repo_root).as_posix()
+        paths_to_stage.append(pdf_path)
+        print(f"Wrote {pdf_rel}")
 
     # Git: branch, commit, push.
     create_branch(branch, cwd=repo_root)
-    stage_and_commit(out_path, args.issue_number, cwd=repo_root)
+    stage_and_commit(paths_to_stage, args.issue_number, cwd=repo_root)
     push_branch(branch, cwd=repo_root)
 
     # Open PR.
@@ -301,7 +342,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         issue_number=args.issue_number,
         submitter=args.issue_author,
         submission=submission,
-        submission_path_rel=rel_path,
+        submission_path_rel=yaml_rel,
+        pdf_path_rel=pdf_rel,
         warnings=warnings,
     )
     pr_url = open_pr(args.issue_title, body, cwd=repo_root)

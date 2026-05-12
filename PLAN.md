@@ -357,7 +357,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Contract data | Plaintext YAML in each contractor's repo | Admin-edited by hand. |
 | Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list from this contractor's active contracts; admin edits on contract renewal. See §4.3. |
 | Approval notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
-| PDF generation | Typst in CI on PR merge | Committed to `generated_pdfs/<YYYY-MM>/` + uploaded as artifact. |
+| PDF generation | Typst in CI; preview rendered at PR-creation time, regenerated at merge with approval metadata | Committed to `generated_pdfs/<YYYY-MM>/`. PR carries a "PENDING REVIEW" PDF so reviewers see what will be sent; merge replaces it with the approved version. |
 | Ledger / running totals | Yes | One `ledger/<contract-id>.yml` per contract; updated on merge. |
 | Onboarding | Interactive Python script | See §5. |
 | Encryption at rest | None | Each repo is one contractor; blast radius is naturally scoped. |
@@ -373,17 +373,17 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 
 1. Contractor opens `github.com/QuantEcon/contractor-{theirhandle}` (bookmarked).
 2. *Issues → New Issue → 📋 Hourly Timesheet → fill out form → submit.*
-3. `issue-to-pr.yml` parses the form into a YAML file in `submissions/<YYYY-MM>/`, opens a PR linking the issue.
+3. `issue-to-pr.yml` parses the form, writes the submission YAML in `submissions/<YYYY-MM>/`, renders a "PENDING REVIEW" PDF in `generated_pdfs/<YYYY-MM>/`, opens a PR carrying both and linking the issue.
 4. CODEOWNERS auto-requests review from admin. Contractor + admin get notifications.
 5. Corrections: contractor edits the PR branch directly, or admin requests changes via PR review.
 6. Admin approves and merges.
 
 ### 7.2 On merge
 
-1. `process-approved.yml` identifies the new submission in the diff.
+1. `process-approved.yml` identifies the merged submission.
 2. Updates `ledger/<contract-id>.yml` with the new totals.
-3. Renders Typst → PDF; commits to `generated_pdfs/<YYYY-MM>/`; uploads as workflow artifact.
-4. Comments on the now-closed issue: `@{payments_manager} Approved — {real name} — PDF: <blob URL> · Artifact: <run URL>`.
+3. Re-renders the PDF with approval metadata (`approved_by`, `approved_date` set), replacing the "PENDING REVIEW" version that the PR carried.
+4. Comments on the now-closed issue: `@{payments_manager} Approved — {real name} — PDF: <blob URL>`.
 5. Applies `processed` label.
 
 ### 7.3 Admin onboarding a new contractor
@@ -414,24 +414,26 @@ No CLI, no ceremony. One additional file to edit beyond the contract YAML (the f
 - [ ] Resolve open items in §10 (payments manager handle, admin handle/team, org-level reusable-workflow setting, runner-minutes budget)
 
 ### Phase 1 — Timesheets engine in a single test repo ✅
-Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub.
+Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub. PDF preview rendering added late in Phase 1 (originally Phase 2) so reviewers see the actual artifact during PR review.
 - [x] Create `QuantEcon/contractor-engine-test` (private, disposable) with a hand-written `config/settings.yml` and one `contracts/*.yml` for testing
 - [x] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
 - [x] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
 - [x] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
 - [x] `tests/test_parse_issue.py` — unit tests covering malformed inputs and edge cases
-- [x] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`
+- [x] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`; renders and commits PDF alongside YAML
 - [x] `scripts/post_error_comment.py` — sentinel-marked error comment on parse failure; updates in place on re-run (§4.4)
-- [x] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`
-- [x] End-to-end test: valid issue → PR appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
+- [x] `templates/timesheet.typ` — Typst template (single-page A4, logos, time-entries table, totals panel, conditional approval block); pulled forward from Phase 2
+- [x] `templates/assets/{quantecon,psl-foundation}-logo.png` — branding
+- [x] `scripts/generate_pdf.py` — stages temp working dir, invokes `typst compile`, currency-aware display formatting; pulled forward from Phase 2
+- [x] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`; installs Typst 0.13.0 binary via curl
+- [x] End-to-end test: valid issue → PR with YAML + PDF appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
 
 ### Phase 2 — Merge processing
-- [ ] `templates/timesheet.typ` — QuantEcon-branded Typst template
-- [ ] `scripts/generate_pdf.py`
-- [ ] `scripts/update_ledger.py`
-- [ ] `scripts/notify.py`
-- [ ] `.github/workflows/process-approved.yml`
-- [ ] End-to-end test: merge a PR → PDF + ledger + comment + label
+- [ ] Re-render the PDF with approval metadata baked in (approver handle, approval date) — replaces the "PENDING REVIEW" block with "APPROVED BY @... ON ..." in the same `generated_pdfs/<period>/<id>.pdf` location
+- [ ] `scripts/update_ledger.py` — append/update `ledger/<contract-id>.yml` with totals from the merged submission
+- [ ] `scripts/notify.py` — comment on the now-closed issue tagging `@payments_manager` with PDF/artifact links
+- [ ] `.github/workflows/process-approved.yml` — orchestrates the above on PR merge
+- [ ] End-to-end test: merge a PR → ledger updated, PDF regenerated with approval block, payments-manager notified
 
 ### Phase 3 — Reusable workflows + contractor-template + onboarding
 - [ ] Convert both workflows to `workflow_call` reusable form
