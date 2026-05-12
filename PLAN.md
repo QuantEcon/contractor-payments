@@ -413,17 +413,17 @@ No CLI, no ceremony. One additional file to edit beyond the contract YAML (the f
 - [x] Consistency pass on `PLAN.md`
 - [ ] Resolve open items in §10 (payments manager handle, admin handle/team, org-level reusable-workflow setting, runner-minutes budget)
 
-### Phase 1 — Timesheets engine in a single test repo
-Build everything against one disposable test repo before generalising to reusable workflows. The Phase 1 / Phase 2 test repo is `QuantEcon/contractor-engine-test`; Phase 3 spins up a separate test repo (`QuantEcon/contractor-onboarding-test`) to exercise the onboarding script independently.
-- [ ] Create `QuantEcon/contractor-engine-test` (private, disposable) with a hand-written `config/settings.yml` and one `contracts/*.yml` for testing
-- [ ] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
-- [ ] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
-- [ ] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
-- [ ] `tests/test_parse_issue.py` — unit tests covering malformed inputs and edge cases
-- [ ] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`
-- [ ] `scripts/post_error_comment.py` — sentinel-marked error comment on parse failure; updates in place on re-run (§4.4)
-- [ ] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`
-- [ ] End-to-end test: valid issue → PR appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
+### Phase 1 — Timesheets engine in a single test repo ✅
+Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub.
+- [x] Create `QuantEcon/contractor-engine-test` (private, disposable) with a hand-written `config/settings.yml` and one `contracts/*.yml` for testing
+- [x] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
+- [x] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
+- [x] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
+- [x] `tests/test_parse_issue.py` — unit tests covering malformed inputs and edge cases
+- [x] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`
+- [x] `scripts/post_error_comment.py` — sentinel-marked error comment on parse failure; updates in place on re-run (§4.4)
+- [x] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`
+- [x] End-to-end test: valid issue → PR appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
 
 ### Phase 2 — Merge processing
 - [ ] `templates/timesheet.typ` — QuantEcon-branded Typst template
