@@ -42,29 +42,43 @@ QuantEcon/contractor-{handle}         ← per-contractor private repo
 
 ### 3.1 `QuantEcon/timesheets` (this repo) — the engine
 
+End-state layout. Phase-status check-off lives in §8.
+
 ```
 QuantEcon/timesheets/
-├── .github/workflows/                ← reusable workflows for contractor repos
+├── .github/workflows/                ← reusable workflows for contractor repos (Phase 3)
 │   ├── issue-to-pr.yml               (workflow_call; called from contractor repos)
 │   └── process-approved.yml          (workflow_call; called from contractor repos)
 ├── scripts/                          ← run in CI; checked out at workflow runtime
-│   ├── parse_issue.py
-│   ├── create_submission_pr.py
-│   ├── update_ledger.py
-│   ├── generate_pdf.py
-│   └── notify.py
+│   ├── __init__.py
+│   ├── parse_issue.py                (built — §4.3, §4.4)
+│   ├── create_submission_pr.py       (built — renders PDF + PNG, opens PR)
+│   ├── post_error_comment.py         (built — sentinel comment on parse fail)
+│   ├── generate_pdf.py               (built — PDF + PNG via Typst)
+│   ├── update_ledger.py              (Phase 2)
+│   └── notify.py                     (Phase 2)
+├── tests/
+│   ├── __init__.py
+│   ├── test_parse_issue.py           (49 cases)
+│   ├── test_create_submission_pr.py  (24 cases)
+│   └── test_post_error_comment.py    (7 cases)
 ├── onboarding/
-│   └── new-contractor.py             ← interactive setup script (see §5)
+│   └── new-contractor.py             ← interactive setup script (Phase 3, see §5)
 ├── templates/
-│   └── timesheet.typ                 (Typst PDF template)
+│   ├── timesheet.typ                 (Typst single-page A4 template)
+│   ├── branding.yml                  (PSL Foundation address; single source across repos)
+│   └── assets/
+│       ├── quantecon-logo.png
+│       └── psl-foundation-logo.png
 ├── contractor-template/              ← files seeded into each new contractor repo
 │   │                                   (onboarding script applies string.Template
 │   │                                    substitution to every text file at copy time —
 │   │                                    no `.template` suffix convention needed)
 │   ├── .github/ISSUE_TEMPLATE/hourly-timesheet.yml   (contains $CONTRACT_OPTIONS)
 │   ├── .github/ISSUE_TEMPLATE/config.yml
-│   ├── .github/workflows/issue-to-pr.yml             (thin caller of the reusable)
-│   ├── .github/workflows/process-approved.yml        (thin caller of the reusable)
+│   ├── .github/workflows/issue-to-pr.yml             (Phase 1: full inline workflow;
+│   │                                                  Phase 3 refactor: thin caller)
+│   ├── .github/workflows/process-approved.yml        (Phase 2 / Phase 3)
 │   ├── .github/CODEOWNERS                            (contains $ADMIN)
 │   ├── config/settings.yml                           (contains $CONTRACTOR_NAME etc.)
 │   ├── contracts/.gitkeep
@@ -73,27 +87,34 @@ QuantEcon/timesheets/
 │   ├── generated_pdfs/.gitkeep
 │   └── README.md                                     (contractor-facing how-to)
 ├── docs/
-│   ├── CONTRACTOR_GUIDE.md           (for the submitting contractor)
-│   └── ADMIN_GUIDE.md                (onboarding, reviewing, editing contracts)
+│   ├── CONTRACTOR_GUIDE.md           (Phase 4 — for the submitting contractor)
+│   └── ADMIN_GUIDE.md                (Phase 4 — onboarding, reviewing, editing contracts)
+├── pyproject.toml                    (project metadata; deps: pyyaml + pytest)
+├── .gitignore
 └── PLAN.md                           (this file)
 ```
 
 ### 3.2 `QuantEcon/contractor-{handle}` — per contractor, private
 
+End-state layout (Phase 3 onwards). In Phase 1 the test repo also carries local copies of `scripts/` and `templates/`; once Phase 3 lands reusable workflows, contractor repos hold only the thin caller workflows and reference the engine repo for scripts and templates.
+
 ```
 QuantEcon/contractor-{handle}/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
-│   │   └── hourly-timesheet.yml      (contract dropdown lists this contractor's active contracts)
+│   │   ├── hourly-timesheet.yml      (contract dropdown lists this contractor's active contracts)
+│   │   └── config.yml                (blank issues disabled)
 │   ├── workflows/
 │   │   ├── issue-to-pr.yml           (calls reusable from QuantEcon/timesheets)
 │   │   └── process-approved.yml      (calls reusable from QuantEcon/timesheets)
 │   └── CODEOWNERS                    (auto-requests admin on every PR)
-├── config/settings.yml               (contractor identity, admin, payments manager handles)
+├── config/settings.yml               (contractor identity, admin, payments manager handles, optional address)
 ├── contracts/<contract-id>.yml       (admin-edited; see §4)
 ├── submissions/<YYYY-MM>/*.yml       (auto-populated)
 ├── ledger/<contract-id>.yml          (auto-populated on merge)
-├── generated_pdfs/<YYYY-MM>/*.pdf    (auto-populated on merge)
+├── generated_pdfs/<YYYY-MM>/         (auto-populated)
+│   ├── <id>.pdf                      (authoritative — sent to payments manager)
+│   └── <id>.png                      (preview — embedded inline in PR body)
 └── README.md
 ```
 
@@ -115,22 +136,31 @@ contractor:
   name: Jane Doe
   github: janedoe
   email: jane.doe@example.com
+  address: |                                   # optional, multi-line
+    Research School of Economics
+    Australian National University
+    Canberra, ACT 2601
+    Australia
 
 admin: mmcky
-payments_manager: psl-payments-handle  # GitHub handle, used in @-mentions
+payments_manager: psl-payments-handle          # GitHub handle, used in @-mentions
 ```
 
-Written once by the onboarding script; rarely changes afterwards. Currency is **not** a global default — it lives on each contract (§4.2).
+Written once by the onboarding script; rarely changes afterwards.
+
+- **Currency** is not a global default — it lives on each contract (§4.2).
+- **Address** is optional but recommended for tax-invoice compliance (Australian tax invoices over $1,000 AUD must identify the supplier; address is one accepted way). Renders on the PDF only when populated.
+- **QuantEcon and PSL Foundation addresses** are not duplicated here — they live in the engine repo's `templates/branding.yml` as the single source of truth across all contractor repos.
 
 ### 4.2 `contracts/{contract-id}.yml` — contract terms
 
 ```yaml
-contract_id: jane-doe-hourly-2025
+contract_id: QE-PSL-2026-001
 type: hourly                  # hourly | milestone | (others later)
 status: active                # active | ended
 
-start_date: 2025-01-01
-end_date: 2025-12-31
+start_date: 2026-01-01
+end_date: 2026-12-31
 
 terms:
   hourly_rate: 45.00
@@ -140,8 +170,16 @@ terms:
 project: python-lectures      # free-form
 
 notes: |
-  Continuing from 2024 contract.
+  Continuing from 2025 contract.
 ```
+
+**Contract ID convention.** QuantEcon uses `QE-PSL-YYYY-NNN`:
+- `QE` — QuantEcon
+- `PSL` — PSL Foundation (paying entity)
+- `YYYY` — contract year
+- `NNN` — sequential within year, zero-padded
+
+The system doesn't enforce this format (it accepts any string), but the onboarding script will pre-fill it as the default when creating new contracts.
 
 One file per contract. To renew, the admin copies an existing contract file, edits the dates and rate, gives it a new `contract_id`, and marks the old one `ended`.
 
@@ -188,7 +226,7 @@ body:
       label: Contract
       description: Which contract does this timesheet apply to?
       options:
-        - jane-doe-hourly-2025   # populated by onboarding/new-contractor.py
+        - QE-PSL-2026-001   # populated by onboarding/new-contractor.py
     validations:
       required: true
 
@@ -198,10 +236,10 @@ body:
       label: Period
       description: Which month is this timesheet for?
       options:
-        - "2025-01"
-        - "2025-02"
+        - "2026-01"
+        - "2026-02"
         # ... twelve months for the current year
-        - "2025-12"
+        - "2026-12"
     validations:
       required: true
 
@@ -216,9 +254,9 @@ body:
         Hours may be fractional (e.g. 4.5). Descriptions may contain
         any text — the parser splits on the first two `|` only.
       placeholder: |
-        2025-01-06 | 3.5 | NumPy lecture exercises review
-        2025-01-13 | 5.0 | Plotting examples
-        2025-01-20 | 4.0 | CI pipeline fixes
+        2026-04-06 | 3.5 | NumPy lecture exercises review
+        2026-04-13 | 5.0 | Plotting examples
+        2026-04-20 | 4.0 | CI pipeline fixes
       render: text
     validations:
       required: true
@@ -355,9 +393,14 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Submission types | Hourly timesheets only | Invoices and reimbursements deferred. |
 | Per-contractor repo name | `QuantEcon/contractor-{github-handle}` | Future-proof for other contractor artefacts. |
 | Contract data | Plaintext YAML in each contractor's repo | Admin-edited by hand. |
-| Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list from this contractor's active contracts; admin edits on contract renewal. See §4.3. |
+| Contract ID convention | `QE-PSL-YYYY-NNN` | Documented in §4.2. System accepts any string; onboarding pre-fills this format. |
+| Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list; admin edits on contract renewal. |
+| Submission ID | `{handle}-timesheet-{period}` with `-v2`, `-v3` collision suffix | Period-based for readability; suffix handles re-submissions for the same period. v1.1 polish layer for explicit revision metadata (§8). |
 | Approval notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
-| PDF generation | Typst in CI; preview rendered at PR-creation time, regenerated at merge with approval metadata | Committed to `generated_pdfs/<YYYY-MM>/`. PR carries a "PENDING REVIEW" PDF so reviewers see what will be sent; merge replaces it with the approved version. |
+| PDF generation | Typst in CI; rendered at PR-creation, regenerated at merge with approval metadata | Committed to `generated_pdfs/<YYYY-MM>/`. PR carries a "PENDING REVIEW" PDF; merge replaces it with the approved version. |
+| PNG preview | Same template rendered to PNG; committed alongside the PDF | Embedded inline in the PR body via absolute raw URL so reviewers see the artifact in the PR description without leaving the review surface. Default 200 PPI, `--png-ppi` overrides. |
+| Branding addresses | `templates/branding.yml` (engine repo) | PSL Foundation address baked in; QuantEcon has no address. Single source across all contractor repos. |
+| Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Renders on the PDF only when populated. Recommended for tax-invoice compliance. |
 | Ledger / running totals | Yes | One `ledger/<contract-id>.yml` per contract; updated on merge. |
 | Onboarding | Interactive Python script | See §5. |
 | Encryption at rest | None | Each repo is one contractor; blast radius is naturally scoped. |
@@ -373,10 +416,11 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 
 1. Contractor opens `github.com/QuantEcon/contractor-{theirhandle}` (bookmarked).
 2. *Issues → New Issue → 📋 Hourly Timesheet → fill out form → submit.*
-3. `issue-to-pr.yml` parses the form, writes the submission YAML in `submissions/<YYYY-MM>/`, renders a "PENDING REVIEW" PDF in `generated_pdfs/<YYYY-MM>/`, opens a PR carrying both and linking the issue.
+3. `issue-to-pr.yml` parses the form, writes the submission YAML in `submissions/<YYYY-MM>/`, renders the "PENDING REVIEW" PDF and a PNG preview in `generated_pdfs/<YYYY-MM>/`, opens a PR with the PNG embedded inline in the description.
 4. CODEOWNERS auto-requests review from admin. Contractor + admin get notifications.
-5. Corrections: contractor edits the PR branch directly, or admin requests changes via PR review.
-6. Admin approves and merges.
+5. Reviewer sees the PNG inline in the PR; clicks through to the PDF if they want the authoritative artifact.
+6. Corrections: contractor edits the PR branch directly, or admin requests changes via PR review.
+7. Admin approves and merges.
 
 ### 7.2 On merge
 
@@ -414,26 +458,33 @@ No CLI, no ceremony. One additional file to edit beyond the contract YAML (the f
 - [ ] Resolve open items in §10 (payments manager handle, admin handle/team, org-level reusable-workflow setting, runner-minutes budget)
 
 ### Phase 1 — Timesheets engine in a single test repo ✅
-Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub. PDF preview rendering added late in Phase 1 (originally Phase 2) so reviewers see the actual artifact during PR review.
-- [x] Create `QuantEcon/contractor-engine-test` (private, disposable) with a hand-written `config/settings.yml` and one `contracts/*.yml` for testing
-- [x] `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — submission form (§4.3)
-- [x] `.github/ISSUE_TEMPLATE/config.yml` — disable blank issues
-- [x] `scripts/parse_issue.py` — parser with lenient input handling and line-specific errors (§4.3, §4.4)
-- [x] `tests/test_parse_issue.py` — unit tests covering malformed inputs and edge cases
-- [x] `scripts/create_submission_pr.py` — branch + commit + PR via `gh`; renders and commits PDF alongside YAML
-- [x] `scripts/post_error_comment.py` — sentinel-marked error comment on parse failure; updates in place on re-run (§4.4)
-- [x] `templates/timesheet.typ` — Typst template (single-page A4, logos, time-entries table, totals panel, conditional approval block); pulled forward from Phase 2
+Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub. PDF + PNG preview rendering pulled forward from Phase 2 so reviewers see the actual artifact during PR review.
+
+Engine scripts and templates:
+- [x] `scripts/parse_issue.py` + tests — parser with lenient input handling and line-specific errors (§4.3, §4.4)
+- [x] `scripts/create_submission_pr.py` + tests — period-based submission IDs with `-vN` collision suffix; renders PDF + PNG; opens PR with the PNG embedded inline in the body
+- [x] `scripts/post_error_comment.py` + tests — sentinel-marked error comment on parse failure; updates in place on re-run
+- [x] `scripts/generate_pdf.py` — Typst PDF + PNG with currency-aware display formatting; configurable PNG PPI
+- [x] `templates/timesheet.typ` — single-page A4 template fitting up to 31 entries (worst-case month)
+- [x] `templates/branding.yml` — PSL Foundation address; single source for both organisations
 - [x] `templates/assets/{quantecon,psl-foundation}-logo.png` — branding
-- [x] `scripts/generate_pdf.py` — stages temp working dir, invokes `typst compile`, currency-aware display formatting; pulled forward from Phase 2
-- [x] `.github/workflows/issue-to-pr.yml` (in-place, non-reusable) — wires parse → PR-or-error-comment, triggers on `issues: opened` and `issues: edited`; installs Typst 0.13.0 binary via curl
-- [x] End-to-end test: valid issue → PR with YAML + PDF appears; invalid issue → error comment posted; edited issue with fix → PR appears, error comment cleared, label removed
+
+Form, workflow, test repo:
+- [x] `contractor-template/.github/ISSUE_TEMPLATE/hourly-timesheet.yml` + `config.yml` (§4.3)
+- [x] `contractor-template/.github/workflows/issue-to-pr.yml` — non-reusable Phase 1 form; installs Typst 0.13.0 via curl
+- [x] `QuantEcon/contractor-engine-test` (private, disposable) seeded with the above + a hand-written `config/settings.yml` and one `contracts/QE-PSL-2026-001.yml`
+- [x] End-to-end verified: valid submission → PR with YAML + PDF + PNG; invalid → sentinel error comment + label; edit-to-fix → state cleaned up; revision (same period re-submit) → `-v2` suffix applied
+
+Project scaffold:
+- [x] `pyproject.toml`, `.gitignore`, `tests/` (80 unit tests passing across three files)
 
 ### Phase 2 — Merge processing
-- [ ] Re-render the PDF with approval metadata baked in (approver handle, approval date) — replaces the "PENDING REVIEW" block with "APPROVED BY @... ON ..." in the same `generated_pdfs/<period>/<id>.pdf` location
-- [ ] `scripts/update_ledger.py` — append/update `ledger/<contract-id>.yml` with totals from the merged submission
-- [ ] `scripts/notify.py` — comment on the now-closed issue tagging `@payments_manager` with PDF/artifact links
-- [ ] `.github/workflows/process-approved.yml` — orchestrates the above on PR merge
-- [ ] End-to-end test: merge a PR → ledger updated, PDF regenerated with approval block, payments-manager notified
+On PR merge, the workflow runs `process-approved.yml`. Three pieces of work:
+- [ ] **Re-render PDF + PNG with approval metadata baked in.** `approved_by` and `approved_date` get set from the merge event; the same template renders with the approval block now in the "APPROVED BY @... ON ..." state (green) replacing the "PENDING REVIEW" (amber) block. Overwrites the existing files in `generated_pdfs/<period>/`.
+- [ ] **`scripts/update_ledger.py`** — append the merged submission to `ledger/<contract-id>.yml` with running totals (hours, amount, currency).
+- [ ] **`scripts/notify.py`** — comment on the now-closed issue tagging `@payments_manager` with the contractor's real name, period, total, and a link to the approved PDF.
+- [ ] **`.github/workflows/process-approved.yml`** — orchestrates the above on PR merge; applies a `processed` label.
+- [ ] End-to-end test: merge a PR in `contractor-engine-test` → ledger updated, PDFs/PNGs regenerated with approval block, payments-manager comment posted, label applied.
 
 ### Phase 3 — Reusable workflows + contractor-template + onboarding
 - [ ] Convert both workflows to `workflow_call` reusable form
@@ -487,13 +538,18 @@ The accounting principle is what governs this: every issued invoice number stays
 |---|---|---|
 | Repo topology | Per-contractor private repos `QuantEcon/contractor-{handle}` | Privacy by construction; future-proof name. |
 | Contract / contractor data | Plaintext YAML in each contractor's repo (`config/settings.yml` + `contracts/*.yml`) | Co-located with submissions; admin-edited by hand. |
+| Contract ID convention | `QE-PSL-YYYY-NNN` | QuantEcon's existing numbering scheme. System accepts any string; onboarding pre-fills this format. |
 | Shared logic | Reusable workflows + scripts in `QuantEcon/timesheets` | Single source of truth. |
 | Onboarding | Interactive Python script `onboarding/new-contractor.py` | Asks the right questions; populates the repo cleanly. |
+| Submission ID | `{handle}-timesheet-{period}` with `-vN` collision suffix | Period-based for readability; suffix on collision handles revisions. v1.1 layer adds explicit supersede metadata. |
 | Notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
 | v1 submission types | Hourly timesheets only | Prove the loop end-to-end on the simplest case. |
 | Ledger in v1 | Yes | Cheap now; expensive to backfill later. |
 | Encryption at rest | None | Each repo holds one contractor's data; access is naturally scoped. Revisit if a centralized store is later built. |
 | Currency | Per-contract field; AUD / USD / JPY in v1 | QuantEcon already has real contractors in all three. Currency lives on each contract; PDF renders ISO code as suffix, no symbols; JPY without decimals. |
+| Reviewer-facing artifact | PDF (authoritative) + PNG preview (inline in PR body) | GitHub doesn't render PDFs in PR diffs; images do. PNG embed closes the review loop without leaving the PR; PDF is what the payments manager receives. |
+| Branding addresses | `templates/branding.yml` (engine repo) | Single source across contractor repos. PSL Foundation address baked in; QuantEcon logo-only. |
+| Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Recommended for tax-invoice compliance; renders only when populated. No bank/tax-ID data ever — that policy carries through from earlier. |
 | External Actions | None on the financial-data path | Inherited from source issue. |
 
 ---
@@ -522,7 +578,13 @@ The accounting principle is what governs this: every issued invoice number stays
 ## 12. Working notes
 
 - Local working dirs:
-  - `/Users/mmcky/work/quantecon/timesheets/` (this repo)
-  - `/Users/mmcky/work/quantecon/contractor-{handle}/` (per-contractor, cloned as needed)
-- Local toolchain: `typst` (`brew install typst`), Python 3.12+, `gh` CLI.
+  - `/Users/mmcky/work/quantecon/timesheets/` (engine, this repo)
+  - `/Users/mmcky/work/quantecon/contractor-engine-test/` (Phase 1/2 test repo)
+  - `/Users/mmcky/work/quantecon/contractor-onboarding-test/` (Phase 3 — not yet created)
+  - `/Users/mmcky/work/quantecon/contractor-{handle}/` (real contractors, post-Phase 4)
+- Local toolchain: `typst` (`brew install typst`), Python 3.12+, `gh` CLI, `pypdf` (dev — used to assert single-page output in worst-case tests).
+- Running the engine locally:
+  - Tests: `pytest tests/` (80 cases, ~0.1s).
+  - Render a PDF from a submission YAML: `python -m scripts.generate_pdf --submission ... --settings ... --templates templates --output ...`.
+  - Engine scripts assume the module-form invocation (`python -m scripts.create_submission_pr ...`) because `create_submission_pr` imports from `scripts.generate_pdf`.
 - This `PLAN.md` is the source of truth for the project plan. Update it in PRs as decisions evolve.
