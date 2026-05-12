@@ -1,0 +1,95 @@
+name: Issue to PR
+
+# Phase 1: in-place, non-reusable workflow that runs entirely within the
+# contractor repo. The Python scripts and the contractor's contract YAML
+# both live in this repo. Phase 3 will refactor this file into a thin
+# caller of a reusable workflow in QuantEcon/timesheets.
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  process:
+    # Only run for actual timesheet submissions (form-applied label).
+    if: contains(github.event.issue.labels.*.name, 'timesheet')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Check out the contractor repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Write issue body to file
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: printf '%s' "$ISSUE_BODY" > /tmp/issue_body.md
+
+      - name: Parse the issue
+        id: parse
+        run: |
+          python scripts/parse_issue.py \
+            --body-file /tmp/issue_body.md \
+            --output-json /tmp/submission.json \
+            --output-errors-json /tmp/errors.json \
+            || true
+          if [ -f /tmp/submission.json ]; then
+            echo "parse_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "parse_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create submission PR (on parse success)
+        if: steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_CREATED_AT: ${{ github.event.issue.created_at }}
+        run: |
+          SUBMITTED_DATE="$(date -u -d "$ISSUE_CREATED_AT" '+%Y-%m-%d')"
+          python scripts/create_submission_pr.py \
+            --submission-file /tmp/submission.json \
+            --errors-file /tmp/errors.json \
+            --issue-number "$ISSUE_NUMBER" \
+            --issue-author "$ISSUE_AUTHOR" \
+            --issue-title "$ISSUE_TITLE" \
+            --submitted-date "$SUBMITTED_DATE"
+
+      - name: Clear any prior error state (on parse success)
+        if: steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python scripts/post_error_comment.py clear \
+            --issue "$ISSUE_NUMBER"
+
+      - name: Post parse-error comment (on parse failure)
+        if: steps.parse.outputs.parse_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python scripts/post_error_comment.py post \
+            --errors-file /tmp/errors.json \
+            --issue "$ISSUE_NUMBER"
