@@ -1,0 +1,104 @@
+name: 📋 Hourly Timesheet
+description: Submit a monthly timesheet for hours worked on an hourly contract.
+title: "Timesheet submission"
+labels: ["timesheet", "pending-review"]
+
+# NOTE: This file is a template. It contains `$CONTRACT_OPTIONS` placeholder
+# substituted by onboarding/new-contractor.py into a real options list when
+# seeded into a new contractor repo. As-is, this file will NOT load as valid
+# YAML — that is intentional. See PLAN.md §4.3 and §5.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Hourly Timesheet Submission
+
+        Fill out the fields below. On submission, a Pull Request will be
+        automatically created with the structured data. An admin will
+        review and merge; on merge a PDF is generated and the payments
+        manager is notified.
+
+        **Corrections after submitting:** edit this issue (the PR will
+        be regenerated), or edit the PR branch directly if you're
+        comfortable with git.
+
+        Need help? See the
+        [Contractor Guide](https://github.com/QuantEcon/timesheets/blob/main/docs/CONTRACTOR_GUIDE.md).
+
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Contract
+      description: Which contract does this timesheet apply to?
+      options:
+$CONTRACT_OPTIONS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: period
+    attributes:
+      label: Period
+      description: Which month is this timesheet for?
+      options:
+        - "2025-01"
+        - "2025-02"
+        - "2025-03"
+        - "2025-04"
+        - "2025-05"
+        - "2025-06"
+        - "2025-07"
+        - "2025-08"
+        - "2025-09"
+        - "2025-10"
+        - "2025-11"
+        - "2025-12"
+        - "2026-01"
+        - "2026-02"
+        - "2026-03"
+        - "2026-04"
+        - "2026-05"
+        - "2026-06"
+        - "2026-07"
+        - "2026-08"
+        - "2026-09"
+        - "2026-10"
+        - "2026-11"
+        - "2026-12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: entries
+    attributes:
+      label: Time Entries
+      description: |
+        Enter one row per day worked, in the format:
+        `YYYY-MM-DD | hours | description`
+
+        Hours may be fractional (e.g. 4.5). Descriptions may contain any
+        text — the parser splits on the first two `|` only.
+      placeholder: |
+        2026-04-06 | 3.5 | Reviewed NumPy lecture exercises
+        2026-04-13 | 5.0 | Developed plotting examples
+        2026-04-20 | 4.0 | Fixed CI pipeline issues
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes (optional)
+      placeholder: e.g. "Travel time on the 15th not included."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm that the hours and descriptions above are accurate.
+          required: true
