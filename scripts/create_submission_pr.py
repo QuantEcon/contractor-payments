@@ -37,12 +37,34 @@ from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_
 
 # ─── Pure data transformations (testable) ───────────────────────────────────
 
-def generate_submission_id(github_handle: str, issue_number: int) -> str:
-    """Stable ID derived from submitter + issue number.
+def generate_submission_id(github_handle: str, period: str) -> str:
+    """Period-based submission ID, e.g. `mmcky-timesheet-2026-06`.
 
-    Issue numbers are unique within a repo so there's no collision risk.
+    Pure function — does not check for collisions. Use
+    `resolve_collision_suffix` against the working tree to apply a
+    `-v2`, `-v3` suffix when a submission for the same period already
+    exists (see PLAN §v1.1 for the revision/supersede rationale).
     """
-    return f"{github_handle}-timesheet-{issue_number}"
+    return f"{github_handle}-timesheet-{period}"
+
+
+def resolve_collision_suffix(repo_root: Path, base_id: str, period: str) -> str:
+    """Walk the repo's `submissions/<period>/` directory and return the
+    first un-used variant of `base_id` (the bare ID, then `-v2`, `-v3`, …).
+
+    Only the working tree's main is consulted; in-flight branch state
+    isn't considered (we expect collisions only after the prior submission
+    was approved and merged).
+    """
+    submissions_dir = repo_root / "submissions" / period
+    if not submissions_dir.exists():
+        return base_id
+    candidate = base_id
+    n = 2
+    while (submissions_dir / f"{candidate}.yml").exists():
+        candidate = f"{base_id}-v{n}"
+        n += 1
+    return candidate
 
 
 def format_currency_amount(amount: float, currency: str) -> float | int:
@@ -61,6 +83,7 @@ def enrich_submission(
     contract: dict,
     *,
     submitter: str,
+    submission_id: str,
     issue_number: int,
     submitted_date: str,
 ) -> dict:
@@ -68,6 +91,11 @@ def enrich_submission(
 
     Returns a fully-formed submission dict ready to be written as YAML.
     Raises ValueError if the contract is malformed or the type doesn't match.
+
+    The submission_id is computed by the caller (so it can apply collision
+    suffixes by inspecting the working tree). The contract's start_date /
+    end_date are folded into the enriched submission so the PDF template can
+    show the contract's active window without a second file read at render.
     """
     contract_id_in_submission = submission["contract_id"]
     contract_id_in_contract = contract.get("contract_id")
@@ -98,8 +126,10 @@ def enrich_submission(
     rate_display = format_currency_amount(hourly_rate, currency)
 
     enriched = {
-        "submission_id": generate_submission_id(submitter, issue_number),
+        "submission_id": submission_id,
         "contract_id": contract_id_in_submission,
+        "contract_start_date": contract.get("start_date"),
+        "contract_end_date": contract.get("end_date"),
         "type": "timesheet",
         "period": submission["period"],
         "submitted_date": submitted_date,
@@ -168,6 +198,9 @@ def render_pr_body(
 
 
 def branch_name_for_issue(issue_number: int) -> str:
+    """Branch names stay issue-numbered so re-firing the workflow on an
+    edit lands on the same branch (collision-free without filesystem
+    lookups). The submission_id inside the branch is period-based."""
     return f"submission/issue-{issue_number}"
 
 
@@ -344,10 +377,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     contract = load_contract(repo_root, parsed["contract_id"])
 
+    base_id = generate_submission_id(args.issue_author, parsed["period"])
+    submission_id = resolve_collision_suffix(repo_root, base_id, parsed["period"])
+    if submission_id != base_id:
+        print(
+            f"Submission ID collision detected on `{base_id}` — using `{submission_id}`. "
+            f"This is a revision; see PLAN §v1.1 for the manual supersede workflow.",
+            file=sys.stderr,
+        )
+
     submission = enrich_submission(
         parsed,
         contract,
         submitter=args.issue_author,
+        submission_id=submission_id,
         issue_number=args.issue_number,
         submitted_date=args.submitted_date,
     )

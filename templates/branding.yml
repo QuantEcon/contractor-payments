@@ -1,0 +1,20 @@
+# branding.yml — addresses + identity for both organisations on the PDF.
+#
+# Single source of truth across every contractor repo. Edit here if either
+# organisation moves; the change flows through the next time any timesheet
+# is rendered.
+#
+# Set `address` to null to render the logo without an address block (the
+# current arrangement for QuantEcon).
+
+psl_foundation:
+  name: PSL Foundation
+  address: |
+    2108 Greene Street
+    PO Box 50932
+    Columbia, SC 29250
+    United States
+
+quantecon:
+  name: QuantEcon
+  address: null

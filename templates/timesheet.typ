@@ -8,12 +8,14 @@
 //
 // Required data fields:
 //   submission_id (str), contract_id (str), type (str), period (str),
+//   contract_start_date (str ISO), contract_end_date (str ISO),
 //   submitted_date (str ISO), submitted_by (str), issue_number (int),
 //   entries (list of {date, hours, description, hours_display}),
 //   totals ({hours_display, rate_display, amount_display}),
 //   notes (str, may be empty), status (str),
 //   approved_by (str or none), approved_date (str ISO or none),
-//   contractor ({name, github, email}).
+//   contractor ({name, github, email, address (optional)}),
+//   branding ({psl_foundation: {name, address}, quantecon: {name, address}}).
 
 #let data = yaml("data.yml")
 
@@ -48,25 +50,44 @@
 ]
 #let value(content) = text(size: 10pt, weight: "regular")[#content]
 
-// ── Header: logos + title ─────────────────────────────────────────────────
+// ── Header: PSL logo + address (left), title (centre), QuantEcon logo (right) ─
+#let psl_address = data.at("branding", default: (:)).at("psl_foundation", default: (:)).at("address", default: none)
+#let qe_address  = data.at("branding", default: (:)).at("quantecon",       default: (:)).at("address", default: none)
+
 #grid(
-  columns: (1fr, 1fr),
-  align: (left + horizon, right + horizon),
-  image("assets/quantecon-logo.png", height: 1.1cm),
-  image("assets/psl-foundation-logo.png", height: 1.1cm),
+  columns: (1.2fr, 2fr, 1.2fr),
+  column-gutter: 1em,
+  align: (left + top, center + horizon, right + top),
+  // Left: PSL logo stacked over its address
+  block[
+    #image("assets/psl-foundation-logo.png", height: 1.1cm)
+    #if psl_address != none [
+      #v(0.15cm)
+      #text(size: 8.5pt, fill: muted)[#psl_address]
+    ]
+  ],
+  // Centre: title (vertically centred within the header band)
+  text(size: 18pt, weight: "bold", fill: primary, tracking: 1pt)[HOURLY TIMESHEET],
+  // Right: QuantEcon logo (no address by default)
+  block[
+    #image("assets/quantecon-logo.png", height: 1.1cm)
+    #if qe_address != none [
+      #v(0.15cm)
+      #text(size: 8.5pt, fill: muted)[#qe_address]
+    ]
+  ],
 )
-
-#v(0.1cm)
-
-#align(center)[
-  #text(size: 18pt, weight: "bold", fill: primary, tracking: 1pt)[
-    HOURLY TIMESHEET
-  ]
-]
 
 #v(0.25cm)
 
 // ── Metadata band ─────────────────────────────────────────────────────────
+#let contractor_address = data.contractor.at("address", default: none)
+#let contract_window = if data.at("contract_start_date", default: none) != none and data.at("contract_end_date", default: none) != none {
+  [#data.contract_start_date → #data.contract_end_date]
+} else {
+  [—]
+}
+
 #block(
   width: 100%,
   inset: (x: 0pt, y: 5pt),
@@ -82,16 +103,19 @@
     value[#data.contract_id],
     value[#data.submission_id],
     value[#data.contractor.email · `@`#data.contractor.github],
-    value[Period #data.period],
-    value[Submitted #data.submitted_date · `@`#data.submitted_by],
+    value[#contract_window],
+    value[Period #data.period · submitted #data.submitted_date],
+    // Optional 4th row for the contractor address. Only the contractor cell
+    // gets a value; the other cells stay empty.
+    if contractor_address != none {
+      value[#text(size: 9pt)[#contractor_address]]
+    } else { [] },
+    [],
+    [],
   ),
 )
 
 #v(0.3cm)
-
-// ── Time entries table ────────────────────────────────────────────────────
-#text(size: 10pt, weight: "bold", fill: primary)[Time Entries]
-#v(0.15cm)
 
 #let header_row = (
   [#label("Date")],

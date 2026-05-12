@@ -447,6 +447,24 @@ Built everything against `QuantEcon/contractor-engine-test`. All three flows (va
 - [ ] `docs/ADMIN_GUIDE.md` (onboarding runbook, editing contracts, troubleshooting)
 - [ ] Onboard a small number of real contractors; iterate on friction
 
+### v1.1 — Revision / supersede handling (build when first real correction happens)
+
+If an approved (merged) timesheet turns out to be wrong, the right move is to **supersede** the original with a corrected version rather than cancel or rewrite git history. Phase 1 already lays the groundwork — period-based submission IDs with `-v2`, `-v3` collision suffix — so a correction just means opening a new issue for the same period. The collision suffix takes care of the ID.
+
+The v1 baseline: when a correction is needed, admin opens a new issue, the workflow auto-suffixes the submission ID, the second PR carries a corrected YAML + PDF, admin merges. Manual reconciliation otherwise. No special revision detection in code.
+
+v1.1 builds the polish layer once we know what real corrections look like in practice:
+
+- [ ] Detect that a `-vN` submission is a revision: when the `-v2` (or higher) suffix is applied, set `supersedes: <original-id>` in the submission YAML.
+- [ ] Render a **"REVISION — supersedes &lt;original-id&gt;"** banner at the top of the PDF when `supersedes` is set.
+- [ ] On merge of a revision PR, update the original YAML on `main` with `status: superseded` and `superseded_by: <new-id>`.
+- [ ] Auto-comment on the superseded (closed) PR with a link to the revision.
+- [ ] Adjust the on-merge notification language for the payments manager: "Revision of earlier submission — please use this version."
+
+Rationale for deferring: corrections are rare; the right workflow shape is informed by real cases (how often, who initiates, before-or-after-payment). The Phase 1 collision suffix handles the rare case without ceremony. We build the polish when there's volume to justify it.
+
+The accounting principle is what governs this: every issued invoice number stays a record, even after correction. Cancellation isn't a thing in good practice — supersession is. Cash-side reconciliation for already-paid invoices stays a manual process outside the timesheet system.
+
 ### v2+ (future, in scope of this PLAN if needed)
 - Milestone invoice form
 - Reimbursement form (revisit receipt storage)

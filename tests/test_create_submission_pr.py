@@ -13,6 +13,7 @@ from scripts.create_submission_pr import (
     format_currency_amount,
     generate_submission_id,
     render_pr_body,
+    resolve_collision_suffix,
 )
 
 
@@ -20,7 +21,7 @@ from scripts.create_submission_pr import (
 
 PARSED_SAMPLE = {
     "type": "timesheet",
-    "contract_id": "jane-doe-hourly-2025",
+    "contract_id": "QE-PSL-2025-001",
     "period": "2025-01",
     "entries": [
         {"date": "2025-01-06", "hours": 3.5, "description": "NumPy review"},
@@ -32,7 +33,7 @@ PARSED_SAMPLE = {
 }
 
 CONTRACT_HOURLY_AUD = {
-    "contract_id": "jane-doe-hourly-2025",
+    "contract_id": "QE-PSL-2025-001",
     "type": "hourly",
     "status": "active",
     "start_date": "2025-01-01",
@@ -48,11 +49,41 @@ CONTRACT_HOURLY_AUD = {
 # ─── Submission ID ──────────────────────────────────────────────────────────
 
 class TestGenerateSubmissionId:
-    def test_combines_handle_and_issue(self):
-        assert generate_submission_id("janedoe", 42) == "janedoe-timesheet-42"
+    def test_period_based(self):
+        assert generate_submission_id("janedoe", "2026-06") == "janedoe-timesheet-2026-06"
 
     def test_handle_with_dashes_preserved(self):
-        assert generate_submission_id("jane-doe", 7) == "jane-doe-timesheet-7"
+        assert generate_submission_id("jane-doe", "2025-12") == "jane-doe-timesheet-2025-12"
+
+
+class TestResolveCollisionSuffix:
+    def test_no_collision_returns_base(self, tmp_path):
+        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
+        assert result == "janedoe-timesheet-2026-06"
+
+    def test_first_collision_yields_v2(self, tmp_path):
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
+        assert result == "janedoe-timesheet-2026-06-v2"
+
+    def test_second_collision_yields_v3(self, tmp_path):
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        (period_dir / "janedoe-timesheet-2026-06-v2.yml").touch()
+        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
+        assert result == "janedoe-timesheet-2026-06-v3"
+
+    def test_different_handle_no_collision(self, tmp_path):
+        """Collisions are per-handle; another contractor's submission in the
+        same period doesn't trigger a suffix."""
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "alice-timesheet-2026-06.yml").touch()
+        result = resolve_collision_suffix(tmp_path, "bob-timesheet-2026-06", "2026-06")
+        assert result == "bob-timesheet-2026-06"
 
 
 # ─── Currency formatting ────────────────────────────────────────────────────
@@ -75,14 +106,23 @@ class TestCurrencyFormatting:
 
 # ─── Enrichment ─────────────────────────────────────────────────────────────
 
+def _enrich(parsed=PARSED_SAMPLE, contract=CONTRACT_HOURLY_AUD, **overrides):
+    """Helper: enrich with sensible defaults so individual tests stay focused."""
+    kwargs = dict(
+        submitter="janedoe",
+        submission_id="janedoe-timesheet-2025-01",
+        issue_number=42,
+        submitted_date="2025-02-01",
+    )
+    kwargs.update(overrides)
+    return enrich_submission(parsed, contract, **kwargs)
+
+
 class TestEnrichSubmission:
     def test_basic_enrichment(self):
-        result = enrich_submission(
-            PARSED_SAMPLE, CONTRACT_HOURLY_AUD,
-            submitter="janedoe", issue_number=42, submitted_date="2025-02-01",
-        )
-        assert result["submission_id"] == "janedoe-timesheet-42"
-        assert result["contract_id"] == "jane-doe-hourly-2025"
+        result = _enrich()
+        assert result["submission_id"] == "janedoe-timesheet-2025-01"
+        assert result["contract_id"] == "QE-PSL-2025-001"
         assert result["type"] == "timesheet"
         assert result["period"] == "2025-01"
         assert result["submitted_date"] == "2025-02-01"
@@ -92,11 +132,13 @@ class TestEnrichSubmission:
         assert result["approved_by"] is None
         assert result["approved_date"] is None
 
+    def test_contract_dates_included(self):
+        result = _enrich()
+        assert result["contract_start_date"] == "2025-01-01"
+        assert result["contract_end_date"] == "2025-12-31"
+
     def test_totals_computed_correctly(self):
-        result = enrich_submission(
-            PARSED_SAMPLE, CONTRACT_HOURLY_AUD,
-            submitter="janedoe", issue_number=42, submitted_date="2025-02-01",
-        )
+        result = _enrich()
         # 8.5 hours * 45.00 AUD = 382.50
         assert result["totals"]["hours"] == 8.5
         assert result["totals"]["rate"] == 45.00
@@ -108,69 +150,51 @@ class TestEnrichSubmission:
             **CONTRACT_HOURLY_AUD,
             "terms": {"hourly_rate": 5000, "currency": "JPY", "max_hours_per_month": 40},
         }
-        result = enrich_submission(
-            PARSED_SAMPLE, contract,
-            submitter="janedoe", issue_number=1, submitted_date="2025-02-01",
-        )
+        result = _enrich(contract=contract)
         # 8.5 * 5000 = 42500
         assert result["totals"]["amount"] == 42500
         assert isinstance(result["totals"]["amount"], int)
         assert result["totals"]["currency"] == "JPY"
 
     def test_entries_preserved(self):
-        result = enrich_submission(
-            PARSED_SAMPLE, CONTRACT_HOURLY_AUD,
-            submitter="janedoe", issue_number=42, submitted_date="2025-02-01",
-        )
+        result = _enrich()
         assert result["entries"] == PARSED_SAMPLE["entries"]
 
     def test_notes_preserved(self):
         parsed = {**PARSED_SAMPLE, "notes": "Travel time excluded."}
-        result = enrich_submission(
-            parsed, CONTRACT_HOURLY_AUD,
-            submitter="x", issue_number=1, submitted_date="2025-02-01",
-        )
+        result = _enrich(parsed=parsed)
         assert result["notes"] == "Travel time excluded."
 
     def test_contract_id_mismatch_raises(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "contract_id": "different-id"}
         with pytest.raises(ValueError, match="mismatch"):
-            enrich_submission(
-                PARSED_SAMPLE, bad_contract,
-                submitter="x", issue_number=1, submitted_date="2025-02-01",
-            )
+            _enrich(contract=bad_contract)
 
     def test_non_hourly_contract_raises(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "type": "milestone"}
         with pytest.raises(ValueError, match="only `hourly` is supported"):
-            enrich_submission(
-                PARSED_SAMPLE, bad_contract,
-                submitter="x", issue_number=1, submitted_date="2025-02-01",
-            )
+            _enrich(contract=bad_contract)
 
     def test_missing_terms_raises(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "terms": {"hourly_rate": 45.00}}
         with pytest.raises(ValueError, match="missing required terms"):
-            enrich_submission(
-                PARSED_SAMPLE, bad_contract,
-                submitter="x", issue_number=1, submitted_date="2025-02-01",
-            )
+            _enrich(contract=bad_contract)
 
 
 # ─── PR body ────────────────────────────────────────────────────────────────
 
 class TestRenderPrBody:
     def _sample_submission(self) -> dict:
-        return enrich_submission(
-            PARSED_SAMPLE, CONTRACT_HOURLY_AUD,
-            submitter="janedoe", issue_number=42, submitted_date="2025-02-01",
-        )
+        return _enrich()
+
+    def _path(self) -> str:
+        return "submissions/2025-01/janedoe-timesheet-2025-01.yml"
 
     def test_closes_issue(self):
         body = render_pr_body(
             issue_number=42, submitter="janedoe",
             submission=self._sample_submission(),
-            submission_path_rel="submissions/2025-01/janedoe-timesheet-42.yml",
+            submission_path_rel=self._path(),
         )
         assert "Closes #42" in body
 
@@ -178,7 +202,7 @@ class TestRenderPrBody:
         body = render_pr_body(
             issue_number=42, submitter="janedoe",
             submission=self._sample_submission(),
-            submission_path_rel="submissions/2025-01/janedoe-timesheet-42.yml",
+            submission_path_rel=self._path(),
         )
         assert "382.5" in body or "382.50" in body
         assert "AUD" in body
@@ -188,7 +212,7 @@ class TestRenderPrBody:
         body = render_pr_body(
             issue_number=42, submitter="janedoe",
             submission=self._sample_submission(),
-            submission_path_rel="submissions/2025-01/janedoe-timesheet-42.yml",
+            submission_path_rel=self._path(),
             warnings=[{"message": "Used `,` as separator — please use `|` next time."}],
         )
         assert "Parse warnings" in body
@@ -198,7 +222,7 @@ class TestRenderPrBody:
         body = render_pr_body(
             issue_number=42, submitter="janedoe",
             submission=self._sample_submission(),
-            submission_path_rel="submissions/2025-01/janedoe-timesheet-42.yml",
+            submission_path_rel=self._path(),
             warnings=[],
         )
         assert "Parse warnings" not in body

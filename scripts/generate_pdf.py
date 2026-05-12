@@ -111,15 +111,27 @@ def _stage_working_dir(template_dir: Path, data: dict) -> Path:
 DEFAULT_PNG_PPI = 200  # Higher than Typst's 144 default for crisp inline preview.
 
 
-def _load_data(submission_path: Path, settings_path: Path) -> dict:
-    """Load submission + settings and produce the data dict the template wants."""
+def _load_data(submission_path: Path, settings_path: Path, template_dir: Path) -> dict:
+    """Load submission + settings + branding into the data dict the template wants."""
     with open(submission_path, encoding="utf-8") as f:
         submission = yaml.safe_load(f)
     with open(settings_path, encoding="utf-8") as f:
         settings = yaml.safe_load(f)
+    branding = _load_branding(template_dir)
     data = _merge_contractor(submission, settings)
+    data["branding"] = branding
     data = _add_display_strings(data)
     return data
+
+
+def _load_branding(template_dir: Path) -> dict:
+    """Load templates/branding.yml. Returns an empty dict if the file is missing
+    (so the template can render with logo-only headers in dev environments)."""
+    branding_path = template_dir / "branding.yml"
+    if not branding_path.exists():
+        return {}
+    with open(branding_path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def _run_typst(staged_typ: Path, output_path: Path, fmt: str, ppi: Optional[int]) -> None:
@@ -153,7 +165,7 @@ def render_submission_pdf(
     output_path: Path,
 ) -> None:
     """Render `submission_path` into a PDF at `output_path`."""
-    data = _load_data(submission_path, settings_path)
+    data = _load_data(submission_path, settings_path, template_dir)
     staged_typ = _stage_working_dir(template_dir, data)
     _run_typst(staged_typ, output_path, fmt="pdf", ppi=None)
 
@@ -166,7 +178,7 @@ def render_submission_png(
     ppi: int = DEFAULT_PNG_PPI,
 ) -> None:
     """Render `submission_path` into a PNG at `output_path` (single page)."""
-    data = _load_data(submission_path, settings_path)
+    data = _load_data(submission_path, settings_path, template_dir)
     staged_typ = _stage_working_dir(template_dir, data)
     _run_typst(staged_typ, output_path, fmt="png", ppi=ppi)
 
