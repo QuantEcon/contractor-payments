@@ -52,10 +52,11 @@ And these org-level Variables (already done):
 
 ---
 
-## Step 1 — Pick or provision the service-account mailbox
+## Step 1 — Pick the sending identity
 
-Decide on the sending mailbox address. Conventions to choose from (using
-`<your-domain>` as a placeholder for your Workspace domain):
+You need a "From" address for outgoing approval emails. Conventions to
+choose from (using `<your-domain>` as a placeholder for your Workspace
+domain):
 
 - `services@<your-domain>` — neutral, suggests an automated service
 - `automation@<your-domain>` — explicit about what it is
@@ -66,17 +67,39 @@ Decide on the sending mailbox address. Conventions to choose from (using
 **Recommendation:** `services@<your-domain>`. It's not jurisdiction-specific
 (unlike `payments@`) and reads naturally on the recipient's side.
 
-If the mailbox doesn't exist yet:
+### Three ways to make this address work
 
-1. Go to <https://admin.google.com/> → **Directory** → **Users** → **Add new user**.
-2. Create the account. Note: this counts as a Google Workspace seat ($6/month
-   on Business Starter). Or, if QuantEcon has a Google Group set up as an
-   address, you can use that instead (no extra seat needed — but the app
-   password approach below requires a real account, not a group).
-3. Set a strong, randomly-generated password (you won't need to remember it
-   after Step 3, but lock the account against takeover regardless).
+You have options here, depending on how your Workspace is set up:
 
-If it already exists, just confirm you have access to log in as that user.
+**A. As an alias of an existing account (recommended — zero extra cost).**
+If `services@` is already configured as an alias of an existing Workspace
+account (e.g. an admin mailbox), you're done with Step 1. The alias has no
+login credentials of its own — authentication will happen against the
+underlying account in Step 3, and Gmail SMTP automatically lets you send
+"as" any of the account's registered aliases.
+
+In this case, two distinct addresses come into play:
+
+- **Authenticated user** = the underlying account (the *real* mailbox).
+  → `SMTP_USER` in Step 4.
+- **From: header** = the alias (`services@<your-domain>`).
+  → `SMTP_FROM` in Step 4.
+
+They can be different. That's normal and expected for the alias setup.
+
+**B. As a standalone Workspace user.** Create a new user via
+<https://admin.google.com/> → **Directory** → **Users** → **Add new user**.
+Counts as a paid Workspace seat. `SMTP_USER` and `SMTP_FROM` are both the
+same address.
+
+**C. As a Google Group.** Cheaper than a standalone user. But Google Groups
+**can't generate app passwords**, so this path doesn't work with SMTP
+submission. Skip unless you're willing to use a different sending mechanism
+than what this runbook assumes.
+
+The rest of the runbook assumes A or B. The Workspace admin steps below
+are performed *on the underlying account* — whether that's an alias's
+parent (A) or the service-account user itself (B).
 
 ## Step 2 — Enable 2-Step Verification on the mailbox
 
@@ -92,12 +115,15 @@ App passwords require 2-Step Verification to be turned on for the account.
 
 ## Step 3 — Generate an app password
 
-Still signed in as the service-account user:
+Still signed in as the underlying account (the *real* mailbox, not the
+alias):
 
 1. **Security** → **2-Step Verification** → scroll to **App passwords**
    (or go directly to <https://myaccount.google.com/apppasswords>).
 2. Enter a label that identifies the use, e.g.
-   `QuantEcon contractor-payments workflow`.
+   `QuantEcon contractor-payments workflow`. The label appears in your
+   Google account's app-password list; pick something obvious so you know
+   what you're looking at later.
 3. Click **Create**. Google generates a 16-character password (shown as
    four 4-char groups separated by spaces, e.g. `abcd efgh ijkl mnop`).
 4. **Copy this immediately — it won't be shown again.**
@@ -105,8 +131,24 @@ Still signed in as the service-account user:
 When you paste it into GitHub Secrets (Step 4), strip the spaces:
 `abcdefghijklmnop`.
 
-> **Rotation note:** app passwords don't expire automatically, but
-> you can revoke and regenerate from the same page anytime. Rotate if
+### Why a dedicated app password (not your account's main password)
+
+App passwords are issued **per use case**, separately from your account's
+main login password. Several benefits this gives you:
+
+- **You can generate as many as you need on the same account.** If you
+  later want a second integration (e.g. a monitoring tool that also sends
+  mail), generate a second app password with a different label. They live
+  side by side and don't interfere.
+- **Each can be revoked independently.** If the contractor-payments
+  workflow's credential is ever compromised, revoke just that one app
+  password from <https://myaccount.google.com/apppasswords>. Your own
+  access to the mailbox is unaffected.
+- **Resetting your main account password doesn't break the workflow.**
+  App passwords survive main-password rotation (until you revoke them
+  explicitly).
+
+> **Rotation note:** app passwords don't expire automatically. Rotate if
 > the password ever leaks; the SMTP runner will start failing on the
 > next workflow run, which is a useful sentinel.
 
@@ -118,8 +160,8 @@ Add three new secrets (scope: **Private repositories**):
 
 | Name | Value |
 |---|---|
-| `SMTP_USER` | the mailbox address from Step 1 |
-| `SMTP_FROM` | same as `SMTP_USER` |
+| `SMTP_USER` | the **underlying account** address (the real mailbox you authenticated as in Step 2). For alias setup (Step 1.A), this is the alias's parent account; not the alias itself. |
+| `SMTP_FROM` | the **sending identity** — the address you want recipients to see in their "From" line. For alias setup (Step 1.A), this is the alias (e.g. `services@<your-domain>`). For standalone-user setup (Step 1.B), same as `SMTP_USER`. |
 | `SMTP_PASSWORD` | the 16-char app password from Step 3, no spaces |
 
 Or via `gh` CLI (needs `admin:org` scope — refresh with
@@ -127,10 +169,10 @@ Or via `gh` CLI (needs `admin:org` scope — refresh with
 
 ```bash
 gh secret set SMTP_USER --org QuantEcon --visibility private \
-  --body '<service-account-mailbox>'
+  --body '<underlying-account-address>'
 
 gh secret set SMTP_FROM --org QuantEcon --visibility private \
-  --body '<service-account-mailbox>'
+  --body '<sending-identity-address>'   # alias if Step 1.A, else same as SMTP_USER
 
 gh secret set SMTP_PASSWORD --org QuantEcon --visibility private \
   --body '<16-char-app-password>'
