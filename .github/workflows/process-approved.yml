@@ -85,12 +85,16 @@ jobs:
         env:
           MERGE_SHA: ${{ inputs.merge_commit_sha }}
         run: |
-          # Files touched by the merge commit — filter to submission YAMLs.
-          SUBMISSION_FILE=$(git diff-tree --no-commit-id --name-only -r "$MERGE_SHA" \
+          # Files added/changed by the merge — diff against the first parent
+          # (i.e. main's HEAD before the merge). `git diff-tree` on a merge
+          # commit is silent by default, hence the explicit parent compare.
+          SUBMISSION_FILE=$(git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" \
             | grep -E '^submissions/.*\.yml$' \
             | head -1)
           if [ -z "$SUBMISSION_FILE" ]; then
             echo "ERROR: No submissions/*.yml found in merge commit $MERGE_SHA" >&2
+            echo "--- All files changed by the merge: ---" >&2
+            git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" >&2 || true
             exit 1
           fi
           echo "submission_file=$SUBMISSION_FILE" >> "$GITHUB_OUTPUT"
