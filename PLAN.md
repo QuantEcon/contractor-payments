@@ -66,7 +66,7 @@ QuantEcon/contractor-payments/
 │   └── new-contractor.py             ← interactive setup script (Phase 3, see §5)
 ├── templates/
 │   ├── timesheet.typ                 (Typst single-page A4 template)
-│   ├── branding.yml                  (PSL Foundation address; single source across repos)
+│   ├── fiscal-host.yml                  (PSL Foundation address; single source across repos)
 │   └── assets/
 │       ├── quantecon-logo.png
 │       └── psl-foundation-logo.png
@@ -147,14 +147,14 @@ contractor:
     Australia
 
 admin: mmcky
-payments_manager: psl-payments-handle          # GitHub handle, used in @-mentions
 ```
 
 Written once by the onboarding script; rarely changes afterwards.
 
 - **Currency** is not a global default — it lives on each contract (§4.2).
 - **Address** is optional but recommended for tax-invoice compliance (Australian tax invoices over $1,000 AUD must identify the supplier; address is one accepted way). Renders on the PDF only when populated.
-- **QuantEcon and PSL Foundation addresses** are not duplicated here — they live in the engine repo's `templates/branding.yml` as the single source of truth across all contractor repos.
+- **Fiscal-host config doesn't live here.** QuantEcon and PSL Foundation addresses, the document-date timezone, and the email notification recipients all live in the engine repo's `templates/fiscal-host.yml` as the single source of truth across every contractor repo (§9). Per-contractor `settings.yml` only carries contractor identity.
+- **The payments manager isn't a GitHub handle anymore.** PSL receives approvals by email (§6, §8 Phase 2), so there's no per-contractor `payments_manager:` field — the recipient is centralised in `fiscal-host.yml.notifications.psl_to`.
 
 ### 4.2 `contracts/{contract-id}.yml` — contract terms
 
@@ -583,11 +583,11 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Contract ID convention | `QE-PSL-YYYY-NNN` | Documented in §4.2. System accepts any string; onboarding pre-fills this format. |
 | Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list; admin edits on contract renewal. |
 | Submission ID | `{handle}-timesheet-{period}` with `-v2`, `-v3` collision suffix | Period-based for readability; suffix handles re-submissions for the same period. v1.1 polish layer for explicit revision metadata (§8). |
-| Approval notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
+| Approval notification | Email to PSL (Cc admin) via SMTP with the approved PDF attached, plus an internal GitHub comment confirming the send. | PSL doesn't use GitHub; email is the natural delivery channel. The GitHub comment is verbose by design — gives admins operational visibility and confirms the email step ran. `fiscal-host.yml.notifications.testing_mode` flag gates PSL while we iterate ([REDACTED:QUANTECON_EMAIL] only during testing). |
 | PDF generation | Typst in CI; rendered at PR-creation, regenerated at merge with approval metadata | Committed to `generated_pdfs/<YYYY-MM>/`. PR carries a "PENDING REVIEW" PDF; merge replaces it with the approved version. |
 | PNG preview | Same template rendered to PNG; committed alongside the PDF | Embedded inline in the PR body via absolute raw URL so reviewers see the artifact in the PR description without leaving the review surface. Default 200 PPI, `--png-ppi` overrides. |
-| Branding addresses | `templates/branding.yml` (engine repo) | PSL Foundation address baked in; QuantEcon has no address. Single source across all contractor repos. |
-| Document issue dates | Computed in the **payer's timezone** (`psl_foundation.timezone` in `branding.yml`, default `America/New_York`) | All contractors' submission/approval dates use the same locale as the payer's books, regardless of where the contractor lives. Falls back to UTC if the field is unset. |
+| Fiscal-host identity & policy | `templates/fiscal-host.yml` (engine repo) — PSL Foundation address + timezone + email notification recipients; QuantEcon logo-only (no address). | Single source of truth across all contractor repos. Holds *all* fiscal-host config that's identical across payees. |
+| Document issue dates | Computed in the **payer's timezone** (`psl_foundation.timezone` in `fiscal-host.yml`, default `America/New_York`) | All contractors' submission/approval dates use the same locale as the payer's books, regardless of where the contractor lives. Falls back to UTC if the field is unset. |
 | Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Renders on the PDF only when populated. Recommended for tax-invoice compliance. |
 | Ledger / running totals | Yes | One `ledger/<contract-id>.yml` per contract; updated on merge. |
 | Onboarding | Interactive Python script | See §5. |
@@ -654,7 +654,7 @@ Engine scripts and templates:
 - [x] `scripts/post_error_comment.py` + tests — sentinel-marked error comment on parse failure; updates in place on re-run
 - [x] `scripts/generate_pdf.py` — Typst PDF + PNG with currency-aware display formatting; configurable PNG PPI
 - [x] `templates/timesheet.typ` — single-page A4 template fitting up to 31 entries (worst-case month)
-- [x] `templates/branding.yml` — PSL Foundation address; single source for both organisations
+- [x] `templates/fiscal-host.yml` — PSL Foundation address; single source for both organisations
 - [x] `templates/assets/{quantecon,psl-foundation}-logo.png` — branding
 
 Form, workflow, test repo:
@@ -666,36 +666,76 @@ Form, workflow, test repo:
 Project scaffold:
 - [x] `pyproject.toml`, `.gitignore`, `tests/` (80 unit tests passing across three files)
 
-### Phase 1.5 — Milestone Invoice engine
-Adds the second submission type alongside hourly. Engine pieces are largely shared (parser plumbing, PR-creation flow, sentinel error comments); the deltas:
+### Phase 1.5 — Milestone Invoice engine ✅
+Adds the second submission type alongside hourly. Engine pieces largely shared with hourly (parser plumbing, PR-creation flow, sentinel error comments).
 
-- [ ] **Contract schema extension** — `type: milestone` with `milestones[]` (§4.2). Hourly contracts untouched.
-- [ ] **`scripts/parse_milestone_issue.py`** (or branch in `parse_issue.py`) — handles the milestone form shape; rejects unknown / already-claimed milestone IDs.
-- [ ] **`contractor-template/.github/ISSUE_TEMPLATE/milestone-invoice.yml`** — the new form (§4.6).
-- [ ] **`templates/invoice.typ`** — Typst template for milestone invoices (title `QUANTECON INVOICE`; milestone block + work-completed narrative + contract progress mini-table).
-- [ ] **`scripts/create_submission_pr.py`** — branch on submission type; route to the right template at render time.
-- [ ] **`contractor-template/.github/workflows/issue-to-pr.yml`** — routes by issue template label.
-- [ ] End-to-end test against `contractor-engine-test`: create a milestone contract, submit an invoice claim, verify PR + YAML + PDF + PNG.
+Engine + form + tests:
+- [x] **Contract schema extension** — `type: milestone` (lightweight metadata; admin verifies during PR review per §4.2 decision).
+- [x] **`scripts/parse_issue.py`** — auto-detects submission type from issue body; new milestone path parses `ID | YYYY-MM-DD | amount | description` rows. Period dropdown split into Year + Month across all forms.
+- [x] **`contractor-template/.github/ISSUE_TEMPLATE/milestone-invoice.yml`** — new form (§4.6).
+- [x] **`templates/invoice.typ`** — Typst template (title `QUANTECON INVOICE`; 4-col ID/Date/Amount/Description table; single Amount payable row).
+- [x] **`scripts/create_submission_pr.py`** — branches on submission type; submission ID becomes `{handle}-invoice-{period}`; PR gets type-specific label.
+- [x] **`scripts/generate_pdf.py`** — selects template by submission type via a registry.
+- [x] **`contractor-template/.github/workflows/issue-to-pr.yml`** — routes both `timesheet` and `milestone-invoice` labels through one pipeline (parser auto-detects).
+- [x] **`scripts/setup_labels.py`** — idempotent label bootstrap (gap surfaced in this phase: GitHub Issue Forms silently drop unknown labels). Phase 3b's onboarding will call this.
+- [x] 107 tests passing (51 hourly parser, 15 milestone parser, +20 misc).
+- [x] End-to-end verified: opened a milestone-invoice issue on `contractor-engine-test`, workflow produced a PR with YAML + PDF + PNG, parse-error label cleanup confirmed.
 
-### Phase 2 — Merge processing
-On PR merge, the workflow runs `process-approved.yml`. Designed generic so it covers all submission types built so far (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands. Pieces of work:
+Repo housekeeping:
+- [x] Renamed `QuantEcon/timesheets` → `QuantEcon/contractor-payments`. Engine repo URL refs + local clone path updated.
+
+### Phase 3a — Reusable workflows (pulled forward to stop sync drift)
+Phase 1.5 surfaced an operational risk: contractor repos carry their own copies of `scripts/` and `templates/`, so engine repo updates don't propagate automatically. This phase replaces those copies with `workflow_call` references back into `QuantEcon/contractor-payments`, so every push to the engine repo is live on every contractor repo immediately.
+
+- [ ] **Verify the org-level "private-repo reusable workflows" setting is enabled** — Settings → Actions → "Access" on `QuantEcon`. See §10. Hard gate for this phase.
+- [ ] **Engine repo: `.github/workflows/process-submission.yml`** — `on: workflow_call`. Holds the body of the current `issue-to-pr.yml` pipeline. Takes the issue payload as inputs.
+- [ ] **Contractor-template `.github/workflows/issue-to-pr.yml`** — collapses to a thin caller: `uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main`, passes the `github.event.issue` context, applies the same label-gate predicate.
+- [ ] **`contractor-engine-test`** — replace its current workflow file with the thin caller; **delete** its now-redundant `scripts/` and `templates/` directories from the repo (the engine repo is the only source of truth from here on).
+- [ ] **End-to-end verification** — re-fire the existing milestone-invoice flow on `contractor-engine-test` via the thin caller; confirm PR + PDF + PNG come out unchanged.
+
+### Phase 2 — Merge processing + email notify
+On PR merge, the engine runs `process-approved.yml` (also implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands.
+
+Approval re-render + ledger:
 - [ ] **Re-render PDF + PNG with approval metadata baked in.** `approved_by` and `approved_date` get set from the merge event; the template renders with the approval block now in the "APPROVED BY @... ON ..." state (green) replacing the "PENDING REVIEW" (amber) block. Template selected by `submission.type`. Overwrites the existing files in `generated_pdfs/<period>/`.
-- [ ] **`scripts/update_ledger.py`** — append the merged submission to its ledger. Branches by type: hourly/milestone write to `ledger/<contract-id>.yml`; reimbursement writes to `ledger/reimbursements.yml` (per-contractor, single file).
-- [ ] **`scripts/notify.py`** — comment on the now-closed issue tagging `@payments_manager` with the contractor's real name, period, total, and a link to the approved PDF. Notification text adjusts to submission type ("Timesheet approved" / "Invoice approved" / "Reimbursement approved").
-- [ ] **`.github/workflows/process-approved.yml`** — orchestrates the above on PR merge; applies a `processed` label.
-- [ ] End-to-end test: merge a PR in `contractor-engine-test` for each in-scope submission type → ledger updated, PDFs/PNGs regenerated with approval block, payments-manager comment posted, label applied.
+- [ ] **`scripts/update_ledger.py`** — append the merged submission to its ledger. Branches by type: hourly/milestone write to `ledger/<contract-id>.yml`; reimbursement (Phase 5) writes to `ledger/reimbursements.yml`.
 
-### Phase 3 — Reusable workflows + contractor-template + onboarding
-- [ ] Convert both workflows to `workflow_call` reusable form
-- [ ] Verify private-repo reusable workflow permissions at the org level
-- [ ] Build `contractor-template/` (thin caller workflows + templated config + READMEs)
-- [ ] `onboarding/new-contractor.py` — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally (multi-select deferred to Phase 5 when reimbursement adds the third type and selectivity becomes meaningful).
-- [ ] Spin up `QuantEcon/contractor-onboarding-test` via the onboarding script and run the full submit → merge loop end-to-end
+Email delivery to PSL:
+- [ ] **`templates/fiscal-host.yml` extension** — add a `notifications:` block (`psl_to`, `quantecon_cc`, `testing_mode` flag). See §4.0 / §6 / §9 entries.
+- [ ] **`scripts/notify_email.py`** — composes an email (plain text body + PDF attachment) and sends via SMTP. Uses stdlib `smtplib` + `email.message.EmailMessage`. Subject: `[QuantEcon] {Type} approved — {Real Name} — {Period} — {Amount} {Currency}`. Body summarises contractor / contract / type / period / amount / approver / approval date, with the issue URL for context. PDF attached. Recipients: `psl_to` (To) + `quantecon_cc` (Cc) when `testing_mode: false`; **`quantecon_cc` only** when `testing_mode: true`.
+- [ ] **`scripts/notify_comment.py`** — posts an internal GitHub comment on the now-closed issue confirming the merge AND confirming that the email was sent (recipients + send timestamp). Verbose by design — gives the admin team operational visibility, and a clear signal if the email step ran but the comment didn't (or vice versa).
+- [ ] **Workflow ordering** — email step runs first; comment step runs after and reflects the email outcome (success/failure surfaced in the comment body).
+- [ ] **`.github/workflows/process-approved.yml`** (engine repo, `workflow_call`) — orchestrates re-render → ledger → email → comment → `processed` label.
+- [ ] **GitHub org-level secrets** — `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Scoped at the org so every contractor repo's reusable-workflow run can read them. See §10 ([REDACTED:SMTP_USER] credentials open item).
+
+Documentation:
+- [ ] **`docs/EMAIL_SETUP.md`** — Gmail / Google Workspace setup runbook: creating `[REDACTED:SMTP_USER]` (or app-password on an existing account), generating an app password, setting the five `SMTP_*` org secrets, smoke-testing with a local stub. Lives alongside Phase 4's CONTRACTOR_GUIDE / ADMIN_GUIDE under `docs/`.
+
+End-to-end:
+- [ ] **End-to-end test** — with `testing_mode: true`, merge a hourly PR and a milestone PR on `contractor-engine-test`; verify each produces (a) re-rendered PDF/PNG, (b) ledger update, (c) email landing in `[REDACTED:QUANTECON_EMAIL]`, (d) internal GitHub comment confirming the send, (e) `processed` label applied.
+
+---
+
+### 🛑 BREAK — testing phase
+
+Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before continuing to Phase 3b. During this phase:
+
+- `notifications.testing_mode` stays **true** — `[REDACTED:QUANTECON_EMAIL]` receives all approval emails; PSL is never contacted.
+- Iterate on email content, subject lines, PDF attachment formatting, edge cases (empty notes, multi-row milestones, currencies, etc.).
+- Verify the full loop on `contractor-engine-test`: submit → review → merge → email → comment → ledger → label.
+- Decide when to flip `testing_mode: false` — that's the cutover to PSL receiving real emails. Likely done at the start of Phase 4, after at least one full month of internal-only testing.
+
+---
+
+### Phase 3b — Onboarding script for new contractor repos
+- [ ] **`onboarding/new-contractor.py`** per §5 — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally; creates the contractor repo; adds collaborators; sets branch protection; creates labels via `scripts/setup_labels.py`. Multi-select for templates deferred to Phase 5.
+- [ ] Spin up `QuantEcon/contractor-onboarding-test` via the script; run the full submit → merge loop end-to-end via the reusable workflow.
 
 ### Phase 4 — Docs + first real contractors
 - [ ] `docs/CONTRACTOR_GUIDE.md`
-- [ ] `docs/ADMIN_GUIDE.md` (onboarding runbook, editing contracts, troubleshooting)
-- [ ] Onboard a small number of real contractors; iterate on friction
+- [ ] `docs/ADMIN_GUIDE.md` (onboarding runbook, editing contracts, troubleshooting, *how to flip testing_mode off*)
+- [ ] Flip `notifications.testing_mode` to `false` — PSL starts receiving real approval emails.
+- [ ] Onboard a small number of real contractors; iterate on friction.
 
 ### Phase 5 — Reimbursement Claim engine + multi-select onboarding (post-launch)
 
@@ -756,7 +796,10 @@ The accounting principle is what governs this: every issued invoice number stays
 | Shared logic | Reusable workflows + scripts in `QuantEcon/contractor-payments` | Single source of truth. |
 | Onboarding | Interactive Python script `onboarding/new-contractor.py` | Asks the right questions; populates the repo cleanly. |
 | Submission ID | `{handle}-timesheet-{period}` with `-vN` collision suffix | Period-based for readability; suffix on collision handles revisions. v1.1 layer adds explicit supersede metadata. |
-| Notification | GitHub comment + @-mention + workflow artifact | No SMTP in v1. |
+| Notification | Email to PSL (Cc admin) + internal GitHub comment | PSL doesn't use GitHub; email is the natural delivery for the approved PDF. Internal comment is operational audit (confirms the email step succeeded). See §8 Phase 2. |
+| Email mechanism | Google Workspace SMTP from `[REDACTED:SMTP_USER]` | QuantEcon already owns the Google Workspace; no third-party transactional service needed at this volume (well under Gmail's 2,000/day limit). Switch to Postmark/Mailgun later if deliverability ever becomes an issue. |
+| Email credentials | GitHub **org-level** secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) | Scoped at the org so every contractor repo's reusable-workflow run can read them without per-repo setup. Never in any YAML; never committed. |
+| Email recipients & testing | `templates/fiscal-host.yml.notifications` block with `psl_to`, `quantecon_cc`, and a `testing_mode` flag. While `testing_mode: true` is set, mail goes to `quantecon_cc` only — PSL is never contacted. | Lets us iterate on email content / formatting on `contractor-engine-test` without ever spamming PSL. Single-line flip (`testing_mode: false`) in Phase 4 cuts over to live PSL delivery. |
 | v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
 | Milestone contract shape | Lightweight metadata only — contractor enters the milestone row in the form (§4.6), admin verifies against `contract.notes` during PR review | Trivial admin setup; admin already reviews every PR so the eyeball check covers double-claim prevention. Pre-declared `milestones[]` schedule deferred — revisit alongside [admin#5](https://github.com/QuantEcon/admin/issues/5). |
 | Reimbursement contract relationship | Reimbursements are **contractor-level**, not contract-level | RA/staff expenses are ad-hoc, hard to pre-authorize in a contract; authorization happens per-claim via PR review. Reimbursements live in the contractor repo without a `contract_id` reference. |
@@ -766,8 +809,8 @@ The accounting principle is what governs this: every issued invoice number stays
 | Encryption at rest | None | Each repo holds one contractor's data; access is naturally scoped. Revisit if a centralized store is later built. |
 | Currency | Per-contract field; AUD / USD / JPY in v1 | QuantEcon already has real contractors in all three. Currency lives on each contract; PDF renders ISO code as suffix, no symbols; JPY without decimals. |
 | Reviewer-facing artifact | PDF (authoritative) + PNG preview (inline in PR body) | GitHub doesn't render PDFs in PR diffs; images do. PNG embed closes the review loop without leaving the PR; PDF is what the payments manager receives. |
-| Branding addresses | `templates/branding.yml` (engine repo) | Single source across contractor repos. PSL Foundation address baked in; QuantEcon logo-only. |
-| Document-date timezone | Payer's locale (`psl_foundation.timezone` in `branding.yml`, default `America/New_York`) | Paperwork lines up with payer's books; contractor locale irrelevant. UTC fallback if unset. |
+| Fiscal-host identity & policy file | `templates/fiscal-host.yml` (engine repo) — renamed from `branding.yml` once it grew beyond addresses to also hold the document-date timezone and email notification recipients. | "Fiscal host" precisely names PSL's relationship to QuantEcon (sponsored-project / fiscal-sponsorship context). Single source of truth across all contractor repos. |
+| Document-date timezone | Payer's locale (`psl_foundation.timezone` in `fiscal-host.yml`, default `America/New_York`) | Paperwork lines up with payer's books; contractor locale irrelevant. UTC fallback if unset. |
 | Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Recommended for tax-invoice compliance; renders only when populated. No bank/tax-ID data ever — that policy carries through from earlier. |
 | External Actions | None on the financial-data path | Inherited from source issue. |
 
@@ -775,11 +818,11 @@ The accounting principle is what governs this: every issued invoice number stays
 
 ## 10. Open items
 
-- **Payments manager GitHub handle.** Needed for CODEOWNERS and `settings.yml`. Matt to confirm.
 - **Admin handle(s).** Just `mmcky`, or also a team handle?
-- **Org settings — reusable workflows in private repos.** Needs to be enabled on QuantEcon before Phase 3. Org admin action.
+- **Org settings — reusable workflows in private repos.** Needs to be enabled on QuantEcon **before Phase 3a** (now pulled forward in §8 build order). Org admin action — Settings → Actions → "Access" on `QuantEcon`.
 - **Actions on private repos / runner-minute budget.** Confirm enabled + headroom.
-- **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification surfaces the contractor's real name from `settings.yml`.
+- **SMTP credentials for `[REDACTED:SMTP_USER]`.** Gates Phase 2 (email notify). Need: app password generated on the Google Workspace side, then set as five GitHub **org-level** secrets — `SMTP_HOST` (`smtp.gmail.com`), `SMTP_PORT` (`587`), `SMTP_USER` (`[REDACTED:SMTP_USER]`), `SMTP_PASSWORD` (the app password), `SMTP_FROM` (matches `SMTP_USER` unless Workspace constrains otherwise). Setup runbook lands in `docs/EMAIL_SETUP.md` as part of Phase 2.
+- **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
 - **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
 - **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
 
@@ -790,7 +833,8 @@ The accounting principle is what governs this: every issued invoice number stays
 - All contractor repos are private. The engine repo could later be made public as a reference implementation; by design it holds no data.
 - No third-party GitHub Actions on any financial-data path. Only `actions/checkout` and `actions/setup-python` from first-party `actions/*`.
 - Branch protection on `main` for every contractor repo: PR required, 1 review required, no force-push.
-- GitHub Secrets only for credentials the workflow needs (none in v1; SMTP credentials when email arrives later).
+- GitHub Secrets only for credentials the workflow needs. From Phase 2: SMTP credentials (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) live as **org-level** secrets on `QuantEcon`, so every contractor repo's reusable-workflow run reads them without per-repo setup. Never in any YAML; never committed.
+- **Email content is sensitive.** Approval emails carry the contractor's real name, contract ID, period, amount, and an attached PDF with the same data. In transit: TLS via SMTP submission port 587. At rest: in the PSL recipient's inbox + Cc on `[REDACTED:QUANTECON_EMAIL]`. We accept this — the recipient is the fiscal host, the email is what triggers payment, and there's no way to deliver value to PSL without the data being present at the receiving end. The `notifications.testing_mode` flag in `templates/fiscal-host.yml` keeps PSL off the recipient list until we're confident the pipeline is working cleanly (see §8 BREAK).
 - Python deps minimal: stdlib + `pyyaml`.
 - **No bank accounts, tax IDs, or other payment credentials in any repo.** Reference an external store (1Password, etc.) by stable ID if needed.
 

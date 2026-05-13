@@ -90,17 +90,17 @@ class TestResolveCollisionSuffix:
 # ─── Payer-timezone date ────────────────────────────────────────────────────
 
 class TestResolvePayerToday:
-    def test_reads_timezone_from_branding(self, tmp_path):
-        branding = tmp_path / "branding.yml"
-        branding.write_text(
+    def test_reads_timezone_from_fiscal_host(self, tmp_path):
+        fiscal_host = tmp_path / "fiscal-host.yml"
+        fiscal_host.write_text(
             "psl_foundation:\n  timezone: America/New_York\n",
             encoding="utf-8",
         )
-        result = resolve_payer_today(branding)
+        result = resolve_payer_today(fiscal_host)
         # ISO date format; specific value is wall-clock-dependent, so just check shape.
         assert len(result) == 10 and result[4] == "-" and result[7] == "-"
 
-    def test_falls_back_to_utc_when_branding_missing(self, tmp_path):
+    def test_falls_back_to_utc_when_fiscal_host_missing(self, tmp_path):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         result = resolve_payer_today(tmp_path / "nonexistent.yml")
@@ -109,9 +109,9 @@ class TestResolvePayerToday:
     def test_falls_back_to_utc_when_timezone_field_missing(self, tmp_path):
         from datetime import datetime
         from zoneinfo import ZoneInfo
-        branding = tmp_path / "branding.yml"
-        branding.write_text("psl_foundation:\n  name: PSL Foundation\n", encoding="utf-8")
-        result = resolve_payer_today(branding)
+        fiscal_host = tmp_path / "fiscal-host.yml"
+        fiscal_host.write_text("psl_foundation:\n  name: PSL Foundation\n", encoding="utf-8")
+        result = resolve_payer_today(fiscal_host)
         assert result == datetime.now(ZoneInfo("UTC")).date().isoformat()
 
 

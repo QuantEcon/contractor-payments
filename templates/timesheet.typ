@@ -15,7 +15,7 @@
 //   notes (str, may be empty), status (str),
 //   approved_by (str or none), approved_date (str ISO or none),
 //   contractor ({name, github, email, address (optional)}),
-//   branding ({psl_foundation: {name, address}, quantecon: {name, address}}).
+//   fiscal_host ({psl_foundation: {name, address}, quantecon: {name, address}}).
 
 #let data = yaml("data.yml")
 
@@ -56,8 +56,8 @@
 #let value(content) = text(size: 10pt, weight: "regular")[#content]
 
 // ── Header: title bar, then logos + PSL address ───────────────────────────
-#let psl_address = data.at("branding", default: (:)).at("psl_foundation", default: (:)).at("address", default: none)
-#let qe_address  = data.at("branding", default: (:)).at("quantecon",       default: (:)).at("address", default: none)
+#let psl_address = data.at("fiscal_host", default: (:)).at("psl_foundation", default: (:)).at("address", default: none)
+#let qe_address  = data.at("fiscal_host", default: (:)).at("quantecon",       default: (:)).at("address", default: none)
 
 #align(center)[
   #text(size: 15pt, weight: "bold", fill: primary, tracking: 2pt)[QUANTECON TIMESHEET]

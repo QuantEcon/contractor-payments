@@ -149,7 +149,7 @@ def _load_data(
     template_dir: Path,
     repo: Optional[str] = None,
 ) -> dict:
-    """Load submission + settings + branding into the data dict the template wants.
+    """Load submission + settings + fiscal-host into the data dict the template wants.
 
     `repo` (e.g. "QuantEcon/contractor-mmcky") is environmental, not part of
     the submission record — passed in at render time so the template can build
@@ -159,21 +159,25 @@ def _load_data(
         submission = yaml.safe_load(f)
     with open(settings_path, encoding="utf-8") as f:
         settings = yaml.safe_load(f)
-    branding = _load_branding(template_dir)
+    fiscal_host = _load_fiscal_host(template_dir)
     data = _merge_contractor(submission, settings)
-    data["branding"] = branding
+    data["fiscal_host"] = fiscal_host
     data["repo"] = repo or os.environ.get("GITHUB_REPOSITORY") or None
     data = _add_display_strings(data)
     return data
 
 
-def _load_branding(template_dir: Path) -> dict:
-    """Load templates/branding.yml. Returns an empty dict if the file is missing
-    (so the template can render with logo-only headers in dev environments)."""
-    branding_path = template_dir / "branding.yml"
-    if not branding_path.exists():
+def _load_fiscal_host(template_dir: Path) -> dict:
+    """Load `templates/fiscal-host.yml` — identity and policy for the fiscal
+    host (PSL Foundation in QuantEcon's case): organisation addresses,
+    document-date timezone, and notification recipients.
+
+    Returns an empty dict if the file is missing (so the template can render
+    with logo-only headers in dev environments)."""
+    fiscal_host_path = template_dir / "fiscal-host.yml"
+    if not fiscal_host_path.exists():
         return {}
-    with open(branding_path, encoding="utf-8") as f:
+    with open(fiscal_host_path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 

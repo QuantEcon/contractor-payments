@@ -80,19 +80,19 @@ def resolve_collision_suffix(repo_root: Path, base_id: str, period: str) -> str:
     return candidate
 
 
-def resolve_payer_today(branding_path: Path) -> str:
+def resolve_payer_today(fiscal_host_path: Path) -> str:
     """Today's date in the payer's timezone, ISO-formatted.
 
-    Reads `psl_foundation.timezone` from templates/branding.yml; falls back to
-    UTC if the file or field is missing. Policy: document issue dates use the
-    payer's locale so paperwork lines up with the payer's books regardless of
-    where the contractor lives.
+    Reads `psl_foundation.timezone` from `templates/fiscal-host.yml`; falls
+    back to UTC if the file or field is missing. Policy: document issue dates
+    use the fiscal host's locale so paperwork lines up with the fiscal host's
+    books regardless of where the contractor lives.
     """
     tz_name = None
-    if branding_path.exists():
-        with open(branding_path, encoding="utf-8") as f:
-            branding = yaml.safe_load(f) or {}
-        tz_name = branding.get("psl_foundation", {}).get("timezone")
+    if fiscal_host_path.exists():
+        with open(fiscal_host_path, encoding="utf-8") as f:
+            fiscal_host = yaml.safe_load(f) or {}
+        tz_name = fiscal_host.get("psl_foundation", {}).get("timezone")
     tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
     return datetime.now(tz).date().isoformat()
 
@@ -423,9 +423,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--issue-title", required=True)
     p.add_argument("--submitted-date",
                    default=None,
-                   help="ISO date for `submitted_date`. Default: today in the payer's "
-                        "timezone (read from templates/branding.yml: psl_foundation.timezone). "
-                        "Falls back to UTC if branding/timezone unavailable.")
+                   help="ISO date for `submitted_date`. Default: today in the fiscal "
+                        "host's timezone (read from templates/fiscal-host.yml: "
+                        "psl_foundation.timezone). Falls back to UTC if "
+                        "fiscal-host.yml or the timezone field is missing.")
     p.add_argument("--repo-root", default=".",
                    help="Working tree root (default: current directory).")
     p.add_argument("--templates-dir", default="templates",
@@ -443,7 +444,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     settings_path = (repo_root / args.settings_file).resolve()
 
     if args.submitted_date is None:
-        args.submitted_date = resolve_payer_today(templates_dir / "branding.yml")
+        args.submitted_date = resolve_payer_today(templates_dir / "fiscal-host.yml")
 
     # Bail early if a branch already exists for this issue. Phase 1 doesn't
     # handle regeneration; that's deferred per PLAN §4.4.
