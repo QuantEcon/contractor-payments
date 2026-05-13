@@ -218,6 +218,8 @@ terms:
 
 project: python-lectures      # free-form
 
+ledger_issue: 5               # GitHub issue # for the auto-updated ledger view (Phase 2)
+
 notes: |
   Continuing from 2025 contract.
 ```
@@ -236,10 +238,14 @@ currency: JPY                 # default currency for milestone claims
 
 project: iuj-visit
 
+ledger_issue: 6               # GitHub issue # for the auto-updated ledger view (Phase 2)
+
 notes: |
   Six monthly payments of ¥77,000 (total ¥462,000), payable 15th of each
   month from Sep 2025 through Feb 2026.
 ```
+
+The `ledger_issue` field is written by Phase 3b's onboarding script when it opens the ledger issue; the approval workflow reads it to know which issue to edit. Optional — if missing, the workflow skips the issue update (the YAML side still gets the entry).
 
 Lightweight by design: the contract declares that it's a milestone contract and what currency claims are denominated in, but does **not** pre-enumerate the milestones. The contractor enters each milestone row at submission time via the issue form (§4.6) — same UX shape as a timesheet entry. The admin verifies the row against the contract's `notes` during PR review.
 
@@ -737,22 +743,23 @@ Phase 1.5 surfaced an operational risk: contractor repos carried their own copie
 On PR merge, the engine runs `process-approved.yml` (also implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands.
 
 Approval re-render + ledger:
-- [ ] **Re-render PDF + PNG with approval metadata baked in.** `approved_by` and `approved_date` get set from the merge event; the template renders with the approval block now in the "APPROVED BY @... ON ..." state (green) replacing the "PENDING REVIEW" (amber) block. Template selected by `submission.type`. Overwrites the existing files in `generated_pdfs/<period>/`.
-- [ ] **`scripts/update_ledger.py`** — append the merged submission to its ledger. Branches by type: hourly/milestone write to `ledger/<contract-id>.yml`; reimbursement (Phase 5) writes to `ledger/reimbursements.yml`.
+- [x] **Re-render PDF + PNG with approval metadata baked in** — `scripts/finalize_approval.py`. Stamps the submission YAML with `status: approved`, `approved_by`, `approved_date` (default: today in fiscal-host timezone), then re-renders PDF + PNG via the existing render functions. The Typst template's existing pending-vs-approved conditional automatically flips the amber "PENDING REVIEW" block to the green "✓ APPROVED — by @... on ..." block. Smoke-tested locally on a milestone fixture in commit [4619305](https://github.com/QuantEcon/contractor-payments/commit/4619305).
+- [ ] **`scripts/update_ledger.py`** — append the approved submission to `ledger/<contract-id>.yml`. Branches by type: hourly writes `submissions[]` + `hours_to_date`; milestone writes `claims[]` + `claims_count`. Idempotent against duplicate `submission_id` (raises). Pure file mutation; no external services. Reimbursement (Phase 5) extends with `ledger/reimbursements.yml` per-contractor.
+- [ ] **`scripts/update_ledger_issue.py`** — renders the ledger YAML as a markdown table and edits a pinned GitHub issue in the contractor repo. Created at onboarding (Phase 3b) for each contract; updated by this step on every approval. Locked from comments so it stays automation-only. Marker comment `<!-- ledger-issue-marker:<contract-id> -->` in the body for safe identification. Issue number stored in the contract YAML as `ledger_issue: <N>` so the script doesn't need to search. Provides the contractor + admin with a discoverable, pinned, notification-driven view of running totals without any new UI.
 
 Email delivery to PSL:
-- [ ] **`templates/fiscal-host.yml` extension** — add a `notifications:` block (`psl_to`, `quantecon_cc`, `testing_mode` flag). See §4.0 / §6 / §9 entries.
-- [ ] **`scripts/notify_email.py`** — composes an email (plain text body + PDF attachment) and sends via SMTP. Uses stdlib `smtplib` + `email.message.EmailMessage`. Subject: `[QuantEcon] {Type} approved — {Real Name} — {Period} — {Amount} {Currency}`. Body summarises contractor / contract / type / period / amount / approver / approval date, with the issue URL for context. PDF attached. Recipients: `psl_to` (To) + `quantecon_cc` (Cc) when `testing_mode: false`; **`quantecon_cc` only** when `testing_mode: true`.
-- [ ] **`scripts/notify_comment.py`** — posts an internal GitHub comment on the now-closed issue confirming the merge AND confirming that the email was sent (recipients + send timestamp). Verbose by design — gives the admin team operational visibility, and a clear signal if the email step ran but the comment didn't (or vice versa).
-- [ ] **Workflow ordering** — email step runs first; comment step runs after and reflects the email outcome (success/failure surfaced in the comment body).
-- [ ] **`.github/workflows/process-approved.yml`** (engine repo, `workflow_call`) — orchestrates re-render → ledger → email → comment → `processed` label.
-- [ ] **GitHub org-level secrets** — `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Scoped at the org so every contractor repo's reusable-workflow run can read them. See §10 (SMTP credentials open item).
+- [ ] **`scripts/notify_email.py`** — composes an email (plain text body + PDF attachment) and sends via SMTP. Uses stdlib `smtplib` + `email.message.EmailMessage`. Subject: `[QuantEcon] {Type} approved — {Real Name} — {Period} — {Amount} {Currency}`. Body summarises contractor / contract / type / period / amount / approver / approval date, with the issue URL for context. PDF attached. Recipients: `vars.PSL_EMAIL` (To) + `vars.QUANTECON_EMAIL` (Cc) when `testing_mode: false`; **`vars.QUANTECON_EMAIL` only** when `testing_mode: true`.
+- [ ] **`scripts/notify_comment.py`** — posts an internal GitHub comment on the now-closed issue confirming the merge AND confirming that the email was sent (recipients + send timestamp + one-line ledger summary). Verbose by design — gives the admin team operational visibility, and a clear signal if the email step ran but the comment didn't (or vice versa).
+- [ ] **Workflow ordering** — finalize_approval → update_ledger → update_ledger_issue → notify_email → notify_comment. The internal comment runs last and reflects the email outcome (success/failure surfaced in the comment body).
+- [ ] **`.github/workflows/process-approved.yml`** (engine repo, `workflow_call`) — orchestrates the above on PR merge; applies the `processed` label.
+- [ ] **GitHub org-level secrets** — `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Scoped at the org (Private repositories) so every contractor repo's reusable-workflow run can read them. See §10 (SMTP credentials open item).
 
 Documentation:
-- [ ] **`docs/EMAIL_SETUP.md`** — Gmail / Google Workspace setup runbook: creating a service-account mailbox on the QuantEcon Workspace (or generating an app password on an existing account), setting the five `SMTP_*` org secrets, smoke-testing with a local stub. Lives alongside Phase 4's CONTRACTOR_GUIDE / ADMIN_GUIDE under `docs/`.
+- [x] **`docs/EMAIL_SETUP.md`** — Gmail / Google Workspace setup runbook: choosing an alias of an existing account vs a standalone user, enabling 2-Step Verification, generating a dedicated app password (independent of any other app password on the same account), setting the five `SMTP_*` org secrets, smoke-testing with a local Python stub. Includes troubleshooting + Reply-To handling. Committed in [f9a5550](https://github.com/QuantEcon/contractor-payments/commit/f9a5550), refined for alias path in [4619305](https://github.com/QuantEcon/contractor-payments/commit/4619305).
 
 End-to-end:
-- [ ] **End-to-end test** — with `testing_mode: true`, merge a hourly PR and a milestone PR on `contractor-engine-test`; verify each produces (a) re-rendered PDF/PNG, (b) ledger update, (c) email landing in the mailbox referenced by `vars.QUANTECON_EMAIL`, (d) internal GitHub comment confirming the send, (e) `processed` label applied.
+- [ ] **End-to-end test** — with `testing_mode: true`, merge a hourly PR and a milestone PR on `contractor-engine-test`; verify each produces (a) re-rendered PDF/PNG, (b) ledger YAML appended, (c) pinned ledger issue updated, (d) email landing in the mailbox referenced by `vars.QUANTECON_EMAIL`, (e) internal GitHub comment confirming the send, (f) `processed` label applied.
+- [ ] **Manual one-shot:** open the initial ledger issue on `contractor-engine-test` for contract `QE-IUJ-2025-002` before the E2E test runs (Phase 3b's onboarding script will automate this for real contractors).
 
 ---
 
@@ -769,6 +776,7 @@ Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before con
 
 ### Phase 3b — Onboarding script for new contractor repos
 - [ ] **`onboarding/new-contractor.py`** per §5 — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally; creates the contractor repo; adds collaborators; sets branch protection; creates labels via `scripts/setup_labels.py`. Multi-select for templates deferred to Phase 5.
+- [ ] **Opens the initial ledger issue** for the first contract (per §8 Phase 2's `update_ledger_issue.py` design). Pins it to the repo's Issues tab. Locks it from comments. Writes the issue number back into `contracts/<contract-id>.yml` as `ledger_issue: <N>` so the approval workflow can find it. Also covers contract-renewal: a small helper opens a fresh ledger issue and closes the predecessor when a new contract YAML is added.
 - [ ] Spin up `QuantEcon/contractor-onboarding-test` via the script; run the full submit → merge loop end-to-end via the reusable workflow.
 
 ### Phase 4 — Docs + first real contractors
@@ -846,7 +854,7 @@ The accounting principle is what governs this: every issued invoice number stays
 | Reimbursement contract relationship | Reimbursements are **contractor-level**, not contract-level | RA/staff expenses are ad-hoc, hard to pre-authorize in a contract; authorization happens per-claim via PR review. Reimbursements live in the contractor repo without a `contract_id` reference. |
 | Issue-template seeding | Phase 3 onboarding seeds both Hourly Timesheet and Milestone Invoice unconditionally. Multi-select (incl. Reimbursement) added in **Phase 5**. | With two templates, all payees get both — multi-select adds friction without benefit. Multi-select lands alongside Reimbursement when the third type makes selectivity meaningful (e.g. reimbursement-only payees). Workflow file is identical across all repos either way — routing is by label, unused branches inert. |
 | Engine repo name | `QuantEcon/contractor-payments` | Scope grew beyond timesheets; "contractor-payments" pairs naturally with the `contractor-{handle}` payee repos. Renamed from `QuantEcon/timesheets` during Phase 1.5 alignment. |
-| Ledger in v1 | Yes | Cheap now; expensive to backfill later. |
+| Ledger in v1 | Yes — one `ledger/<contract-id>.yml` per contract; one pinned GitHub issue per contract as the consumption surface | YAML stays the structured source of truth; the auto-updated pinned issue gives contractor + admin a discoverable, notification-driven view of running totals without any new UI. Cheap to maintain (rendered from YAML), no backfill problem. Cross-contractor reporting and dashboards remain post-launch territory (see [QuantEcon/admin#5](https://github.com/QuantEcon/admin/issues/5)). |
 | Encryption at rest | None | Each repo holds one contractor's data; access is naturally scoped. Revisit if a centralized store is later built. |
 | Currency | Per-contract field; AUD / USD / JPY in v1 | QuantEcon already has real contractors in all three. Currency lives on each contract; PDF renders ISO code as suffix, no symbols; JPY without decimals. |
 | Reviewer-facing artifact | PDF (authoritative) + PNG preview (inline in PR body) | GitHub doesn't render PDFs in PR diffs; images do. PNG embed closes the review loop without leaving the PR; PDF is what the payments manager receives. |
