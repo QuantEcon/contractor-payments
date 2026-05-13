@@ -1,0 +1,29 @@
+name: Process approved submission
+
+# Thin caller for the reusable workflow in QuantEcon/contractor-payments.
+# Fires when a submission PR merges; the engine does the rest (approval
+# re-render, ledger append + issue update, email notify, audit comment,
+# `processed` label).
+#
+# See PLAN.md §8 Phase 2.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+jobs:
+  process:
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'submission')
+    uses: QuantEcon/contractor-payments/.github/workflows/process-approved.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      pr_body: ${{ github.event.pull_request.body }}
+      merge_commit_sha: ${{ github.event.pull_request.merge_commit_sha }}
+      merged_by: ${{ github.event.pull_request.merged_by.login }}
+    secrets: inherit

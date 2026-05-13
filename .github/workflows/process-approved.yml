@@ -1,0 +1,197 @@
+name: Process approved submission (reusable)
+
+# Reusable workflow that runs after a submission PR merges:
+#   1. Stamp the submission YAML with approval metadata (status, approved_by,
+#      approved_date) and re-render PDF + PNG (amber → green block).
+#   2. Append the submission to ledger/<contract-id>.yml.
+#   3. Commit the re-rendered files + ledger update back to main.
+#   4. Edit the pinned ledger issue with the updated running totals.
+#   5. Send the approval email to PSL (or admin only, if testing_mode=true)
+#      with the approved PDF attached.
+#   6. Post an internal audit comment on the original submission issue
+#      confirming the merge, the ledger update, and the email send.
+#   7. Apply the `processed` label to the closed PR.
+#
+# Branch-protection note: this workflow pushes directly to main (step 3).
+# That requires either no branch protection on main OR `github-actions[bot]`
+# being on the "Allow specified actors to bypass required pull requests"
+# list. For Phase 2 testing on contractor-engine-test (no protection), works
+# as-is. For Phase 4 onboarding of real contractor repos (which DO enable
+# branch protection per PLAN §11), the onboarding script will need to add
+# github-actions[bot] to the bypass list — track this as a Phase 4 task.
+#
+# See PLAN.md §8 Phase 2.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: number
+      pr_body:
+        required: true
+        type: string
+      merge_commit_sha:
+        required: true
+        type: string
+      merged_by:
+        required: true
+        type: string
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Check out the contractor repo at main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # need the merge commit's parent for diff-tree
+          ref: main
+
+      - name: Check out the engine repo (scripts + templates)
+        uses: actions/checkout@v4
+        with:
+          repository: QuantEcon/contractor-payments
+          path: engine
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Install Typst
+        run: |
+          TYPST_VERSION="0.13.0"
+          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo mv /tmp/typst-*/typst /usr/local/bin/typst
+          typst --version
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Find the submission YAML in the merge commit
+        id: find_submission
+        env:
+          MERGE_SHA: ${{ inputs.merge_commit_sha }}
+        run: |
+          # Files touched by the merge commit — filter to submission YAMLs.
+          SUBMISSION_FILE=$(git diff-tree --no-commit-id --name-only -r "$MERGE_SHA" \
+            | grep -E '^submissions/.*\.yml$' \
+            | head -1)
+          if [ -z "$SUBMISSION_FILE" ]; then
+            echo "ERROR: No submissions/*.yml found in merge commit $MERGE_SHA" >&2
+            exit 1
+          fi
+          echo "submission_file=$SUBMISSION_FILE" >> "$GITHUB_OUTPUT"
+          echo "Submission file: $SUBMISSION_FILE"
+
+          CONTRACT_ID=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['contract_id'])" "$SUBMISSION_FILE")
+          PERIOD=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['period'])" "$SUBMISSION_FILE")
+          SUBMISSION_ID=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['submission_id'])" "$SUBMISSION_FILE")
+          echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+          echo "period=$PERIOD" >> "$GITHUB_OUTPUT"
+          echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Extract original issue number from PR body
+        id: find_issue
+        env:
+          PR_BODY: ${{ inputs.pr_body }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          # PR body contains "Closes #N" per create_submission_pr.py
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oE 'Closes #[0-9]+' | head -1 | grep -oE '[0-9]+')
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "WARN: No 'Closes #N' found in PR body; falling back to PR number $PR_NUMBER" >&2
+            ISSUE_NUMBER="$PR_NUMBER"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Original issue: #$ISSUE_NUMBER"
+
+      - name: Stamp approval + re-render PDF/PNG
+        env:
+          PYTHONPATH: engine
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python -m scripts.finalize_approval \
+            --submission "${{ steps.find_submission.outputs.submission_file }}" \
+            --settings config/settings.yml \
+            --templates engine/templates \
+            --approver "${{ inputs.merged_by }}"
+
+      - name: Append to ledger YAML
+        env:
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.update_ledger \
+            --submission "${{ steps.find_submission.outputs.submission_file }}"
+
+      - name: Commit re-rendered PDF/PNG + ledger to main
+        id: commit_back
+        run: |
+          git add submissions/ generated_pdfs/ ledger/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit (idempotent re-run on already-processed PR?)"
+            echo "did_commit=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Process approved submission from PR #${{ inputs.pr_number }} [skip ci]"
+            git push origin main
+            echo "did_commit=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update pinned ledger issue
+        env:
+          PYTHONPATH: engine
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.update_ledger_issue \
+            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
+            --repo "${{ github.repository }}"
+
+      - name: Send approval email
+        env:
+          PYTHONPATH: engine
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          PSL_EMAIL: ${{ vars.PSL_EMAIL }}
+          QUANTECON_EMAIL: ${{ vars.QUANTECON_EMAIL }}
+        run: |
+          python -m scripts.notify_email \
+            --submission "${{ steps.find_submission.outputs.submission_file }}" \
+            --settings config/settings.yml \
+            --pdf "generated_pdfs/${{ steps.find_submission.outputs.period }}/${{ steps.find_submission.outputs.submission_id }}.pdf" \
+            --fiscal-host engine/templates/fiscal-host.yml \
+            --issue-url "https://github.com/${{ github.repository }}/issues/${{ steps.find_issue.outputs.issue_number }}" \
+            --output-summary /tmp/email_summary.json
+
+      - name: Post audit comment on the original issue
+        env:
+          PYTHONPATH: engine
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.notify_comment \
+            --submission "${{ steps.find_submission.outputs.submission_file }}" \
+            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
+            --email-summary /tmp/email_summary.json \
+            --issue ${{ steps.find_issue.outputs.issue_number }} \
+            --repo "${{ github.repository }}"
+
+      - name: Apply `processed` label to the merged PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "${{ inputs.pr_number }}" --add-label "processed" \
+            --repo "${{ github.repository }}"
