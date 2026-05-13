@@ -24,7 +24,7 @@ body:
         comfortable with git.
 
         Need help? See the
-        [Contractor Guide](https://github.com/QuantEcon/timesheets/blob/main/docs/CONTRACTOR_GUIDE.md).
+        [Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md).
 
   - type: dropdown
     id: contract
@@ -37,35 +37,35 @@ $CONTRACT_OPTIONS
       required: true
 
   - type: dropdown
-    id: period
+    id: year
     attributes:
-      label: Period
-      description: Which month is this timesheet for?
+      label: Year
+      description: Calendar year of this timesheet.
       options:
-        - "2025-01"
-        - "2025-02"
-        - "2025-03"
-        - "2025-04"
-        - "2025-05"
-        - "2025-06"
-        - "2025-07"
-        - "2025-08"
-        - "2025-09"
-        - "2025-10"
-        - "2025-11"
-        - "2025-12"
-        - "2026-01"
-        - "2026-02"
-        - "2026-03"
-        - "2026-04"
-        - "2026-05"
-        - "2026-06"
-        - "2026-07"
-        - "2026-08"
-        - "2026-09"
-        - "2026-10"
-        - "2026-11"
-        - "2026-12"
+        - "2025"
+        - "2026"
+        - "2027"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: month
+    attributes:
+      label: Month
+      description: Calendar month of this timesheet.
+      options:
+        - "01 — January"
+        - "02 — February"
+        - "03 — March"
+        - "04 — April"
+        - "05 — May"
+        - "06 — June"
+        - "07 — July"
+        - "08 — August"
+        - "09 — September"
+        - "10 — October"
+        - "11 — November"
+        - "12 — December"
     validations:
       required: true
 

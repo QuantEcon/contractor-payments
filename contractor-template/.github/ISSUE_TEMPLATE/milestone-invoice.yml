@@ -1,0 +1,114 @@
+name: 🎯 Milestone Invoice
+description: Submit an invoice for a milestone delivered on a milestone contract.
+title: "Milestone invoice submission"
+labels: ["milestone-invoice", "pending-review"]
+
+# NOTE: This file is a template. It contains the `$MILESTONE_CONTRACT_OPTIONS`
+# placeholder substituted by onboarding/new-contractor.py into a real options
+# list (filtered to milestone-type contracts only) when seeded into a new
+# contractor repo. As-is, this file will NOT load as valid YAML — that is
+# intentional. See PLAN.md §4.6 and §5.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Milestone Invoice Submission
+
+        Submit an invoice for a milestone you have delivered on a
+        milestone contract. On submission, a Pull Request will be
+        automatically created with the structured data. An admin will
+        review and merge; on merge a PDF is generated and the payments
+        manager is notified.
+
+        Refer to your contract for the milestone schedule (IDs, dates,
+        amounts). For catch-up submissions covering multiple missed
+        milestones, add one row per milestone.
+
+        **Corrections after submitting:** edit this issue (the PR will
+        be regenerated), or edit the PR branch directly if you're
+        comfortable with git.
+
+        Need help? See the
+        [Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md).
+
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Contract
+      description: Which milestone contract does this invoice apply to?
+      options:
+$MILESTONE_CONTRACT_OPTIONS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: year
+    attributes:
+      label: Year
+      description: Calendar year of this invoice.
+      options:
+        - "2025"
+        - "2026"
+        - "2027"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: month
+    attributes:
+      label: Month
+      description: Calendar month of this invoice.
+      options:
+        - "01 — January"
+        - "02 — February"
+        - "03 — March"
+        - "04 — April"
+        - "05 — May"
+        - "06 — June"
+        - "07 — July"
+        - "08 — August"
+        - "09 — September"
+        - "10 — October"
+        - "11 — November"
+        - "12 — December"
+    validations:
+      required: true
+
+  - type: textarea
+    id: entries
+    attributes:
+      label: Milestone Entries
+      description: |
+        One row per milestone claimed, in the format:
+        `ID | YYYY-MM-DD | amount | description`
+
+        - **ID** — milestone number from the contract schedule (e.g. `3`)
+        - **Date** — milestone delivery date
+        - **Amount** — payment amount (currency is fixed by the contract)
+        - **Description** — what was delivered
+
+        Almost always a single row. Add multiple rows only for catch-up
+        submissions covering missed prior months. Descriptions may
+        contain any text — the parser splits on the first three `|` only.
+      placeholder: |
+        3 | 2026-07-15 | 77000 | Monthly Payment — July
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes (optional)
+      placeholder: e.g. "Catch-up submission covering May–Jul; May was missed in error."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm that the milestones listed above have been delivered and the amounts are correct per the contract.
+          required: true

@@ -14,6 +14,7 @@ from scripts.create_submission_pr import (
     generate_submission_id,
     render_pr_body,
     resolve_collision_suffix,
+    resolve_payer_today,
 )
 
 
@@ -84,6 +85,34 @@ class TestResolveCollisionSuffix:
         (period_dir / "alice-timesheet-2026-06.yml").touch()
         result = resolve_collision_suffix(tmp_path, "bob-timesheet-2026-06", "2026-06")
         assert result == "bob-timesheet-2026-06"
+
+
+# ─── Payer-timezone date ────────────────────────────────────────────────────
+
+class TestResolvePayerToday:
+    def test_reads_timezone_from_branding(self, tmp_path):
+        branding = tmp_path / "branding.yml"
+        branding.write_text(
+            "psl_foundation:\n  timezone: America/New_York\n",
+            encoding="utf-8",
+        )
+        result = resolve_payer_today(branding)
+        # ISO date format; specific value is wall-clock-dependent, so just check shape.
+        assert len(result) == 10 and result[4] == "-" and result[7] == "-"
+
+    def test_falls_back_to_utc_when_branding_missing(self, tmp_path):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        result = resolve_payer_today(tmp_path / "nonexistent.yml")
+        assert result == datetime.now(ZoneInfo("UTC")).date().isoformat()
+
+    def test_falls_back_to_utc_when_timezone_field_missing(self, tmp_path):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        branding = tmp_path / "branding.yml"
+        branding.write_text("psl_foundation:\n  name: PSL Foundation\n", encoding="utf-8")
+        result = resolve_payer_today(branding)
+        assert result == datetime.now(ZoneInfo("UTC")).date().isoformat()
 
 
 # ─── Currency formatting ────────────────────────────────────────────────────
@@ -160,6 +189,17 @@ class TestEnrichSubmission:
         result = _enrich()
         assert result["entries"] == PARSED_SAMPLE["entries"]
 
+    def test_entries_sorted_by_date(self):
+        unsorted = {
+            **PARSED_SAMPLE,
+            "entries": [
+                {"date": "2025-01-13", "hours": 5.0, "description": "Plotting examples"},
+                {"date": "2025-01-06", "hours": 3.5, "description": "NumPy review"},
+            ],
+        }
+        result = _enrich(parsed=unsorted)
+        assert [e["date"] for e in result["entries"]] == ["2025-01-06", "2025-01-13"]
+
     def test_notes_preserved(self):
         parsed = {**PARSED_SAMPLE, "notes": "Travel time excluded."}
         result = _enrich(parsed=parsed)
@@ -170,15 +210,99 @@ class TestEnrichSubmission:
         with pytest.raises(ValueError, match="mismatch"):
             _enrich(contract=bad_contract)
 
-    def test_non_hourly_contract_raises(self):
+    def test_non_hourly_contract_raises_for_timesheet(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "type": "milestone"}
-        with pytest.raises(ValueError, match="only `hourly` is supported"):
+        with pytest.raises(ValueError, match="requires a `hourly` contract"):
             _enrich(contract=bad_contract)
 
     def test_missing_terms_raises(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "terms": {"hourly_rate": 45.00}}
         with pytest.raises(ValueError, match="missing required terms"):
             _enrich(contract=bad_contract)
+
+
+# ─── Enrichment: milestone invoice ──────────────────────────────────────────
+
+CONTRACT_MILESTONE_JPY = {
+    "contract_id": "QE-IUJ-2025-002",
+    "type": "milestone",
+    "status": "active",
+    "start_date": "2025-09-01",
+    "end_date": "2026-02-28",
+    "currency": "JPY",
+    "project": "iuj-visit",
+    "notes": "Six monthly payments of 77000 JPY.",
+}
+
+PARSED_MILESTONE_SAMPLE = {
+    "type": "milestone_invoice",
+    "contract_id": "QE-IUJ-2025-002",
+    "period": "2025-11",
+    "entries": [
+        {"id": "3", "date": "2025-11-15", "amount": 77000.0,
+         "description": "Monthly Payment — November"},
+    ],
+    "totals": {"amount": 77000.0},
+    "notes": "",
+    "status": "pending",
+}
+
+
+def _enrich_milestone(parsed=PARSED_MILESTONE_SAMPLE, contract=CONTRACT_MILESTONE_JPY, **overrides):
+    kwargs = dict(
+        submitter="mmcky",
+        submission_id="mmcky-invoice-2025-11",
+        issue_number=99,
+        submitted_date="2025-11-20",
+    )
+    kwargs.update(overrides)
+    return enrich_submission(parsed, contract, **kwargs)
+
+
+class TestEnrichMilestoneSubmission:
+    def test_basic_milestone_enrichment(self):
+        result = _enrich_milestone()
+        assert result["type"] == "milestone_invoice"
+        assert result["submission_id"] == "mmcky-invoice-2025-11"
+        assert result["contract_id"] == "QE-IUJ-2025-002"
+        assert result["period"] == "2025-11"
+        assert result["totals"]["amount"] == 77000   # JPY rounds to int
+        assert result["totals"]["currency"] == "JPY"
+        assert "hours" not in result["totals"]
+        assert "rate" not in result["totals"]
+
+    def test_milestone_entries_amounts_formatted_for_currency(self):
+        # JPY should produce int amounts (no decimals).
+        result = _enrich_milestone()
+        assert result["entries"][0]["amount"] == 77000
+        assert isinstance(result["entries"][0]["amount"], int)
+
+    def test_multiple_milestone_entries_summed(self):
+        parsed = {
+            **PARSED_MILESTONE_SAMPLE,
+            "entries": [
+                {"id": "1", "date": "2025-09-15", "amount": 77000.0, "description": "Sep"},
+                {"id": "2", "date": "2025-10-15", "amount": 77000.0, "description": "Oct"},
+                {"id": "3", "date": "2025-11-15", "amount": 77000.0, "description": "Nov"},
+            ],
+        }
+        result = _enrich_milestone(parsed=parsed)
+        assert result["totals"]["amount"] == 231000
+
+    def test_non_milestone_contract_raises_for_invoice(self):
+        bad_contract = {**CONTRACT_MILESTONE_JPY, "type": "hourly"}
+        with pytest.raises(ValueError, match="requires a `milestone` contract"):
+            _enrich_milestone(contract=bad_contract)
+
+    def test_milestone_contract_missing_currency_raises(self):
+        bad_contract = {k: v for k, v in CONTRACT_MILESTONE_JPY.items() if k != "currency"}
+        with pytest.raises(ValueError, match="missing a top-level `currency`"):
+            _enrich_milestone(contract=bad_contract)
+
+    def test_contract_id_mismatch_still_caught(self):
+        bad_contract = {**CONTRACT_MILESTONE_JPY, "contract_id": "different-id"}
+        with pytest.raises(ValueError, match="mismatch"):
+            _enrich_milestone(contract=bad_contract)
 
 
 # ─── PR body ────────────────────────────────────────────────────────────────

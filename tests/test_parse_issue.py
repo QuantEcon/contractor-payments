@@ -19,27 +19,82 @@ from scripts.parse_issue import (
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
+_MONTH_NAMES = {
+    "01": "January", "02": "February", "03": "March", "04": "April",
+    "05": "May", "06": "June", "07": "July", "08": "August",
+    "09": "September", "10": "October", "11": "November", "12": "December",
+}
+
+
 def build_body(
     *,
     contract: str = "jane-doe-hourly-2025",
-    period: str = "2025-01",
+    year: str = "2025",
+    month: str = "01 — January",
     entries: str = "2025-01-06 | 3.5 | NumPy lecture exercises review",
     notes: str = "_No response_",
     confirmation_checked: bool = True,
+    period: str | None = None,
 ) -> str:
-    """Build a body that mimics GitHub's Issue Form rendering."""
+    """Build a body that mimics GitHub's Issue Form rendering for the Hourly
+    Timesheet template.
+
+    For convenience, `period="YYYY-MM"` can be passed instead of explicit
+    `year` + `month` — it splits into the new two-dropdown shape automatically.
+    """
+    if period is not None:
+        # Split a "YYYY-MM" shortcut into the Year/Month dropdown values.
+        if "-" in period:
+            y, m = period.split("-", 1)
+            year = y
+            mm = m.zfill(2)
+            month = f"{mm} — {_MONTH_NAMES.get(mm, '?')}"
+        else:
+            # Malformed period — feed it through to Year so the error test sees it.
+            year = period
+            month = ""
     checkbox = "- [X]" if confirmation_checked else "- [ ]"
     return (
         f"### Contract\n\n"
         f"{contract}\n\n"
-        f"### Period\n\n"
-        f"{period}\n\n"
+        f"### Year\n\n"
+        f"{year}\n\n"
+        f"### Month\n\n"
+        f"{month}\n\n"
         f"### Time Entries\n\n"
         f"```\n{entries}\n```\n\n"
         f"### Additional notes (optional)\n\n"
         f"{notes}\n\n"
         f"### Confirmation\n\n"
         f"{checkbox} I confirm that the hours and descriptions above are accurate.\n"
+    )
+
+
+def build_milestone_body(
+    *,
+    contract: str = "QE-IUJ-2025-002",
+    year: str = "2025",
+    month: str = "11 — November",
+    entries: str = "3 | 2025-11-15 | 77000 | Monthly Payment — November",
+    notes: str = "_No response_",
+    confirmation_checked: bool = True,
+) -> str:
+    """Build a body that mimics GitHub's Issue Form rendering for the
+    Milestone Invoice template."""
+    checkbox = "- [X]" if confirmation_checked else "- [ ]"
+    return (
+        f"### Contract\n\n"
+        f"{contract}\n\n"
+        f"### Year\n\n"
+        f"{year}\n\n"
+        f"### Month\n\n"
+        f"{month}\n\n"
+        f"### Milestone Entries\n\n"
+        f"```\n{entries}\n```\n\n"
+        f"### Additional notes (optional)\n\n"
+        f"{notes}\n\n"
+        f"### Confirmation\n\n"
+        f"{checkbox} I confirm that the milestones listed above have been delivered and the amounts are correct per the contract.\n"
     )
 
 
@@ -281,17 +336,29 @@ class TestFieldValidation:
         assert not result.ok
         assert any("Contract" in m for m in error_messages(result))
 
-    def test_missing_period(self):
-        body = build_body(period="_No response_")
+    def test_missing_year(self):
+        body = build_body(year="_No response_")
         result = parse_issue(body)
         assert not result.ok
-        assert any("Period" in m for m in error_messages(result))
+        assert any("Year" in m for m in error_messages(result))
 
-    def test_malformed_period_format(self):
-        body = build_body(period="January 2025")
+    def test_missing_month(self):
+        body = build_body(month="_No response_")
         result = parse_issue(body)
         assert not result.ok
-        assert any("YYYY-MM" in m for m in error_messages(result))
+        assert any("Month" in m for m in error_messages(result))
+
+    def test_malformed_year(self):
+        body = build_body(year="twenty-five")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("4-digit year" in m for m in error_messages(result))
+
+    def test_malformed_month(self):
+        body = build_body(month="Janvier")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Month `Janvier`" in m for m in error_messages(result))
 
     def test_unchecked_confirmation(self):
         body = build_body(confirmation_checked=False)
@@ -360,3 +427,137 @@ class TestHelpers:
         delim, warning = _detect_delimiter("2025-01-06, 3.5, work")
         assert delim == ","
         assert warning is not None
+
+
+# ─── Milestone Invoice parser (§4.6) ────────────────────────────────────────
+
+class TestMilestoneHappyPath:
+    def test_single_milestone_parses(self):
+        result = parse_issue(build_milestone_body())
+        assert result.ok, error_messages(result)
+        assert result.submission is not None
+        assert result.submission["type"] == "milestone_invoice"
+        assert result.submission["contract_id"] == "QE-IUJ-2025-002"
+        assert result.submission["period"] == "2025-11"
+        assert result.submission["totals"]["amount"] == 77000
+        assert result.submission["entries"] == [
+            {"id": "3", "date": "2025-11-15", "amount": 77000.0,
+             "description": "Monthly Payment — November"},
+        ]
+        assert "hours" not in result.submission["totals"]
+
+    def test_multiple_milestones_catch_up(self):
+        body = build_milestone_body(
+            month="11 — November",
+            entries=(
+                "3 | 2025-11-15 | 77000 | Monthly Payment — November\n"
+                "2 | 2025-10-15 | 77000 | Monthly Payment — October (catch-up)\n"
+                "1 | 2025-09-15 | 77000 | Monthly Payment — September (catch-up)"
+            ),
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        # Entries sorted chronologically (matches hourly behaviour).
+        ids_in_order = [e["id"] for e in result.submission["entries"]]
+        assert ids_in_order == ["1", "2", "3"]
+        assert result.submission["totals"]["amount"] == 231000
+
+    def test_out_of_period_date_allowed_for_catch_up(self):
+        # Period is November, but milestone date is September (legitimate catch-up).
+        body = build_milestone_body(
+            month="11 — November",
+            entries="1 | 2025-09-15 | 77000 | Late September claim",
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+
+    def test_amount_with_comma_separator(self):
+        body = build_milestone_body(
+            entries="3 | 2025-11-15 | 77,000 | Monthly Payment",
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert result.submission["totals"]["amount"] == 77000
+
+
+class TestMilestoneRejectRules:
+    def test_duplicate_id_rejected(self):
+        body = build_milestone_body(entries=(
+            "3 | 2025-11-15 | 77000 | November\n"
+            "3 | 2025-12-15 | 77000 | December"
+        ))
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("duplicate milestone ID" in m.lower() or "duplicate" in m.lower()
+                   for m in error_messages(result))
+
+    def test_negative_amount_rejected(self):
+        body = build_milestone_body(entries="3 | 2025-11-15 | -100 | bogus")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("amount" in m.lower() for m in error_messages(result))
+
+    def test_zero_amount_rejected(self):
+        body = build_milestone_body(entries="3 | 2025-11-15 | 0 | nothing")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("greater than 0" in m for m in error_messages(result))
+
+    def test_empty_id_rejected(self):
+        body = build_milestone_body(entries=" | 2025-11-15 | 77000 | description")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("milestone ID" in m for m in error_messages(result))
+
+    def test_empty_description_rejected(self):
+        body = build_milestone_body(entries="3 | 2025-11-15 | 77000 | ")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("description" in m.lower() for m in error_messages(result))
+
+    def test_missing_fields_rejected(self):
+        body = build_milestone_body(entries="3 | 2025-11-15 | 77000")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("four fields" in m for m in error_messages(result))
+
+    def test_invalid_date_rejected(self):
+        body = build_milestone_body(entries="3 | not-a-date | 77000 | description")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("date" in m.lower() for m in error_messages(result))
+
+
+class TestMilestoneTypeDetection:
+    def test_milestone_section_routes_to_milestone_parser(self):
+        result = parse_issue(build_milestone_body())
+        assert result.submission["type"] == "milestone_invoice"
+
+    def test_time_section_still_routes_to_hourly_parser(self):
+        result = parse_issue(build_body())
+        assert result.submission["type"] == "timesheet"
+
+    def test_both_sections_present_is_rejected(self):
+        # Synthesise a body with both Time Entries and Milestone Entries.
+        body = (
+            "### Contract\n\nQE-FOO-2025-001\n\n"
+            "### Year\n\n2025\n\n"
+            "### Month\n\n11 — November\n\n"
+            "### Time Entries\n\n```\n2025-11-01 | 3 | work\n```\n\n"
+            "### Milestone Entries\n\n```\n3 | 2025-11-15 | 77000 | work\n```\n\n"
+            "### Confirmation\n\n- [X] confirm\n"
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Both" in m and "Milestone" in m for m in error_messages(result))
+
+    def test_no_entries_section_is_rejected(self):
+        body = (
+            "### Contract\n\nQE-FOO-2025-001\n\n"
+            "### Year\n\n2025\n\n"
+            "### Month\n\n11 — November\n\n"
+            "### Confirmation\n\n- [X] confirm\n"
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("No entries section" in m for m in error_messages(result))

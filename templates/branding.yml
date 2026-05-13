@@ -14,6 +14,10 @@ psl_foundation:
     PO Box 50932
     Columbia, SC 29250
     United States
+  # IANA timezone for the payer. Used as the policy timezone for document
+  # issue dates (submission, approval) so every contractor's paperwork lines
+  # up with the payer's books regardless of contractor locale.
+  timezone: America/New_York
 
 quantecon:
   name: QuantEcon

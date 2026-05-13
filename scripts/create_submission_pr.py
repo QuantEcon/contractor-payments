@@ -26,9 +26,10 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -37,15 +38,27 @@ from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_
 
 # ─── Pure data transformations (testable) ───────────────────────────────────
 
-def generate_submission_id(github_handle: str, period: str) -> str:
-    """Period-based submission ID, e.g. `mmcky-timesheet-2026-06`.
+_TYPE_SLUG = {
+    "timesheet": "timesheet",
+    "milestone_invoice": "invoice",
+}
+
+
+def generate_submission_id(
+    github_handle: str,
+    period: str,
+    submission_type: str = "timesheet",
+) -> str:
+    """Period-based submission ID, e.g. `mmcky-timesheet-2026-06` or
+    `mmcky-invoice-2025-11`.
 
     Pure function — does not check for collisions. Use
     `resolve_collision_suffix` against the working tree to apply a
     `-v2`, `-v3` suffix when a submission for the same period already
     exists (see PLAN §v1.1 for the revision/supersede rationale).
     """
-    return f"{github_handle}-timesheet-{period}"
+    slug = _TYPE_SLUG.get(submission_type, "submission")
+    return f"{github_handle}-{slug}-{period}"
 
 
 def resolve_collision_suffix(repo_root: Path, base_id: str, period: str) -> str:
@@ -65,6 +78,23 @@ def resolve_collision_suffix(repo_root: Path, base_id: str, period: str) -> str:
         candidate = f"{base_id}-v{n}"
         n += 1
     return candidate
+
+
+def resolve_payer_today(branding_path: Path) -> str:
+    """Today's date in the payer's timezone, ISO-formatted.
+
+    Reads `psl_foundation.timezone` from templates/branding.yml; falls back to
+    UTC if the file or field is missing. Policy: document issue dates use the
+    payer's locale so paperwork lines up with the payer's books regardless of
+    where the contractor lives.
+    """
+    tz_name = None
+    if branding_path.exists():
+        with open(branding_path, encoding="utf-8") as f:
+            branding = yaml.safe_load(f) or {}
+        tz_name = branding.get("psl_foundation", {}).get("timezone")
+    tz = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+    return datetime.now(tz).date().isoformat()
 
 
 def format_currency_amount(amount: float, currency: str) -> float | int:
@@ -89,13 +119,14 @@ def enrich_submission(
 ) -> dict:
     """Combine the parser's submission with contract data + metadata.
 
+    Branches on `submission["type"]`:
+    - `timesheet` — requires an `hourly` contract; computes amount from hours × rate.
+    - `milestone_invoice` — requires a `milestone` contract; amount is the sum
+      of the contractor-entered milestone entries (verified against the
+      contract's notes by the admin during PR review, not in code).
+
     Returns a fully-formed submission dict ready to be written as YAML.
     Raises ValueError if the contract is malformed or the type doesn't match.
-
-    The submission_id is computed by the caller (so it can apply collision
-    suffixes by inspecting the working tree). The contract's start_date /
-    end_date are folded into the enriched submission so the PDF template can
-    show the contract's active window without a second file read at render.
     """
     contract_id_in_submission = submission["contract_id"]
     contract_id_in_contract = contract.get("contract_id")
@@ -105,49 +136,86 @@ def enrich_submission(
             f"contract file says `{contract_id_in_contract}`."
         )
 
+    submission_type = submission.get("type", "timesheet")
     contract_type = contract.get("type")
-    if contract_type != "hourly":
-        raise ValueError(
-            f"Contract `{contract_id_in_contract}` is type `{contract_type}`, "
-            f"but only `hourly` is supported in v1."
-        )
 
-    terms = contract.get("terms", {})
-    if "hourly_rate" not in terms or "currency" not in terms:
-        raise ValueError(
-            f"Contract `{contract_id_in_contract}` is missing required terms "
-            f"(`hourly_rate` and `currency`)."
-        )
-
-    hourly_rate = float(terms["hourly_rate"])
-    currency = terms["currency"]
-    total_hours = submission["totals"]["hours"]
-    amount = format_currency_amount(total_hours * hourly_rate, currency)
-    rate_display = format_currency_amount(hourly_rate, currency)
-
-    enriched = {
+    common = {
         "submission_id": submission_id,
         "contract_id": contract_id_in_submission,
         "contract_start_date": contract.get("start_date"),
         "contract_end_date": contract.get("end_date"),
-        "type": "timesheet",
+        "type": submission_type,
         "period": submission["period"],
         "submitted_date": submitted_date,
         "submitted_by": submitter,
         "issue_number": issue_number,
-        "entries": submission["entries"],
-        "totals": {
-            "hours": total_hours,
-            "rate": rate_display,
-            "amount": amount,
-            "currency": currency,
-        },
         "notes": submission.get("notes", ""),
         "status": "pending",
         "approved_by": None,
         "approved_date": None,
     }
-    return enriched
+
+    if submission_type == "timesheet":
+        if contract_type != "hourly":
+            raise ValueError(
+                f"Contract `{contract_id_in_contract}` is type `{contract_type}`, "
+                f"but a hourly timesheet submission requires a `hourly` contract."
+            )
+        terms = contract.get("terms", {})
+        if "hourly_rate" not in terms or "currency" not in terms:
+            raise ValueError(
+                f"Contract `{contract_id_in_contract}` is missing required terms "
+                f"(`hourly_rate` and `currency`)."
+            )
+        hourly_rate = float(terms["hourly_rate"])
+        currency = terms["currency"]
+        total_hours = submission["totals"]["hours"]
+        amount = format_currency_amount(total_hours * hourly_rate, currency)
+        rate_display = format_currency_amount(hourly_rate, currency)
+
+        return {
+            **common,
+            "entries": sorted(submission["entries"], key=lambda e: e["date"]),
+            "totals": {
+                "hours": total_hours,
+                "rate": rate_display,
+                "amount": amount,
+                "currency": currency,
+            },
+        }
+
+    if submission_type == "milestone_invoice":
+        if contract_type != "milestone":
+            raise ValueError(
+                f"Contract `{contract_id_in_contract}` is type `{contract_type}`, "
+                f"but a milestone invoice submission requires a `milestone` contract."
+            )
+        currency = contract.get("currency")
+        if not currency:
+            raise ValueError(
+                f"Milestone contract `{contract_id_in_contract}` is missing a "
+                f"top-level `currency` field."
+            )
+        entries = sorted(submission["entries"], key=lambda e: e["date"])
+        total_amount = format_currency_amount(
+            sum(e["amount"] for e in entries),
+            currency,
+        )
+        # Normalise per-entry amount display formatting too, so the YAML +
+        # PDF agree on rounding for the contract's currency.
+        for e in entries:
+            e["amount"] = format_currency_amount(e["amount"], currency)
+
+        return {
+            **common,
+            "entries": entries,
+            "totals": {
+                "amount": total_amount,
+                "currency": currency,
+            },
+        }
+
+    raise ValueError(f"Unknown submission type `{submission_type}`.")
 
 
 def render_pr_body(
@@ -165,20 +233,30 @@ def render_pr_body(
     see it inline in the PR description without leaving the review surface.
     """
     totals = submission["totals"]
+    submission_type = submission.get("type", "timesheet")
+    type_label = {
+        "timesheet": "Timesheet",
+        "milestone_invoice": "Milestone Invoice",
+    }.get(submission_type, "Submission")
+
     lines = [
         f"Auto-generated from issue #{issue_number} (@{submitter}).",
         "",
+        f"**Type:** {type_label}",
         f"**Period:** `{submission['period']}`",
         f"**Contract:** `{submission['contract_id']}`",
-        f"**Total hours:** {totals['hours']}",
-        f"**Total amount:** {totals['amount']} {totals['currency']}",
-        "",
     ]
+    if submission_type == "timesheet":
+        lines.append(f"**Total hours:** {totals['hours']}")
+    else:
+        lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
+    lines.append(f"**Total amount:** {totals['amount']} {totals['currency']}")
+    lines.append("")
     if png_url:
         lines.extend([
             "### Preview",
             "",
-            f"![Timesheet preview]({png_url})",
+            f"![{type_label} preview]({png_url})",
             "",
         ])
     if pdf_path_rel:
@@ -220,12 +298,21 @@ def create_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", "-b", branch], cwd=cwd)
 
 
-def stage_and_commit(paths: list[Path], issue_number: int, cwd: Optional[Path] = None) -> None:
+def stage_and_commit(
+    paths: list[Path],
+    issue_number: int,
+    cwd: Optional[Path] = None,
+    submission_type: str = "timesheet",
+) -> None:
     for p in paths:
         _run(["git", "add", str(p)], cwd=cwd)
+    type_label = {
+        "timesheet": "timesheet",
+        "milestone_invoice": "milestone invoice",
+    }.get(submission_type, "submission")
     _run([
         "git", "commit", "-m",
-        f"Add timesheet submission from #{issue_number}",
+        f"Add {type_label} submission from #{issue_number}",
     ], cwd=cwd)
 
 
@@ -335,8 +422,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="GitHub handle of the issue submitter.")
     p.add_argument("--issue-title", required=True)
     p.add_argument("--submitted-date",
-                   default=date.today().isoformat(),
-                   help="ISO date for `submitted_date` (default: today).")
+                   default=None,
+                   help="ISO date for `submitted_date`. Default: today in the payer's "
+                        "timezone (read from templates/branding.yml: psl_foundation.timezone). "
+                        "Falls back to UTC if branding/timezone unavailable.")
     p.add_argument("--repo-root", default=".",
                    help="Working tree root (default: current directory).")
     p.add_argument("--templates-dir", default="templates",
@@ -352,6 +441,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     repo_root = Path(args.repo_root).resolve()
     templates_dir = (repo_root / args.templates_dir).resolve()
     settings_path = (repo_root / args.settings_file).resolve()
+
+    if args.submitted_date is None:
+        args.submitted_date = resolve_payer_today(templates_dir / "branding.yml")
 
     # Bail early if a branch already exists for this issue. Phase 1 doesn't
     # handle regeneration; that's deferred per PLAN §4.4.
@@ -377,7 +469,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     contract = load_contract(repo_root, parsed["contract_id"])
 
-    base_id = generate_submission_id(args.issue_author, parsed["period"])
+    submission_type = parsed.get("type", "timesheet")
+    base_id = generate_submission_id(
+        args.issue_author, parsed["period"], submission_type=submission_type
+    )
     submission_id = resolve_collision_suffix(repo_root, base_id, parsed["period"])
     if submission_id != base_id:
         print(
@@ -438,7 +533,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Git: branch, commit, push.
     create_branch(branch, cwd=repo_root)
-    stage_and_commit(paths_to_stage, args.issue_number, cwd=repo_root)
+    stage_and_commit(
+        paths_to_stage, args.issue_number, cwd=repo_root,
+        submission_type=submission_type,
+    )
     push_branch(branch, cwd=repo_root)
 
     # Open PR.
@@ -451,7 +549,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         png_url=png_url,
         warnings=warnings,
     )
-    pr_url = open_pr(args.issue_title, body, cwd=repo_root)
+    pr_url = open_pr(
+        args.issue_title, body, cwd=repo_root,
+        extra_labels=[submission_type.replace("_", "-")],
+    )
     print(f"Opened PR: {pr_url}")
 
     return 0

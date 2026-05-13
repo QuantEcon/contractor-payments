@@ -3,7 +3,7 @@ name: Issue to PR
 # Phase 1: in-place, non-reusable workflow that runs entirely within the
 # contractor repo. The Python scripts and the contractor's contract YAML
 # both live in this repo. Phase 3 will refactor this file into a thin
-# caller of a reusable workflow in QuantEcon/timesheets.
+# caller of a reusable workflow in QuantEcon/contractor-payments.
 
 on:
   issues:
@@ -11,8 +11,12 @@ on:
 
 jobs:
   process:
-    # Only run for actual timesheet submissions (form-applied label).
-    if: contains(github.event.issue.labels.*.name, 'timesheet')
+    # Run on either submission template (form-applied label). The parser
+    # auto-detects which type from the issue body's section headings, so this
+    # workflow doesn't need to dispatch separately — same pipeline for both.
+    if: >-
+      contains(github.event.issue.labels.*.name, 'timesheet') ||
+      contains(github.event.issue.labels.*.name, 'milestone-invoice')
     runs-on: ubuntu-latest
     permissions:
       contents: write

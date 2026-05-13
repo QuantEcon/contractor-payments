@@ -24,6 +24,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -53,11 +54,18 @@ def _add_display_strings(data: dict) -> dict:
     has no built-in currency-aware formatter. We do the formatting here
     while we still have Python's nice format specifiers.
 
-    Adds:
-      - entries[].hours_display    e.g. "3.5", "5.0"
-      - totals.hours_display       e.g. "12.5"
-      - totals.rate_display        e.g. "50.00 AUD", "5000 JPY"
-      - totals.amount_display      e.g. "625.00 AUD", "42500 JPY"
+    Adds (hourly):
+      - entries[].hours_display          e.g. "3.5", "5.0"
+      - totals.hours_display             e.g. "12.5"
+      - totals.rate_amount_display       e.g. "50.00", "5000"   (no currency)
+      - totals.amount_amount_display     e.g. "625.00", "42500" (no currency)
+
+    Adds (milestone invoice):
+      - entries[].amount_display         e.g. "77,000", "45.50"
+      - totals.amount_amount_display     e.g. "231,000", "925.00"
+
+    The currency code lives in `totals.currency` and is rendered as a
+    separate column by the template.
     """
     totals = data.get("totals", {})
     currency = totals.get("currency", "")
@@ -74,30 +82,54 @@ def _add_display_strings(data: dict) -> dict:
     if "hours" in totals:
         totals_out["hours_display"] = f"{totals['hours']:.1f}"
     if "rate" in totals:
-        totals_out["rate_display"] = f"{fmt_money(totals['rate'])} {currency}"
+        totals_out["rate_amount_display"] = fmt_money(totals["rate"])
     if "amount" in totals:
-        totals_out["amount_display"] = f"{fmt_money(totals['amount'])} {currency}"
+        totals_out["amount_amount_display"] = fmt_money(totals["amount"])
     out["totals"] = totals_out
 
-    # Entry hours
+    # Per-entry display strings — branch on which fields are present.
     entries_out = []
     for e in data.get("entries", []):
         eo = dict(e)
         if "hours" in eo:
             eo["hours_display"] = f"{eo['hours']:.1f}"
+        if "amount" in eo:
+            eo["amount_display"] = fmt_money(eo["amount"])
         entries_out.append(eo)
     out["entries"] = entries_out
 
     return out
 
 
+# Map submission type → template filename in the templates directory.
+_TEMPLATE_FOR_TYPE = {
+    "timesheet": "timesheet.typ",
+    "milestone_invoice": "invoice.typ",
+}
+
+
+def _template_filename_for(data: dict) -> str:
+    """Pick the right .typ template based on `data["type"]`. Defaults to the
+    hourly timesheet template if the type is missing (backwards-compat with
+    earlier Phase 1 fixtures that didn't carry a type field)."""
+    submission_type = data.get("type", "timesheet")
+    template = _TEMPLATE_FOR_TYPE.get(submission_type)
+    if template is None:
+        raise ValueError(
+            f"Unknown submission type `{submission_type}` — no template registered. "
+            f"Known types: {sorted(_TEMPLATE_FOR_TYPE)}."
+        )
+    return template
+
+
 def _stage_working_dir(template_dir: Path, data: dict) -> Path:
     """Copy template + assets into a temp dir and write data.yml beside them.
 
-    Returns the path to the staged timesheet.typ file."""
-    work_dir = Path(tempfile.mkdtemp(prefix="timesheet-pdf-"))
-    # Template file
-    shutil.copy(template_dir / "timesheet.typ", work_dir / "timesheet.typ")
+    Picks the template file by `data["type"]`. Returns the path to the staged
+    .typ file (which is what `typst compile` is invoked on)."""
+    work_dir = Path(tempfile.mkdtemp(prefix="submission-pdf-"))
+    template_filename = _template_filename_for(data)
+    shutil.copy(template_dir / template_filename, work_dir / template_filename)
     # Assets directory
     assets_src = template_dir / "assets"
     if assets_src.exists():
@@ -105,14 +137,24 @@ def _stage_working_dir(template_dir: Path, data: dict) -> Path:
     # Data
     with open(work_dir / "data.yml", "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    return work_dir / "timesheet.typ"
+    return work_dir / template_filename
 
 
 DEFAULT_PNG_PPI = 200  # Higher than Typst's 144 default for crisp inline preview.
 
 
-def _load_data(submission_path: Path, settings_path: Path, template_dir: Path) -> dict:
-    """Load submission + settings + branding into the data dict the template wants."""
+def _load_data(
+    submission_path: Path,
+    settings_path: Path,
+    template_dir: Path,
+    repo: Optional[str] = None,
+) -> dict:
+    """Load submission + settings + branding into the data dict the template wants.
+
+    `repo` (e.g. "QuantEcon/contractor-mmcky") is environmental, not part of
+    the submission record — passed in at render time so the template can build
+    a link to the issue. Defaults to the `GITHUB_REPOSITORY` env var if unset.
+    """
     with open(submission_path, encoding="utf-8") as f:
         submission = yaml.safe_load(f)
     with open(settings_path, encoding="utf-8") as f:
@@ -120,6 +162,7 @@ def _load_data(submission_path: Path, settings_path: Path, template_dir: Path) -
     branding = _load_branding(template_dir)
     data = _merge_contractor(submission, settings)
     data["branding"] = branding
+    data["repo"] = repo or os.environ.get("GITHUB_REPOSITORY") or None
     data = _add_display_strings(data)
     return data
 
@@ -163,9 +206,10 @@ def render_submission_pdf(
     settings_path: Path,
     template_dir: Path,
     output_path: Path,
+    repo: Optional[str] = None,
 ) -> None:
     """Render `submission_path` into a PDF at `output_path`."""
-    data = _load_data(submission_path, settings_path, template_dir)
+    data = _load_data(submission_path, settings_path, template_dir, repo=repo)
     staged_typ = _stage_working_dir(template_dir, data)
     _run_typst(staged_typ, output_path, fmt="pdf", ppi=None)
 
@@ -176,9 +220,10 @@ def render_submission_png(
     template_dir: Path,
     output_path: Path,
     ppi: int = DEFAULT_PNG_PPI,
+    repo: Optional[str] = None,
 ) -> None:
     """Render `submission_path` into a PNG at `output_path` (single page)."""
-    data = _load_data(submission_path, settings_path, template_dir)
+    data = _load_data(submission_path, settings_path, template_dir, repo=repo)
     staged_typ = _stage_working_dir(template_dir, data)
     _run_typst(staged_typ, output_path, fmt="png", ppi=ppi)
 
@@ -195,6 +240,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Output path. Format inferred from extension (.pdf or .png).")
     p.add_argument("--ppi", type=int, default=DEFAULT_PNG_PPI,
                    help=f"PNG resolution in pixels per inch (default: {DEFAULT_PNG_PPI}). Ignored for PDF output.")
+    p.add_argument("--repo", default=None,
+                   help="GitHub repo slug (owner/name) for the issue link in the footer. "
+                        "Defaults to the GITHUB_REPOSITORY env var; omits the link if neither is set.")
     args = p.parse_args(argv)
 
     suffix = args.output.suffix.lower()
@@ -204,6 +252,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             settings_path=args.settings,
             template_dir=args.templates,
             output_path=args.output,
+            repo=args.repo,
         )
     elif suffix == ".png":
         render_submission_png(
@@ -212,6 +261,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             template_dir=args.templates,
             output_path=args.output,
             ppi=args.ppi,
+            repo=args.repo,
         )
     else:
         print(f"ERROR: --output must end in .pdf or .png (got {suffix})", file=sys.stderr)

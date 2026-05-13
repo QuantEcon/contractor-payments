@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: How to submit a timesheet
-    url: https://github.com/QuantEcon/timesheets/blob/main/docs/CONTRACTOR_GUIDE.md
+    url: https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md
     about: Step-by-step guide with screenshots
   - name: Something else?
-    url: https://github.com/QuantEcon/timesheets/issues
+    url: https://github.com/QuantEcon/contractor-payments/issues
     about: Open an issue on the engine repo instead — this repo is for timesheet submissions only.
