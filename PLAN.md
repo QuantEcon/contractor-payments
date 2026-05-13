@@ -1,8 +1,47 @@
-# QuantEcon Timesheets — Implementation Plan
+# QuantEcon Contractor Payments — Implementation Plan
 
-**Status:** Working draft. Tightened to v1 timesheet processing only.
+**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim deferred to Phase 5.
 **Source issue:** [QuantEcon/admin#3 — PRJ: QuantEcon Timesheet Management System](https://github.com/QuantEcon/admin/issues/3)
 **Related (broader vision, separate track):** [QuantEcon/admin#5 — PRJ: QuantEcon admin infrastructure](https://github.com/QuantEcon/admin/issues/5)
+
+---
+
+## At a glance
+
+Phase progress — high-level summary. Detailed task lists per phase live in [§8 Build phases](#8-build-phases).
+
+- [x] **Phase 0** — Planning
+- [x] **Phase 1** — Hourly Timesheet engine
+- [x] **Phase 1.5** — Milestone Invoice engine
+- [ ] **Phase 3a** — Reusable workflows (stops sync drift)  ← **current target**
+- [ ] **Phase 2** — Merge processing + email notify to PSL
+- [ ] 🛑 **BREAK** — testing phase (email pipeline iteration; `testing_mode: true` keeps PSL off the recipient list)
+- [ ] **Phase 3b** — Onboarding script for new contractor repos
+- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
+- [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
+
+## Contents
+
+1. [Goals](#1-goals)
+2. [Architectural decision — per-contractor private repos](#2-architectural-decision--per-contractor-private-repos)
+3. [Repository topology](#3-repository-topology)
+4. [Inside a contractor repo](#4-inside-a-contractor-repo)
+   - 4.1 [`config/settings.yml` — contractor identity + routing](#41-configsettingsyml--contractor-identity--routing)
+   - 4.2 [`contracts/{contract-id}.yml` — contract terms](#42-contractscontract-idyml--contract-terms)
+   - 4.3 [Submission forms — overview](#43-submission-forms--overview)
+   - 4.4 [Hourly Timesheet form](#44-githubissue_templatehourly-timesheetyml--hourly-timesheet-form)
+   - 4.5 [Submission validation and failure handling](#45-submission-validation-and-failure-handling)
+   - 4.6 [Milestone Invoice form](#46-githubissue_templatemilestone-invoiceyml--milestone-invoice-form)
+   - 4.7 [Reimbursement Claim form](#47-githubissue_templatereimbursement-claimyml--reimbursement-claim-form)
+   - 4.8 [Generic submission YAML shape](#48-generic-submission-yaml-shape)
+5. [Onboarding script](#5-onboarding--onboardingnew-contractorpy)
+6. [v1 scope](#6-v1-scope)
+7. [Workflow in practice](#7-workflow-in-practice)
+8. [Build phases](#8-build-phases)
+9. [Resolved decisions](#9-resolved-decisions)
+10. [Open items](#10-open-items)
+11. [Security posture](#11-security-posture)
+12. [Working notes](#12-working-notes)
 
 ---
 
