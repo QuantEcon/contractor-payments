@@ -545,8 +545,16 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 4. Generates `contracts/{contract-id}.yml` from the prompted contract details.
 5. Adds the contractor (Write), admin (Admin), and payments manager (Read) as collaborators via `gh api`.
 6. Sets branch protection on `main` (PR required, 1 review).
-7. Pushes the initial commit.
-8. Prints the contractor-facing URL and next steps.
+7. **Creates the workflow labels** via `gh label create` (idempotent — skips any that already exist). Required because GitHub Issue Forms silently drop `labels:` values that don't exist on the repo, which would break the workflow's label-based routing:
+   - `timesheet` — applied by the Hourly Timesheet form
+   - `milestone-invoice` — applied by the Milestone Invoice form
+   - `pending-review` — applied by both submission forms
+   - `parse-error` — applied by the workflow on parse failure
+   - `submission` — applied by the workflow when opening the submission PR
+   - `processed` — applied by Phase 2 merge processing
+   - (Phase 5) `reimbursement` — applied by the Reimbursement Claim form, added when Phase 5 lands
+8. Pushes the initial commit.
+9. Prints the contractor-facing URL and next steps.
 
 **Phase 5 will add a multi-select** for which issue templates to seed (Hourly Timesheet / Milestone Invoice / Reimbursement Claim), letting the admin configure reimbursement-only payees or any other subset. Until then, the script seeds both Phase 1/1.5 templates by default.
 
