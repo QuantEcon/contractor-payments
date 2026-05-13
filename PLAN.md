@@ -13,8 +13,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 0** — Planning
 - [x] **Phase 1** — Hourly Timesheet engine
 - [x] **Phase 1.5** — Milestone Invoice engine
-- [ ] **Phase 3a** — Reusable workflows (stops sync drift)  ← **current target**
-- [ ] **Phase 2** — Merge processing + email notify to PSL
+- [x] **Phase 3a** — Reusable workflows (engine code centralised; contractor repos are thin callers)
+- [ ] **Phase 2** — Merge processing + email notify to PSL  ← **current target**
 - [ ] 🛑 **BREAK** — testing phase (email pipeline iteration; `testing_mode: true` keeps PSL off the recipient list)
 - [ ] **Phase 3b** — Onboarding script for new contractor repos
 - [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
@@ -622,7 +622,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Contract ID convention | `QE-PSL-YYYY-NNN` | Documented in §4.2. System accepts any string; onboarding pre-fills this format. |
 | Contract listing on issue form | Static dropdown in the form YAML | Onboarding script seeds the initial list; admin edits on contract renewal. |
 | Submission ID | `{handle}-timesheet-{period}` with `-v2`, `-v3` collision suffix | Period-based for readability; suffix handles re-submissions for the same period. v1.1 polish layer for explicit revision metadata (§8). |
-| Approval notification | Email to PSL (Cc admin) via SMTP with the approved PDF attached, plus an internal GitHub comment confirming the send. | PSL doesn't use GitHub; email is the natural delivery channel. The GitHub comment is verbose by design — gives admins operational visibility and confirms the email step ran. `fiscal-host.yml.notifications.testing_mode` flag gates PSL while we iterate ([REDACTED:QUANTECON_EMAIL] only during testing). |
+| Approval notification | Email to PSL (Cc admin) via SMTP with the approved PDF attached, plus an internal GitHub comment confirming the send. | PSL doesn't use GitHub; email is the natural delivery channel. The GitHub comment is verbose by design — gives admins operational visibility and confirms the email step ran. `fiscal-host.yml.notifications.testing_mode` flag gates PSL while we iterate (`vars.QUANTECON_EMAIL` only during testing). |
 | PDF generation | Typst in CI; rendered at PR-creation, regenerated at merge with approval metadata | Committed to `generated_pdfs/<YYYY-MM>/`. PR carries a "PENDING REVIEW" PDF; merge replaces it with the approved version. |
 | PNG preview | Same template rendered to PNG; committed alongside the PDF | Embedded inline in the PR body via absolute raw URL so reviewers see the artifact in the PR description without leaving the review surface. Default 200 PPI, `--png-ppi` overrides. |
 | Fiscal-host identity & policy | `templates/fiscal-host.yml` (engine repo) — PSL Foundation address + timezone + email notification recipients; QuantEcon logo-only (no address). | Single source of truth across all contractor repos. Holds *all* fiscal-host config that's identical across payees. |
@@ -723,14 +723,15 @@ Engine + form + tests:
 Repo housekeeping:
 - [x] Renamed `QuantEcon/timesheets` → `QuantEcon/contractor-payments`. Engine repo URL refs + local clone path updated.
 
-### Phase 3a — Reusable workflows (pulled forward to stop sync drift)
-Phase 1.5 surfaced an operational risk: contractor repos carry their own copies of `scripts/` and `templates/`, so engine repo updates don't propagate automatically. This phase replaces those copies with `workflow_call` references back into `QuantEcon/contractor-payments`, so every push to the engine repo is live on every contractor repo immediately.
+### Phase 3a — Reusable workflows (pulled forward to stop sync drift) ✅
+Phase 1.5 surfaced an operational risk: contractor repos carried their own copies of `scripts/` and `templates/`, so engine repo updates didn't propagate automatically. This phase replaced those copies with `workflow_call` references back into `QuantEcon/contractor-payments`, so every push to the engine repo is live on every contractor repo immediately.
 
-- [ ] **Verify the org-level "private-repo reusable workflows" setting is enabled** — Settings → Actions → "Access" on `QuantEcon`. See §10. Hard gate for this phase.
-- [ ] **Engine repo: `.github/workflows/process-submission.yml`** — `on: workflow_call`. Holds the body of the current `issue-to-pr.yml` pipeline. Takes the issue payload as inputs.
-- [ ] **Contractor-template `.github/workflows/issue-to-pr.yml`** — collapses to a thin caller: `uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main`, passes the `github.event.issue` context, applies the same label-gate predicate.
-- [ ] **`contractor-engine-test`** — replace its current workflow file with the thin caller; **delete** its now-redundant `scripts/` and `templates/` directories from the repo (the engine repo is the only source of truth from here on).
-- [ ] **End-to-end verification** — re-fire the existing milestone-invoice flow on `contractor-engine-test` via the thin caller; confirm PR + PDF + PNG come out unchanged.
+- [x] **Engine repo workflow access** — `actions/permissions/access` set to `organization` on `QuantEcon/contractor-payments` so other org repos can call its reusable workflows.
+- [x] **Engine repo visibility flipped to public** — required for `actions/checkout` on the engine repo from a contractor repo's workflow (the caller's `GITHUB_TOKEN` is scoped only to itself; a PAT would have added rotation overhead with no real benefit since the engine carries no data). Trade-off accepted; recipient emails now live in org-level Variables instead of committed files (see §9 Email recipient policy).
+- [x] **Engine repo: [`.github/workflows/process-submission.yml`](.github/workflows/process-submission.yml)** — `on: workflow_call`. Two checkouts (contractor repo at working dir, engine at `./engine`). Scripts run with `PYTHONPATH=engine` and `--templates-dir engine/templates`.
+- [x] **Contractor-template `.github/workflows/issue-to-pr.yml`** — collapsed to a thin caller: `uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main`, passes the `github.event.issue` context, applies the label-gate predicate, `secrets: inherit` for future SMTP credentials.
+- [x] **`contractor-engine-test`** — workflow replaced with the thin caller; `scripts/` + `templates/` directories deleted (2,306 lines removed). Engine repo is now the only source of truth.
+- [x] **End-to-end verification** — opened issue #13 on `contractor-engine-test` via the new thin caller; workflow ran cleanly through the reusable workflow, opened PR #14 with correct YAML + PDF + PNG.
 
 ### Phase 2 — Merge processing + email notify
 On PR merge, the engine runs `process-approved.yml` (also implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands.
@@ -745,13 +746,13 @@ Email delivery to PSL:
 - [ ] **`scripts/notify_comment.py`** — posts an internal GitHub comment on the now-closed issue confirming the merge AND confirming that the email was sent (recipients + send timestamp). Verbose by design — gives the admin team operational visibility, and a clear signal if the email step ran but the comment didn't (or vice versa).
 - [ ] **Workflow ordering** — email step runs first; comment step runs after and reflects the email outcome (success/failure surfaced in the comment body).
 - [ ] **`.github/workflows/process-approved.yml`** (engine repo, `workflow_call`) — orchestrates re-render → ledger → email → comment → `processed` label.
-- [ ] **GitHub org-level secrets** — `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Scoped at the org so every contractor repo's reusable-workflow run can read them. See §10 ([REDACTED:SMTP_USER] credentials open item).
+- [ ] **GitHub org-level secrets** — `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Scoped at the org so every contractor repo's reusable-workflow run can read them. See §10 (SMTP credentials open item).
 
 Documentation:
-- [ ] **`docs/EMAIL_SETUP.md`** — Gmail / Google Workspace setup runbook: creating `[REDACTED:SMTP_USER]` (or app-password on an existing account), generating an app password, setting the five `SMTP_*` org secrets, smoke-testing with a local stub. Lives alongside Phase 4's CONTRACTOR_GUIDE / ADMIN_GUIDE under `docs/`.
+- [ ] **`docs/EMAIL_SETUP.md`** — Gmail / Google Workspace setup runbook: creating a service-account mailbox on the QuantEcon Workspace (or generating an app password on an existing account), setting the five `SMTP_*` org secrets, smoke-testing with a local stub. Lives alongside Phase 4's CONTRACTOR_GUIDE / ADMIN_GUIDE under `docs/`.
 
 End-to-end:
-- [ ] **End-to-end test** — with `testing_mode: true`, merge a hourly PR and a milestone PR on `contractor-engine-test`; verify each produces (a) re-rendered PDF/PNG, (b) ledger update, (c) email landing in `[REDACTED:QUANTECON_EMAIL]`, (d) internal GitHub comment confirming the send, (e) `processed` label applied.
+- [ ] **End-to-end test** — with `testing_mode: true`, merge a hourly PR and a milestone PR on `contractor-engine-test`; verify each produces (a) re-rendered PDF/PNG, (b) ledger update, (c) email landing in the mailbox referenced by `vars.QUANTECON_EMAIL`, (d) internal GitHub comment confirming the send, (e) `processed` label applied.
 
 ---
 
@@ -759,7 +760,7 @@ End-to-end:
 
 Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before continuing to Phase 3b. During this phase:
 
-- `notifications.testing_mode` stays **true** — `[REDACTED:QUANTECON_EMAIL]` receives all approval emails; PSL is never contacted.
+- `notifications.testing_mode` stays **true** — the mailbox referenced by `vars.QUANTECON_EMAIL` receives all approval emails; `vars.PSL_EMAIL` is never contacted.
 - Iterate on email content, subject lines, PDF attachment formatting, edge cases (empty notes, multi-row milestones, currencies, etc.).
 - Verify the full loop on `contractor-engine-test`: submit → review → merge → email → comment → ledger → label.
 - Decide when to flip `testing_mode: false` — that's the cutover to PSL receiving real emails. Likely done at the start of Phase 4, after at least one full month of internal-only testing.
@@ -836,7 +837,8 @@ The accounting principle is what governs this: every issued invoice number stays
 | Onboarding | Interactive Python script `onboarding/new-contractor.py` | Asks the right questions; populates the repo cleanly. |
 | Submission ID | `{handle}-timesheet-{period}` with `-vN` collision suffix | Period-based for readability; suffix on collision handles revisions. v1.1 layer adds explicit supersede metadata. |
 | Notification | Email to PSL (Cc admin) + internal GitHub comment | PSL doesn't use GitHub; email is the natural delivery for the approved PDF. Internal comment is operational audit (confirms the email step succeeded). See §8 Phase 2. |
-| Email mechanism | Google Workspace SMTP from `[REDACTED:SMTP_USER]` | QuantEcon already owns the Google Workspace; no third-party transactional service needed at this volume (well under Gmail's 2,000/day limit). Switch to Postmark/Mailgun later if deliverability ever becomes an issue. |
+| Email mechanism | Google Workspace SMTP from a QuantEcon service-account mailbox (sender lives in `secrets.SMTP_USER`/`SMTP_FROM` — see Email credentials row) | QuantEcon already owns the Google Workspace; no third-party transactional service needed at this volume (well under Gmail's 2,000/day limit). Switch to Postmark/Mailgun later if deliverability ever becomes an issue. |
+| Email recipient policy | Recipient addresses live as GitHub **org-level Variables** (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL`), not in any file in this (public) engine repo | Engine repo is public for `actions/checkout` access; literal email addresses in committed files would be harvested for spam. Variables keep recipients private without auth/PAT overhead. |
 | Email credentials | GitHub **org-level** secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) | Scoped at the org so every contractor repo's reusable-workflow run can read them without per-repo setup. Never in any YAML; never committed. |
 | Email recipients & testing | `templates/fiscal-host.yml.notifications` block with `psl_to`, `quantecon_cc`, and a `testing_mode` flag. While `testing_mode: true` is set, mail goes to `quantecon_cc` only — PSL is never contacted. | Lets us iterate on email content / formatting on `contractor-engine-test` without ever spamming PSL. Single-line flip (`testing_mode: false`) in Phase 4 cuts over to live PSL delivery. |
 | v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
@@ -858,9 +860,10 @@ The accounting principle is what governs this: every issued invoice number stays
 ## 10. Open items
 
 - **Admin handle(s).** Just `mmcky`, or also a team handle?
-- **Org settings — reusable workflows in private repos.** Needs to be enabled on QuantEcon **before Phase 3a** (now pulled forward in §8 build order). Org admin action — Settings → Actions → "Access" on `QuantEcon`.
+- ~~**Org settings — reusable workflows in private repos.**~~ ✅ Resolved during Phase 3a (commit [461d24a](https://github.com/QuantEcon/contractor-payments/commit/461d24a)): set `actions/permissions/access=organization` on the engine repo, and flipped engine repo visibility to public so `actions/checkout` works without a PAT. See §9 Email recipient policy for the recipient-address handling that the public-visibility decision drove.
 - **Actions on private repos / runner-minute budget.** Confirm enabled + headroom.
-- **SMTP credentials for `[REDACTED:SMTP_USER]`.** Gates Phase 2 (email notify). Need: app password generated on the Google Workspace side, then set as five GitHub **org-level** secrets — `SMTP_HOST` (`smtp.gmail.com`), `SMTP_PORT` (`587`), `SMTP_USER` (`[REDACTED:SMTP_USER]`), `SMTP_PASSWORD` (the app password), `SMTP_FROM` (matches `SMTP_USER` unless Workspace constrains otherwise). Setup runbook lands in `docs/EMAIL_SETUP.md` as part of Phase 2.
+- **SMTP credentials for the QuantEcon service-account mailbox.** Gates Phase 2 (email notify). Need: pick/provision a service-account mailbox on the QuantEcon Google Workspace, generate an app password for it, then set five GitHub **org-level** secrets — `SMTP_HOST` (`smtp.gmail.com`), `SMTP_PORT` (`587`), `SMTP_USER` (the mailbox address), `SMTP_PASSWORD` (the app password), `SMTP_FROM` (matches `SMTP_USER` unless Workspace constrains otherwise). Setup runbook lands in `docs/EMAIL_SETUP.md` as part of Phase 2.
+- **Org-level recipient variables.** Gates Phase 2 (email notify). Need: set `vars.PSL_EMAIL` (PSL Foundation contact) and `vars.QUANTECON_EMAIL` (QuantEcon admin Cc) as org-level Variables on `QuantEcon` (not secrets — they're non-sensitive but kept out of the public engine repo).
 - **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
 - **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
 - **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
@@ -873,7 +876,8 @@ The accounting principle is what governs this: every issued invoice number stays
 - No third-party GitHub Actions on any financial-data path. Only `actions/checkout` and `actions/setup-python` from first-party `actions/*`.
 - Branch protection on `main` for every contractor repo: PR required, 1 review required, no force-push.
 - GitHub Secrets only for credentials the workflow needs. From Phase 2: SMTP credentials (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) live as **org-level** secrets on `QuantEcon`, so every contractor repo's reusable-workflow run reads them without per-repo setup. Never in any YAML; never committed.
-- **Email content is sensitive.** Approval emails carry the contractor's real name, contract ID, period, amount, and an attached PDF with the same data. In transit: TLS via SMTP submission port 587. At rest: in the PSL recipient's inbox + Cc on `[REDACTED:QUANTECON_EMAIL]`. We accept this — the recipient is the fiscal host, the email is what triggers payment, and there's no way to deliver value to PSL without the data being present at the receiving end. The `notifications.testing_mode` flag in `templates/fiscal-host.yml` keeps PSL off the recipient list until we're confident the pipeline is working cleanly (see §8 BREAK).
+- **Email content is sensitive.** Approval emails carry the contractor's real name, contract ID, period, amount, and an attached PDF with the same data. In transit: TLS via SMTP submission port 587. At rest: in the PSL recipient's inbox + Cc on the QuantEcon admin mailbox. We accept this — the recipient is the fiscal host, the email is what triggers payment, and there's no way to deliver value to PSL without the data being present at the receiving end. The `notifications.testing_mode` flag in `templates/fiscal-host.yml` keeps PSL off the recipient list until we're confident the pipeline is working cleanly (see §8 BREAK).
+- **No email addresses in committed files.** The engine repo is public to allow `actions/checkout` from contractor repos. Recipient addresses (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL`) and sender credentials (`secrets.SMTP_*`) are stored only as GitHub org-level Variables / Secrets — never committed. Git history was scrubbed of pre-policy literal addresses via `git filter-repo` at the introduction of this rule.
 - Python deps minimal: stdlib + `pyyaml`.
 - **No bank accounts, tax IDs, or other payment credentials in any repo.** Reference an external store (1Password, etc.) by stable ID if needed.
 

@@ -26,12 +26,19 @@ quantecon:
   name: QuantEcon
   address: null
 
-# Email notification recipients for approved submissions (Phase 2).
+# Email notification config for approved submissions (Phase 2).
 #
-# While `testing_mode: true`, all approval emails go to `quantecon_cc` only —
-# PSL is never contacted. Flip to `false` in Phase 4 once we are confident
-# the email pipeline is working cleanly end-to-end.
+# Recipient addresses are intentionally NOT stored in this file. The engine
+# repo is public, so committing real email addresses here would expose them
+# to harvesters. Instead, recipients live as GitHub org-level Variables and
+# are injected into the workflow at runtime:
+#
+#   vars.PSL_EMAIL        → primary recipient (PSL Foundation contact)
+#   vars.QUANTECON_EMAIL  → Cc (QuantEcon admin)
+#
+# What stays here is the policy flag below. While `testing_mode: true`, all
+# approval emails go to `vars.QUANTECON_EMAIL` only — `vars.PSL_EMAIL` is
+# never contacted. Flip to `false` in Phase 4 once we are confident the
+# email pipeline is working cleanly end-to-end.
 notifications:
-  psl_to: [REDACTED:PSL_EMAIL]
-  quantecon_cc: [REDACTED:QUANTECON_EMAIL]
   testing_mode: true
