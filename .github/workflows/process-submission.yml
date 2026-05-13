@@ -1,0 +1,128 @@
+name: Process submission (reusable)
+
+# Reusable workflow that turns a contractor-repo submission issue into a PR
+# with structured YAML + rendered PDF + PNG preview. Called from every
+# contractor repo's thin `.github/workflows/issue-to-pr.yml`.
+#
+# Two checkouts:
+#   1. The CALLING repo (contractor-{handle}) at the working directory —
+#      this is where contracts/, settings, submissions/, generated_pdfs/
+#      live, and where the new branch + PR will be created.
+#   2. This (engine) repo at ./engine — provides scripts/ + templates/.
+#
+# Scripts run with PYTHONPATH=engine so `python -m scripts.X` resolves
+# against the engine checkout, while --repo-root . / --templates-dir engine/templates
+# point the working tree and template paths at the right places.
+#
+# See PLAN.md §8 Phase 3a.
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      issue_title:
+        required: true
+        type: string
+      issue_author:
+        required: true
+        type: string
+      issue_body:
+        required: true
+        type: string
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Check out the contractor repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the engine repo (scripts + templates)
+        uses: actions/checkout@v4
+        with:
+          repository: QuantEcon/contractor-payments
+          path: engine
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Install Typst
+        run: |
+          TYPST_VERSION="0.13.0"
+          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo mv /tmp/typst-*/typst /usr/local/bin/typst
+          typst --version
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Write issue body to file
+        env:
+          ISSUE_BODY: ${{ inputs.issue_body }}
+        run: printf '%s' "$ISSUE_BODY" > /tmp/issue_body.md
+
+      - name: Parse the issue
+        id: parse
+        env:
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.parse_issue \
+            --body-file /tmp/issue_body.md \
+            --output-json /tmp/submission.json \
+            --output-errors-json /tmp/errors.json \
+            || true
+          if [ -f /tmp/submission.json ]; then
+            echo "parse_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "parse_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create submission PR (on parse success)
+        if: steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.create_submission_pr \
+            --submission-file /tmp/submission.json \
+            --errors-file /tmp/errors.json \
+            --issue-number "${{ inputs.issue_number }}" \
+            --issue-author "${{ inputs.issue_author }}" \
+            --issue-title "${{ inputs.issue_title }}" \
+            --templates-dir engine/templates
+
+      - name: Clear any prior error state (on parse success)
+        if: steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.post_error_comment clear \
+            --issue "${{ inputs.issue_number }}"
+
+      - name: Post parse-error comment (on parse failure)
+        if: steps.parse.outputs.parse_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.post_error_comment post \
+            --errors-file /tmp/errors.json \
+            --issue "${{ inputs.issue_number }}"
