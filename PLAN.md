@@ -125,9 +125,13 @@ QuantEcon/contractor-payments/
 │   ├── ledger/.gitkeep
 │   ├── generated_pdfs/.gitkeep
 │   └── README.md                                     (contractor-facing how-to)
-├── docs/
-│   ├── CONTRACTOR_GUIDE.md           (Phase 4 — for the submitting contractor)
-│   └── ADMIN_GUIDE.md                (Phase 4 — onboarding, reviewing, editing contracts)
+├── docs/                             ← MkDocs Material source; published to GitHub Pages
+│   ├── index.md                      (placeholder landing — "guide coming soon")
+│   └── contractor-guide/             (Phase 4 — submit-timesheet, submit-invoice, corrections)
+├── notes/                            ← internal dev/ops runbooks; NOT published
+│   └── EMAIL_SETUP.md                (SMTP setup runbook for §10 credentials)
+├── mkdocs.yml                        (site config — Material theme, nav)
+├── .github/workflows/docs.yml        (build + deploy to Pages via artifact actions)
 ├── pyproject.toml                    (project metadata; deps: pyyaml + pytest)
 ├── .gitignore
 └── PLAN.md                           (this file)
@@ -667,7 +671,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 
 1. `python onboarding/new-contractor.py` — answer the prompts.
 2. Script creates the repo, seeds it, adds collaborators, pushes. Prints the URL.
-3. Admin sends the URL + `docs/CONTRACTOR_GUIDE.md` to the new contractor.
+3. Admin sends the repo URL + the docs site (https://quantecon.github.io/contractor-payments/) to the new contractor.
 
 ### 7.4 Admin renewing a contract
 
@@ -783,8 +787,17 @@ Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before con
 - [ ] Spin up `QuantEcon/contractor-onboarding-test` via the script; run the full submit → merge loop end-to-end via the reusable workflow.
 
 ### Phase 4 — Docs + first real contractors
-- [ ] `docs/CONTRACTOR_GUIDE.md`
-- [ ] `docs/ADMIN_GUIDE.md` (onboarding runbook, editing contracts, troubleshooting, *how to flip testing_mode off*)
+
+**Docs site** — MkDocs Material on GitHub Pages, deployed via Actions artifact (no `gh-pages` branch). Public site source lives in `docs/`; internal runbooks live in `notes/`.
+
+- [x] **Scaffold + landing page** (commit [18cd80e](https://github.com/QuantEcon/contractor-payments/commit/18cd80e)) — `mkdocs.yml`, `docs/index.md` placeholder ("guide coming soon"), gh-pages branch workflow. Moved `EMAIL_SETUP.md` from `docs/` to `notes/` so it's not published as part of the public site.
+- [x] **Switched to Pages artifact deploy** (commit [4b174ce](https://github.com/QuantEcon/contractor-payments/commit/4b174ce)) — `.github/workflows/docs.yml` uses `actions/upload-pages-artifact` + `actions/deploy-pages`; `gh-pages` branch deleted. Repo Pages source set to "GitHub Actions". Site live at https://quantecon.github.io/contractor-payments/.
+- [ ] **Contractor guide pages** (under `docs/contractor-guide/`):
+  - [ ] `submit-timesheet.md` — hourly timesheet walk-through with screenshots
+  - [ ] `submit-invoice.md` — milestone invoice walk-through with screenshots
+  - [ ] `corrections.md` — how to amend a submission before/after PR merge
+- [ ] **Fix broken doc URLs in `contractor-template/`** (see §10) — `ISSUE_TEMPLATE/config.yml` and the two issue templates currently point at `blob/main/docs/CONTRACTOR_GUIDE.md` which never existed. Repoint at the published site URLs once `submit-timesheet.md` lands.
+- [ ] Admin guide — deferred; the admin runbook content can live in `notes/` or as a separate non-public section. Decide before flipping `testing_mode`.
 - [ ] Flip `notifications.testing_mode` to `false` — PSL starts receiving real approval emails.
 - [ ] Onboard a small number of real contractors; iterate on friction.
 
@@ -876,6 +889,7 @@ The accounting principle is what governs this: every issued invoice number stays
 - **SMTP credentials for the QuantEcon service-account mailbox** — gates the full Phase 2 E2E (only the email + comment + label steps; the rest of the pipeline already runs cleanly per the partial E2E in §8 Phase 2). `SMTP_HOST` and `SMTP_PORT` are set as org Secrets. **Still pending:** `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`. Step-by-step runbook in `notes/EMAIL_SETUP.md` — covers the alias-of-existing-account path that matches QuantEcon's current setup (services@ or payments@ as an alias of admin@), 2-Step Verification, dedicated app-password generation, and the three remaining `gh secret set` calls.
 - **Org-level recipient variables.** Gates Phase 2 (email notify). Need: set `vars.PSL_EMAIL` (PSL Foundation contact) and `vars.QUANTECON_EMAIL` (QuantEcon admin Cc) as org-level Variables on `QuantEcon` (not secrets — they're non-sensitive but kept out of the public engine repo).
 - **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
+- **Broken doc URLs in `contractor-template/`.** `contractor-template/.github/ISSUE_TEMPLATE/config.yml` and the "Need help?" link inside both `hourly-timesheet.yml` and `milestone-invoice.yml` point at `blob/main/docs/CONTRACTOR_GUIDE.md` — a path that never existed and won't, since the guide is now a published MkDocs site. Repoint at `https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/` (and the invoice equivalent) once those pages land in Phase 4. Tracked in the Phase 4 task list.
 - **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
 - **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
 
