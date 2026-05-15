@@ -82,7 +82,7 @@ def _require_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(
-            f"Missing required environment variable `{name}`. See docs/EMAIL_SETUP.md."
+            f"Missing required environment variable `{name}`. See notes/EMAIL_SETUP.md."
         )
     return value
 

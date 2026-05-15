@@ -1,0 +1,27 @@
+site_name: QuantEcon Contractor Payments
+site_description: Guide for QuantEcon contractors submitting timesheets and invoices via GitHub.
+site_url: https://quantecon.github.io/contractor-payments/
+repo_url: https://github.com/QuantEcon/contractor-payments
+repo_name: QuantEcon/contractor-payments
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+
+nav:
+  - Home: index.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
