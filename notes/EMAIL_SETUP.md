@@ -27,7 +27,7 @@ scripts/notify_email.py uses smtplib + GitHub Secrets to send mail via
 smtp.gmail.com:587 from <service-account-mailbox>
         │
         ▼
-Recipient (vars.PSL_EMAIL, Cc vars.QUANTECON_EMAIL) lands the approved PDF
+Recipient (vars.PSL_EMAIL, Cc vars.QUANTECON_EMAIL_REVIEWER) lands the approved PDF
 ```
 
 ## What you'll set
@@ -48,7 +48,7 @@ And these org-level Variables (already done):
 | Name | Value |
 |---|---|
 | `PSL_EMAIL` | PSL Foundation recipient |
-| `QUANTECON_EMAIL` | QuantEcon admin Cc |
+| `QUANTECON_EMAIL_REVIEWER` | QuantEcon human reviewer/approver (Cc) |
 
 ---
 
@@ -230,17 +230,15 @@ If anyone replies to an approval email, the reply will land in the
 service-account mailbox by default. Two ways to handle:
 
 - **Auto-forward** — In the service-account's Gmail settings →
-  **Forwarding and POP/IMAP** → forward to the QuantEcon admin mailbox
-  (the same one referenced by `vars.QUANTECON_EMAIL`). Replies surface
-  to a real human.
-- **Set a "do-not-reply" reply-to** — Add `Reply-To: <vars.QUANTECON_EMAIL>`
-  in the outgoing email's headers (`scripts/notify_email.py` will support
-  this). PSL replies go to admin directly; the service-account inbox stays
-  empty.
-
-Both are fine. The Reply-To approach is more correct semantically (PSL
-replies don't bounce off a no-touch mailbox) but auto-forward works without
-code changes if you want a quick fix later.
+  **Forwarding and POP/IMAP** → forward to a real admin inbox. Replies
+  surface to a real human.
+- **Reply-To routed to the sending alias** — current engine behaviour.
+  `scripts/notify_email.py` sets `Reply-To: $SMTP_FROM` (the payments@
+  alias), so PSL's "Reply" lands at payments@ → routed to the underlying
+  admin mailbox where any existing Gmail label/filter on the alias picks
+  it up. "Reply All" additionally reaches `vars.QUANTECON_EMAIL_REVIEWER`
+  (the human approver Cc'd on the original send), which is the expected
+  path for questions that need a human eye.
 
 ---
 
@@ -285,7 +283,7 @@ code changes if you want a quick fix later.
 
 1. End-to-end test runs with `notifications.testing_mode: true` in
    `templates/fiscal-host.yml`. PSL is never contacted — all mail goes to
-   `vars.QUANTECON_EMAIL`.
+   `vars.QUANTECON_EMAIL_REVIEWER`.
 2. When you're satisfied (likely after a month of internal-only runs),
    open `templates/fiscal-host.yml`, set `testing_mode: false`, commit
    and push. Next merge fires email to PSL.

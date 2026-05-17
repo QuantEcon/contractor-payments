@@ -6,21 +6,23 @@ appends the ledger entry. The companion `scripts.notify_comment` posts an
 internal GitHub comment that confirms this email was sent.
 
 Recipients policy (PLAN §6, §9):
-  - `testing_mode: false` → To: $PSL_EMAIL, Cc: $QUANTECON_EMAIL
-  - `testing_mode: true`  → To: $QUANTECON_EMAIL, no Cc (PSL is NEVER
-    contacted while testing_mode is on).
+  - `testing_mode: false` → To: $PSL_EMAIL, Cc: $QUANTECON_EMAIL_REVIEWER
+  - `testing_mode: true`  → To: $QUANTECON_EMAIL_REVIEWER, no Cc (PSL is
+    NEVER contacted while testing_mode is on).
 
 The flag lives in `templates/fiscal-host.yml` under
 `notifications.testing_mode`. Defaults to true (testing) if missing —
 fail-safe to "don't email PSL".
 
-Reply-To header is set to $QUANTECON_EMAIL so any reply from the
-recipient goes to a real human admin, not back to the no-touch SMTP
-account.
+Reply-To header is set to $SMTP_FROM (the payments@ alias). PSL's
+"Reply" lands at payments@ → routed to the underlying admin mailbox
+where the conversation labels under the existing "payments" filter;
+"Reply All" additionally reaches $QUANTECON_EMAIL_REVIEWER (the human
+approver Cc'd on the original send).
 
 Required environment:
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM  (org secrets)
-  PSL_EMAIL, QUANTECON_EMAIL                                  (org variables)
+  PSL_EMAIL, QUANTECON_EMAIL_REVIEWER                         (org variables)
 
 CLI:
   python -m scripts.notify_email \\
@@ -200,16 +202,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     testing_mode = _read_testing_mode(fiscal_host_path)
 
     psl_email = os.environ.get("PSL_EMAIL", "").strip()
-    quantecon_email = os.environ.get("QUANTECON_EMAIL", "").strip()
-    if not quantecon_email:
+    reviewer_email = os.environ.get("QUANTECON_EMAIL_REVIEWER", "").strip()
+    if not reviewer_email:
         raise RuntimeError(
-            "QUANTECON_EMAIL env var is required (used as both Cc and testing-mode To)."
+            "QUANTECON_EMAIL_REVIEWER env var is required "
+            "(used as both Cc and testing-mode To)."
         )
 
     if testing_mode:
-        to_addr = quantecon_email
+        to_addr = reviewer_email
         cc_addr = None
-        print(f"testing_mode=true — sending to {quantecon_email} only "
+        print(f"testing_mode=true — sending to {reviewer_email} only "
               f"(PSL will not be contacted).", file=sys.stderr)
     else:
         if not psl_email:
@@ -217,8 +220,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "PSL_EMAIL env var is required when testing_mode=false."
             )
         to_addr = psl_email
-        cc_addr = quantecon_email
-        print(f"testing_mode=false — sending to {psl_email} (Cc {quantecon_email}).",
+        cc_addr = reviewer_email
+        print(f"testing_mode=false — sending to {psl_email} (Cc {reviewer_email}).",
               file=sys.stderr)
 
     sender = _require_env("SMTP_FROM") if not args.dry_run else os.environ.get("SMTP_FROM", "<SMTP_FROM>")
@@ -230,7 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         sender=sender,
         to=to_addr,
         cc=cc_addr,
-        reply_to=quantecon_email,
+        reply_to=sender,
     )
 
     if args.dry_run:

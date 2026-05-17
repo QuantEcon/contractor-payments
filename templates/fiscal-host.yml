@@ -33,12 +33,12 @@ quantecon:
 # to harvesters. Instead, recipients live as GitHub org-level Variables and
 # are injected into the workflow at runtime:
 #
-#   vars.PSL_EMAIL        → primary recipient (PSL Foundation contact)
-#   vars.QUANTECON_EMAIL  → Cc (QuantEcon admin)
+#   vars.PSL_EMAIL                 → primary recipient (PSL Foundation contact)
+#   vars.QUANTECON_EMAIL_REVIEWER  → Cc (QuantEcon human reviewer/approver)
 #
 # What stays here is the policy flag below. While `testing_mode: true`, all
-# approval emails go to `vars.QUANTECON_EMAIL` only — `vars.PSL_EMAIL` is
-# never contacted. Flip to `false` in Phase 4 once we are confident the
+# approval emails go to `vars.QUANTECON_EMAIL_REVIEWER` only — `vars.PSL_EMAIL`
+# is never contacted. Flip to `false` in Phase 4 once we are confident the
 # email pipeline is working cleanly end-to-end.
 notifications:
   testing_mode: true

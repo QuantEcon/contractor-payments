@@ -171,7 +171,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           PSL_EMAIL: ${{ vars.PSL_EMAIL }}
-          QUANTECON_EMAIL: ${{ vars.QUANTECON_EMAIL }}
+          QUANTECON_EMAIL_REVIEWER: ${{ vars.QUANTECON_EMAIL_REVIEWER }}
         run: |
           python -m scripts.notify_email \
             --submission "${{ steps.find_submission.outputs.submission_file }}" \
