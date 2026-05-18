@@ -103,15 +103,18 @@ jobs:
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Phase 2.5: on `issues.reopened`, look up the latest approved
-      # submission tied to this issue. If found, the new submission
-      # becomes a revision and supersedes the previous one. If the
-      # issue was closed without a merge (no approved submission on
-      # record), supersedes stays empty and the submission proceeds as
-      # a normal fresh submission.
-      - name: Detect revision target (on reopened events)
+      # Phase 2.5: look up the latest approved submission tied to this
+      # issue. Filesystem state — not the event action — determines
+      # revision intent: if any approved submission exists for this
+      # issue, the current run is a revision (regardless of whether
+      # the trigger was `reopened` or `edited`). This is robust to the
+      # order in which a contractor reopens-and-edits a closed issue.
+      # If no approved submission exists (fresh issue, or closed
+      # without merge), supersedes stays empty and the submission
+      # proceeds as a normal fresh submission.
+      - name: Detect revision target
         id: revision
-        if: inputs.event_action == 'reopened'
+        if: steps.parse.outputs.parse_ok == 'true'
         env:
           PYTHONPATH: engine
         run: |
@@ -119,9 +122,9 @@ jobs:
             --issue "${{ inputs.issue_number }}")
           echo "supersedes=$SUPERSEDES" >> "$GITHUB_OUTPUT"
           if [ -n "$SUPERSEDES" ]; then
-            echo "Reopen detected; revision will supersede: $SUPERSEDES"
+            echo "Previous approved submission detected; this is a revision superseding: $SUPERSEDES"
           else
-            echo "Reopen detected but no previously approved submission found for this issue — treating as fresh submission."
+            echo "No previously approved submission for this issue; treating as fresh submission."
           fi
 
       - name: Create submission PR (on parse success)
