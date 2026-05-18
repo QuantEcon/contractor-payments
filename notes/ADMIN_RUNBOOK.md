@@ -20,7 +20,7 @@ companion contractor-facing guide will live at
 | [1. Typical month](#1-typical-month) | ✅ | — |
 | [2. Resubmission before merge (contractor edits issue)](#2-resubmission-before-merge--contractor-edits-the-issue) | ✅ | — |
 | [3. Admin requests changes via PR review](#3-admin-requests-changes-via-pr-review) | ⚠️ Partial | Convention documented (Path A is the supported flow) |
-| [4. Post-merge correction — revision or supplemental](#4-post-merge-correction--revision-or-supplemental) | 🚧 In Phase 2.5 | Building now — two-mechanism model |
+| [4. Post-merge correction — revision or independent second invoice](#4-post-merge-correction--revision-or-supplemental) | ✅ | Two-mechanism model implemented + E2E verified (Phase 2.5) |
 | [5. PR closed without merging](#5-pr-closed-without-merging) | ⚠️ Partial | Minor |
 | [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ⚠️ Partial | Yes — no targeted re-run |
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — no date enforcement |
@@ -137,11 +137,19 @@ branch. The PR ends up with a YAML/PDF mismatch.
 **Situation.** A submission has been merged. The email has gone to
 PSL. Later, an error or omission is discovered.
 
-> **Note on engine status.** The two-mechanism model below is the
-> **target design**, being built in **Phase 2.5** (see [PLAN.md §8](../PLAN.md#phase-25--revision--supplemental-handling)).
-> Until Phase 2.5 lands, the engine treats every same-period
-> resubmission as `-vN` and the ledger double-counts. **Manual
-> workaround documented at the bottom of this scenario.**
+> **Engine status.** The two-mechanism model below is **implemented in
+> Phase 2.5** (see [PLAN.md §8](../PLAN.md#phase-25--revision--supplemental-handling))
+> and E2E-verified on `contractor-engine-test` on 2026-05-18. The
+> "Workaround until Phase 2.5 lands" section at the bottom is kept
+> for historical reference and as the fallback recovery path if the
+> automated flow ever needs to be bypassed.
+>
+> **One supported-path nuance.** The two triggers (reopen+edit vs.
+> new issue) both work, but the cleanest contractor UX is to **just
+> edit the closed issue body** — no need to reopen first. The engine
+> detects revision intent from filesystem state (is there an approved
+> submission for this issue already?), not from the event action.
+> Edit-only avoids the dual-event firing of reopen-then-edit.
 
 ### The two-mechanism model
 
@@ -372,6 +380,36 @@ was sent and no audit comment was posted.
    if the underlying cause (e.g. transient API error) is gone. If
    not, fix the cause first.
 
+### Known failure mode — bot push rejected by branch protection
+
+Symptom in the workflow log:
+
+```
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: - Changes must be made through a pull request.
+```
+
+`process-approved.yml` does a `[skip ci]` push to `main` after
+re-rendering the PDF + updating the ledger. Legacy branch protection
+on `main` rejects this push because the `github-actions[bot]` token
+is not a human admin, and legacy protection only offers
+all-or-nothing exemption via `enforce_admins`.
+
+**Fix:** the production setup must use an **org-level ruleset** with
+the GitHub Actions integration listed as a bypass actor (see PLAN §8
+Phase 3b). Repo-level rulesets cannot grant bypass to the
+`github-actions` system app — the API rejects with "Actor GitHub
+Actions integration must be part of the ruleset source or owner
+organization". An org admin sets this up once on `QuantEcon`
+targeting `contractor-*` repos; new contractor repos inherit it
+automatically.
+
+**Recovery if it fires:** re-run the workflow ("Re-run failed jobs")
+after removing/correcting the protection. The pipeline is
+re-entrant in this case — `finalize_approval` is idempotent against
+already-stamped YAMLs (it re-writes the same content), and the
+ledger entry hasn't been committed yet at the push-rejection point.
+
 ---
 
 ## 7. Contract end / renewal
@@ -486,9 +524,11 @@ when the workflow tries to add a file that conflicts.
 Capturing the development implications in one place for triage:
 
 1. ~~**Ledger double-count on revisions (Scenario 4).**~~ ✅ Resolved
-   in design — two-mechanism model (revision via reopen / supplemental
-   via new issue). **Being built in Phase 2.5** before Phase 4
-   (real-contractor onboarding); see PLAN §8.
+   in Phase 2.5 — two-mechanism model implemented and E2E-verified on
+   `contractor-engine-test` (2026-05-18). Revisions supersede via
+   filesystem-based detection; independent second invoices in the
+   same period get a `-{LETTER}` uniqueness suffix with no special
+   semantics. See PLAN §8 Phase 2.5 for the verified flow.
 2. **No close-without-merge feedback to contractor (Scenario 5).**
    Low priority; revisit if rejected PRs become common.
 3. **No targeted re-run for failed workflow step (Scenario 6).**
@@ -508,6 +548,6 @@ Capturing the development implications in one place for triage:
    revision, and excluded from the running totals. Keeps the audit
    trail discoverable while keeping totals accurate.
 
-Items 2–7 are quality-of-life improvements to revisit once we have
-live operational data; none block Phase 4. Item 1 (Phase 2.5) is
-actively being built.
+Items 1 and 8 are resolved (Phase 2.5). Items 2–7 are quality-of-life
+improvements to revisit once we have live operational data; none
+block Phase 4.
