@@ -63,20 +63,20 @@
 
 // ── Revision banner ─────────────────────────────────────────────────────
 // Surfaces when this submission supersedes a previous one (Phase 2.5).
-// Placed at the top so PSL sees it first when opening the PDF.
+// Single-line and concise; the full "no longer authoritative" prose lives
+// in the supporting email body and audit comment.
 #let supersedes_id = data.at("supersedes", default: none)
 #if supersedes_id != none [
   #block(
     width: 100%,
-    inset: (x: 12pt, y: 7pt),
+    inset: (x: 12pt, y: 5pt),
     fill: rgb("#fed7aa"),
     stroke: (left: 3pt + rgb("#9a3412")),
     [
-      #text(size: 10.5pt, weight: "bold", fill: rgb("#9a3412"))[⟳ REVISION] —
-      #text(size: 9.5pt)[supersedes #raw(supersedes_id). The original document is no longer authoritative; please use this version for payment processing.]
+      #text(size: 10pt, weight: "bold", fill: rgb("#9a3412"))[⟳ REVISION] — #text(size: 10pt)[supersedes #raw(supersedes_id)]
     ]
   )
-  #v(0.25cm)
+  #v(0.2cm)
 ]
 
 #grid(
@@ -98,9 +98,11 @@
 
 #v(0.35cm)
 
-// ── Date (right-aligned, inline above the metadata band) ──────────────────
+// ── Date + Invoice ID (right-aligned, inline above the metadata band) ────
 #align(right)[
   #label("Date") #h(0.4em) #value[#data.submitted_date]
+
+  #label("Invoice") #h(0.4em) #value[#raw(data.submission_id)]
 ]
 
 #v(0.15cm)
