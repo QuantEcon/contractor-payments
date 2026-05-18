@@ -980,9 +980,8 @@ Deferred to a standalone phase because reimbursements are materially more comple
 
 - Local working dirs:
   - `/Users/mmcky/work/quantecon/contractor-payments/` (engine, this repo)
-  - `/Users/mmcky/work/quantecon/contractor-engine-test/` (Phase 1/2 test repo)
-  - `/Users/mmcky/work/quantecon/contractor-onboarding-test/` (Phase 3 — not yet created)
-  - `/Users/mmcky/work/quantecon/contractor-{handle}/` (real contractors, post-Phase 4)
+  - `/Users/mmcky/work/quantecon/contractor-engine-test/` (Phase 1/2 test repo — pre-Phase-3b clone location)
+  - `contractors/contractor-{handle}/` (relative to the engine repo root — onboarding script clones new contractor repos here; gitignored). Co-locating these under the engine repo means admin tools can chdir into a contractor checkout without leaving the engine workspace.
 - Local toolchain: `typst` (`brew install typst`), Python 3.12+, `gh` CLI, `pypdf` (dev — used to assert single-page output in worst-case tests).
 - Running the engine locally:
   - Tests: `pytest tests/` (80 cases, ~0.1s).

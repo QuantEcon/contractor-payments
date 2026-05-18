@@ -4,3 +4,10 @@ __pycache__/
 .venv/
 *.egg-info/
 .DS_Store
+
+# Local working clones of contractor repos. Cloned here by
+# onboarding/new-contractor.py so admin tools can operate against
+# multiple contractor repos from inside this engine repo without
+# chdir-ing elsewhere. Each subdirectory is an independent git
+# checkout of its respective QuantEcon/contractor-{handle} repo.
+contractors/
