@@ -121,8 +121,9 @@ def compose_message(
         f"{real_name} — {period} — {amount_display}"
     )
 
+    approver_handle = submission.get("approved_by") or "admin"
     body_lines = [
-        "Approved by QuantEcon admin for processing.",
+        f"Approved by QuantEcon @{approver_handle} for processing.",
         "",
         f"Contractor:    {real_name} (@{github_handle})",
         f"Contract:      {submission['contract_id']}",
