@@ -15,7 +15,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 1.5** — Milestone Invoice engine
 - [x] **Phase 3a** — Reusable workflows (engine code centralised; contractor repos are thin callers)
 - [x] **Phase 2** — Merge processing + email notify to PSL (engine code complete; partial E2E verified through ledger update + pinned-issue refresh; SMTP credentials needed to unlock the email step)
-- [ ] 🛑 **BREAK** — testing phase  ← **current target** (set SMTP secrets per `notes/EMAIL_SETUP.md`, then run full E2E with `testing_mode: true` keeping PSL off the recipient list)
+- [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
+- [ ] **Phase 2.5** — Revision + Supplemental handling  ← **current target** (post-merge corrections need engine support before real contractors land; was v1.1, pulled forward)
 - [ ] **Phase 3b** — Onboarding script for new contractor repos
 - [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
 - [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
@@ -770,14 +771,74 @@ End-to-end:
 
 ---
 
-### 🛑 BREAK — testing phase
+### 🛑 BREAK — testing phase ✅
 
-Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before continuing to Phase 3b. During this phase:
+Once Phase 3a + Phase 2 implemented, the discipline was to **stop and test thoroughly** before continuing. During this phase:
 
-- `notifications.testing_mode` stays **true** — the mailbox referenced by `vars.QUANTECON_EMAIL_REVIEWER` receives all approval emails; `vars.PSL_EMAIL` is never contacted.
-- Iterate on email content, subject lines, PDF attachment formatting, edge cases (empty notes, multi-row milestones, currencies, etc.).
-- Verify the full loop on `contractor-engine-test`: submit → review → merge → email → comment → ledger → label.
-- Decide when to flip `testing_mode: false` — that's the cutover to PSL receiving real emails. Likely done at the start of Phase 4, after at least one full month of internal-only testing.
+- `notifications.testing_mode` stayed **true** — the mailbox referenced by `vars.QUANTECON_EMAIL_REVIEWER` received all approval emails; `vars.PSL_EMAIL` was never contacted.
+- Full E2E verified on `contractor-engine-test` (issue #18 / run [26006508196](https://github.com/QuantEcon/contractor-engine-test/actions/runs/26006508196)): submit → review → merge → email lands → audit comments on both issue + PR → ledger refreshed → `processed` label applied.
+- `testing_mode: true` is retained through Phase 2.5 and Phase 3b. The flip to `testing_mode: false` happens at the start of Phase 4.
+
+The testing surfaced an operational design question (post-merge corrections), captured and addressed in **Phase 2.5** below.
+
+---
+
+### Phase 2.5 — Revision + Supplemental handling
+
+**Motivation (surfaced during BREAK testing — see [`notes/ADMIN_RUNBOOK.md`](../notes/ADMIN_RUNBOOK.md) Scenario 4).**
+
+Once a submission PR is merged, the email has gone to PSL, but the funds haven't moved yet, there's a real operational window — typically 1–4 weeks for a fiscal-host batch-payment cycle — during which an error may be discovered. The original v1 plan ("v1.1 — Revision / supersede handling, build when first real correction happens") deferred this; the BREAK testing phase concluded that the first real correction will be high-stakes and we want engine support in place *before* real contractors onboard, not after.
+
+**Two-mechanism model.**
+
+| Trigger | Intent | Identifier | Ledger effect |
+|---|---|---|---|
+| Edit issue body (pre-merge) | Fix in place | unchanged (no suffix) | n/a — never committed |
+| Reopen closed issue + edit | **Revision** — supersede previous | `{base}-v2`, `-v3`... | Replace old entry with new |
+| Open new issue (same period) | **Independent second invoice** | `{base}-B`, `-C`, `-D`... | Append as new entry (normal flow) |
+
+**Key semantic distinction.** Only the revision side carries cross-document semantics (supersede metadata, PDF banner, cross-comment between PRs, email subject prefix). The `-B`, `-C` suffix is **purely an identifier uniqueness mechanism** — those invoices are conceptually independent and just happen to share a period (e.g. two milestones delivered in the same month, two billing cycles colliding). The engine doesn't track or render any relationship between them.
+
+**When to use each (admin / contractor judgment):**
+- Pre-merge: edit the issue in place (Scenario 2 in the runbook).
+- Post-merge, **pre-PSL-payment**: reopen the original issue, edit it → revision (`-v2`). PSL gets the corrected version; ledger reflects only the corrected amount.
+- Post-PSL-payment, or any case of a genuinely independent additional invoice in the same period: open a new issue → `-B` for uniqueness. Treated as a normal invoice in every other respect.
+
+The engine doesn't track PSL payment state (out-of-band). Admin uses judgment based on the payments@ inbox.
+
+**Identifier naming (formalising the §9 Resolved decisions row).**
+
+- Original: `{handle}-{type}-{period}` — e.g. `mmcky-invoice-2026-02`
+- Revision: append `-vN` — e.g. `mmcky-invoice-2026-02-v2` (the `v` carries supersede semantics)
+- Independent second invoice in same period: append `-{LETTER}` from B upward — e.g. `mmcky-invoice-2026-02-B` (uniqueness only; no semantic claim about relationship)
+- Composed: `-B-v2` (a revision of `-B`)
+
+`v` and letter are distinct namespaces; reads unambiguously to both humans and the parser.
+
+**Build tasks (revision side — the side with semantics):**
+
+- [ ] **Engine: detect reopen as the revision trigger.**
+  - On `issues.reopened` event, the workflow queries the issue's PR cross-references for a **merged** PR. If found → revision; the *latest* merged PR is the supersession target (handles revision-of-revision chains correctly). If not found (edge case: issue was manually closed without a merge) → treat as a fresh submission with no `-vN` suffix; engine proceeds through the normal pipeline.
+- [ ] **Revision YAML metadata.** Stamp `supersedes: <previous-id>` and `revision_of: <original-id>` (chain anchor for revision-of-revision cases). On the approved-then-superseded original on `main`: post-merge update adds `superseded_by: <new-id>` and `status: superseded`.
+- [ ] **Revision PDF banner.** When `supersedes` is set, render a **"REVISION — supersedes &lt;previous-id&gt;"** banner at the top of the PDF.
+- [ ] **Revision ledger semantics.** Remove the superseded entry from `ledger/<contract-id>.yml`, append the new one. Net `claims_count` / `submissions_count` stays the same when replacing one entry with one.
+- [ ] **Revision cross-references.** On merge of a revision PR: post a comment on the previous (closed) PR — "**Superseded by #{new-pr-number}**. The PDF and audit trail above remain as the record of what was originally sent to PSL."
+- [ ] **Revision email subject prefix.** `[QuantEcon] {Type} REVISION approved — ...` so PSL spots the correction in their inbox. Body unchanged (PDF banner already declares it; redundant body text would just add noise).
+- [ ] **Revision PR title.** Append `(revision)` to the PR title — e.g. `Submission: <issue-title> (revision)` — so reviewers see the relationship at a glance in the PR list. Issue title stays as the contractor wrote it.
+
+**Build tasks (uniqueness side — minimal):**
+
+- [ ] **Engine: detect collision on `issues.opened` and assign next available letter suffix** from B onward (skipping any already in `submissions/`). No metadata stamping, no banner, no special workflow path beyond ID assignment. The submission proceeds through the normal pipeline.
+
+**Cross-cutting build tasks:**
+
+- [ ] **`create_submission_pr.py` suffix logic** rewritten to compute the next available `-vN` (reopen path) or `-{LETTER}` (collision-on-open path) based on whichever trigger fired plus already-committed state.
+- [ ] **`update_ledger.py`** branches on `supersedes` metadata (revision path replaces; otherwise appends — covers both originals and `-B`/`-C` invoices uniformly).
+- [ ] **`update_ledger_issue.py`** renders superseded entries **struck-through with a link to the revision** and **excludes them from the running totals**. Keeps the audit trail discoverable; keeps the totals accurate. (Decided 2026-05-18.)
+- [ ] **Tests** — parser + ledger + create_submission_pr coverage for: revision of original, revision of revision, `-B` then revision of `-B`, multiple `-B`/`-C` independent invoices in same period.
+- [ ] **End-to-end test on `contractor-engine-test`** — exercise both a revision flow (reopen + edit) and an independent-second-invoice flow (`-B`). Verify ledger arithmetic, cross-references on the revision side, and that the `-B` side is indistinguishable from a normal submission downstream of ID assignment.
+
+**Accounting principle:** every issued invoice number stays a record. Cancellation isn't a thing in good practice — supersession is. The original PDF remains in `generated_pdfs/` as the record of what PSL was originally sent. Independent invoices in the same period stand on their own.
 
 ---
 
@@ -821,24 +882,6 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - [ ] **`onboarding/new-contractor.py`** — add the multi-select for issue templates. From this phase forward, an admin can configure a payee as reimbursement-only (e.g. one-off speakers, honorarium recipients) or as a full contractor with all three types. Also adds the `reimbursement.allowed_categories` prompt.
 - [ ] End-to-end test against `contractor-engine-test` (or a new `contractor-reimbursement-test`): submit a reimbursement claim with multiple line items (and multi-currency if that design wins), verify the merge flow.
 
-### v1.1 — Revision / supersede handling (build when first real correction happens)
-
-If an approved (merged) timesheet turns out to be wrong, the right move is to **supersede** the original with a corrected version rather than cancel or rewrite git history. Phase 1 already lays the groundwork — period-based submission IDs with `-v2`, `-v3` collision suffix — so a correction just means opening a new issue for the same period. The collision suffix takes care of the ID.
-
-The v1 baseline: when a correction is needed, admin opens a new issue, the workflow auto-suffixes the submission ID, the second PR carries a corrected YAML + PDF, admin merges. Manual reconciliation otherwise. No special revision detection in code.
-
-v1.1 builds the polish layer once we know what real corrections look like in practice:
-
-- [ ] Detect that a `-vN` submission is a revision: when the `-v2` (or higher) suffix is applied, set `supersedes: <original-id>` in the submission YAML.
-- [ ] Render a **"REVISION — supersedes &lt;original-id&gt;"** banner at the top of the PDF when `supersedes` is set.
-- [ ] On merge of a revision PR, update the original YAML on `main` with `status: superseded` and `superseded_by: <new-id>`.
-- [ ] Auto-comment on the superseded (closed) PR with a link to the revision.
-- [ ] Adjust the on-merge notification language for the payments manager: "Revision of earlier submission — please use this version."
-
-Rationale for deferring: corrections are rare; the right workflow shape is informed by real cases (how often, who initiates, before-or-after-payment). The Phase 1 collision suffix handles the rare case without ceremony. We build the polish when there's volume to justify it.
-
-The accounting principle is what governs this: every issued invoice number stays a record, even after correction. Cancellation isn't a thing in good practice — supersession is. Cash-side reconciliation for already-paid invoices stays a manual process outside the timesheet system.
-
 ### v2+ (future, in scope of this PLAN if needed)
 - SMTP email delivery (currently @-mention only)
 - Additional submission types beyond the three planned (none identified yet)
@@ -863,7 +906,7 @@ The accounting principle is what governs this: every issued invoice number stays
 | Contract ID convention | `QE-PSL-YYYY-NNN` | QuantEcon's existing numbering scheme. System accepts any string; onboarding pre-fills this format. |
 | Shared logic | Reusable workflows + scripts in `QuantEcon/contractor-payments` | Single source of truth. |
 | Onboarding | Interactive Python script `onboarding/new-contractor.py` | Asks the right questions; populates the repo cleanly. |
-| Submission ID | `{handle}-timesheet-{period}` with `-vN` collision suffix | Period-based for readability; suffix on collision handles revisions. v1.1 layer adds explicit supersede metadata. |
+| Submission ID | `{handle}-{type}-{period}` with two semantic suffix schemes: `-vN` for revisions (supersede), `-{LETTER}` from B onward for supplementals (additional invoices in the same period). Composable (`-B-v2`). | Period-based for readability. Two distinct suffix namespaces let identifiers carry accounting intent (`v` = supersede previous, letter = additive). Phase 2.5 wires the engine semantics to match. |
 | Notification | Email to PSL (Cc admin) + internal GitHub comment | PSL doesn't use GitHub; email is the natural delivery for the approved PDF. Internal comment is operational audit (confirms the email step succeeded). See §8 Phase 2. |
 | Email mechanism | Google Workspace SMTP from a QuantEcon service-account mailbox (sender lives in `secrets.SMTP_USER`/`SMTP_FROM` — see Email credentials row) | QuantEcon already owns the Google Workspace; no third-party transactional service needed at this volume (well under Gmail's 2,000/day limit). Switch to Postmark/Mailgun later if deliverability ever becomes an issue. |
 | Email recipient policy | Recipient addresses live as GitHub **org-level Variables** (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL_REVIEWER`), not in any file in this (public) engine repo | Engine repo is public for `actions/checkout` access; literal email addresses in committed files would be harvested for spam. Variables keep recipients private without auth/PAT overhead. |

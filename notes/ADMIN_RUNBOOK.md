@@ -19,8 +19,8 @@ companion contractor-facing guide will live at
 |---|---|---|
 | [1. Typical month](#1-typical-month) | ✅ | — |
 | [2. Resubmission before merge (contractor edits issue)](#2-resubmission-before-merge--contractor-edits-the-issue) | ✅ | — |
-| [3. Admin requests changes via PR review](#3-admin-requests-changes-via-pr-review) | ⚠️ Partial | Yes — see callout |
-| [4. Error caught after merge (correction / supersede)](#4-error-caught-after-merge--correction--supersede) | ⚠️ Partial | Yes — ledger double-counts |
+| [3. Admin requests changes via PR review](#3-admin-requests-changes-via-pr-review) | ⚠️ Partial | Convention documented (Path A is the supported flow) |
+| [4. Post-merge correction — revision or supplemental](#4-post-merge-correction--revision-or-supplemental) | 🚧 In Phase 2.5 | Building now — two-mechanism model |
 | [5. PR closed without merging](#5-pr-closed-without-merging) | ⚠️ Partial | Minor |
 | [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ⚠️ Partial | Yes — no targeted re-run |
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — no date enforcement |
@@ -132,60 +132,149 @@ branch. The PR ends up with a YAML/PDF mismatch.
 
 ---
 
-## 4. Error caught after merge — correction / supersede
+## 4. Post-merge correction — revision or supplemental
 
-**Situation.** A submission has been merged, approved, the email has
-gone to PSL. Later, an error is discovered.
+**Situation.** A submission has been merged. The email has gone to
+PSL. Later, an error or omission is discovered.
 
-**What happens (current behaviour).**
+> **Note on engine status.** The two-mechanism model below is the
+> **target design**, being built in **Phase 2.5** (see [PLAN.md §8](../PLAN.md#phase-25--revision--supplemental-handling)).
+> Until Phase 2.5 lands, the engine treats every same-period
+> resubmission as `-vN` and the ledger double-counts. **Manual
+> workaround documented at the bottom of this scenario.**
 
-Contractor opens a **new issue** for the same period. The engine
-detects the collision (submission ID `{handle}-{type}-{period}`
-already exists committed) and auto-appends a `-v2` suffix (then `-v3`
-etc.).
+### The two-mechanism model
 
-- A new PR opens with the corrected `-v2` PDF + YAML.
-- Admin reviews + merges.
-- `process-approved` runs the full pipeline — **including appending
-  the v2 entry to the ledger as a new claim**.
+The accounting principle: once a document has been issued, it stays a
+record. There are two distinct cases:
 
-> **Dev note — known limitation.**
-> The ledger currently **double-counts revisions**. The `-v2` entry is
-> appended as a new claim on top of the original `-v1`, so the
-> `amount_to_date` and `claims_count` totals inflate by the corrected
-> amount. There's no `supersedes:` / `superseded_by:` linkage yet —
-> that's the **v1.1** work flagged in [PLAN.md §8 v1.1](../PLAN.md#v11--revision--supersede-handling-build-when-first-real-correction-happens),
-> deferred until we have real-world revision data.
->
-> **Workaround until v1.1 lands:** when admin merges a `-v2` revision,
-> they must **manually edit `ledger/<contract-id>.yml`** to delete
-> the superseded entry. Then push the edit. The pinned ledger issue
-> won't auto-refresh from a manual edit — it refreshes only on the
-> next `process-approved` run. To force a refresh, run
-> `python -m scripts.update_ledger_issue --ledger ledger/<id>.yml
-> --repo <owner>/<contractor-repo>` locally.
->
-> **Recommended adjustment:** if revisions happen more than ~once per
-> quarter, build v1.1 sooner. Otherwise the manual workaround is fine.
+- **Revision** — the original was wrong; issue a corrected document
+  that supersedes it. Original is preserved as evidence but is voided
+  in effect.
+- **Independent second invoice in the same period** — the original
+  was correct for what it covered, and a separate invoice is needed
+  for additional work (or a delivered milestone that arrived after
+  the first invoice). The two invoices are conceptually independent
+  and just happen to share a calendar period.
 
-**Admin actions (current process).**
+The trigger between the two cases is the *action* the
+contractor / admin takes — different actions signal different intent:
 
-1. Merge the `-v2` PR as normal.
-2. Edit `ledger/<contract-id>.yml` to remove the superseded `-v1`
-   entry (the original).
-3. Recompute the `totals.amount_to_date` and `claims_count` (or
-   `submissions_count` / `hours_to_date` for hourly).
-4. Commit + push the ledger edit.
-5. Locally run `scripts.update_ledger_issue` to refresh the pinned
-   issue, OR wait for the next merge to refresh it.
-6. Optionally: comment on the original (now superseded) PR linking to
-   the revision PR for future readers.
+| Trigger | Intent | When to use | Identifier |
+|---|---|---|---|
+| **Reopen the closed issue + edit body** | **Revision** — supersede the previous version | Post-merge but pre-PSL-payment. Within ~1–4 weeks of merge, before PSL has run their batch. | `{base}-v2`, `-v3`... |
+| **Open a new issue for the same period** | **Independent second invoice** — conceptually unrelated to the first; both count | Post-PSL-payment correction (issue a separate invoice for the missed amount, don't try to revise the paid one), OR a normal case of two genuinely separate invoices that happen to share a period (e.g. two milestones delivered in the same month). | `{base}-B`, `-C`, `-D`... (uniqueness suffix only) |
 
-**Accounting principle.** The original `-v1` PDF stays in
-`generated_pdfs/` as the audit record of what was sent to PSL on the
-original date. We don't rewrite history. The ledger reflects the
-*economic* truth (one payment for that period); the PDFs reflect the
-*paperwork* truth (two documents issued, second supersedes first).
+**Key semantic distinction.** Only the revision flow carries
+cross-document semantics in the engine (supersede metadata, PDF
+banner, cross-comment on the previous PR, email subject prefix). The
+`-B`, `-C` suffix is **purely an identifier uniqueness mechanism** —
+those invoices are independent records that just happen to share a
+period. The engine doesn't track or render any relationship between
+them.
+
+**Judgment rule of thumb.** Admin uses the payments@ inbox to gauge
+PSL state and pick the right trigger:
+- *"Caught the error within ~a week of merge, PSL hasn't paid yet"* →
+  **revision** (reopen the issue).
+- *"PSL has already replied / paid / it's been over a month"* →
+  payment has likely settled → file a separate invoice (**new issue**)
+  rather than try to revise a paid invoice.
+- *"PSL replied with a query before paying"* → still pre-payment →
+  **revision** with the corrections PSL requested.
+- *"PSL paid the original; contractor realised they forgot a
+  deliverable"* → **new issue** for the missing amount. Original
+  stays as paid; the second invoice records what's still owed.
+- *"Two milestones delivered in the same month, billed separately"* →
+  **new issue** — these are independent invoices that just share a
+  period. The `-B` suffix is just for ID uniqueness; no special
+  handling.
+
+### What the engine does (Phase 2.5 target behaviour)
+
+**For a revision (reopen-triggered):**
+
+1. Workflow detects `issues.reopened` and identifies the previous
+   (merged) PR via the issue's PR cross-reference.
+2. Generates new submission `{base}-v2` with `supersedes:
+   <previous-id>` stamped in the YAML.
+3. PDF renders with a **"REVISION — supersedes <previous-id>"** banner
+   at the top.
+4. On merge:
+   - Ledger removes the superseded entry, appends the new one.
+   - Pinned ledger issue refreshes (superseded entries shown struck-through
+     for audit trail, with a link to the revision).
+   - Comment on the previous (closed) PR: "**Superseded by #{new-pr}**.
+     The PDF and audit trail above remain as the record of what was
+     originally sent to PSL."
+   - Email subject prefix changes to `[QuantEcon] {Type} REVISION
+     approved — ...` so PSL spots the correction.
+
+**For an independent second invoice (new-issue-triggered, same period):**
+
+1. Workflow detects collision against committed submissions, applies
+   the next unused letter (B, C, D...) **for ID uniqueness only**.
+2. Generates `{base}-B` with no special metadata — it's just a normal
+   submission with a different suffix.
+3. PDF renders normally (no banner — there's nothing to declare).
+4. On merge:
+   - Ledger appends as a new entry (both `-base` and `-B` count
+     independently toward `amount_to_date`).
+   - Pinned ledger issue refreshes with both entries visible.
+   - No cross-comment between PRs (they're independent invoices).
+   - No email subject change.
+
+### Admin actions (Phase 2.5 target — automated)
+
+For a revision:
+1. Either you or the contractor reopens the original closed issue.
+2. Edit the issue body with the corrected entries.
+3. Wait for the workflow to open the `-v2` PR.
+4. Review + merge as normal. Engine handles ledger, cross-references,
+   email subject.
+
+For an independent second invoice (same period):
+1. Either you or the contractor opens a fresh issue for the same
+   period.
+2. Fill in the new entries (only the new amount, not the total — this
+   is a separate invoice, not a rewrite).
+3. Review + merge the `-B` PR. Engine handles the unique ID and the
+   ledger append; nothing else is special about it.
+
+### Workaround until Phase 2.5 lands
+
+The current engine produces `-v2` for any same-period collision (no
+distinction between revision and supplemental). Admin must reconcile
+the ledger by hand:
+
+1. Merge the resubmission PR.
+2. Decide intent (revision or supplemental).
+3. **If revision:** edit `ledger/<contract-id>.yml` to remove the
+   superseded entry. Recompute `totals.amount_to_date`,
+   `claims_count` / `submissions_count` (and `hours_to_date` for
+   hourly).
+4. **If independent second invoice:** no ledger edit needed (the
+   second entry is already appended, which is the correct outcome).
+5. In either case: post a comment manually on the previous PR
+   explaining the relationship to the new PR.
+6. If you edited the ledger: locally run
+   `python -m scripts.update_ledger_issue --ledger ledger/<id>.yml --repo <owner>/<contractor-repo>`
+   to refresh the pinned issue, or wait for the next merge to refresh
+   it.
+
+### Accounting principle
+
+The original PDF stays in `generated_pdfs/` as the audit record of
+what was sent to PSL on the original date. We don't rewrite history.
+
+- Revision: the ledger reflects the **economic** truth (one payment
+  for that period); the PDFs reflect the **paperwork** truth (two
+  documents issued, second supersedes first). Superseded entries are
+  rendered struck-through in the pinned ledger issue with a link to
+  the revision, and excluded from the running totals.
+- Independent second invoice: the ledger reflects the economic truth
+  (two real payments owed); both PDFs are authoritative. No special
+  rendering — both entries display normally.
 
 ---
 
@@ -396,10 +485,10 @@ when the workflow tries to add a file that conflicts.
 
 Capturing the development implications in one place for triage:
 
-1. **Ledger double-count on revisions (Scenario 4).** Currently
-   manual workaround; v1.1 (PLAN §8) adds explicit supersede metadata
-   and auto-handling. **Decision needed:** build v1.1 earlier, or
-   keep manual workaround?
+1. ~~**Ledger double-count on revisions (Scenario 4).**~~ ✅ Resolved
+   in design — two-mechanism model (revision via reopen / supplemental
+   via new issue). **Being built in Phase 2.5** before Phase 4
+   (real-contractor onboarding); see PLAN §8.
 2. **No close-without-merge feedback to contractor (Scenario 5).**
    Low priority; revisit if rejected PRs become common.
 3. **No targeted re-run for failed workflow step (Scenario 6).**
@@ -414,7 +503,11 @@ Capturing the development implications in one place for triage:
    don't add `push`-triggered re-render. Capture in contractor guide.
 7. **Concurrent same-period submissions (Scenario 9).** Theoretical
    race; defer.
+8. ~~**Display of superseded ledger entries in the pinned issue.**~~
+   ✅ Decided (2026-05-18): struck-through with a link to the
+   revision, and excluded from the running totals. Keeps the audit
+   trail discoverable while keeping totals accurate.
 
-None of these block Phase 4 / first-real-contractor onboarding. They
-are quality-of-life improvements to revisit once we have live
-operational data.
+Items 2–7 are quality-of-life improvements to revisit once we have
+live operational data; none block Phase 4. Item 1 (Phase 2.5) is
+actively being built.
