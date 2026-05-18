@@ -52,32 +52,84 @@ def generate_submission_id(
     """Period-based submission ID, e.g. `mmcky-timesheet-2026-06` or
     `mmcky-invoice-2025-11`.
 
-    Pure function — does not check for collisions. Use
-    `resolve_collision_suffix` against the working tree to apply a
-    `-v2`, `-v3` suffix when a submission for the same period already
-    exists (see PLAN §v1.1 for the revision/supersede rationale).
+    Pure function — does not check for collisions. The caller applies one
+    of two suffix schemes depending on the trigger (see PLAN §8 Phase 2.5):
+
+    - `resolve_revision_suffix` — for reopen-triggered revisions; appends
+      `-v2`, `-v3`, ... and carries supersede semantics.
+    - `resolve_uniqueness_suffix` — for fresh-issue submissions that
+      collide on the period; appends `-B`, `-C`, ... purely for ID
+      uniqueness (no semantic relationship to the original).
     """
     slug = _TYPE_SLUG.get(submission_type, "submission")
     return f"{github_handle}-{slug}-{period}"
 
 
-def resolve_collision_suffix(repo_root: Path, base_id: str, period: str) -> str:
-    """Walk the repo's `submissions/<period>/` directory and return the
-    first un-used variant of `base_id` (the bare ID, then `-v2`, `-v3`, …).
+def resolve_revision_suffix(repo_root: Path, supersedes_id: str, period: str) -> str:
+    """Compute the next available `-vN` suffix for a revision.
 
-    Only the working tree's main is consulted; in-flight branch state
-    isn't considered (we expect collisions only after the prior submission
-    was approved and merged).
+    `supersedes_id` is the previous merged submission this revision targets
+    (e.g. `mmcky-invoice-2026-02` for a first revision, or
+    `mmcky-invoice-2026-02-v2` for a revision-of-revision). The returned
+    ID appends `-v2`, `-v3`, ... walking the chain past whatever's already
+    committed.
+
+    The chain anchor is computed by stripping any trailing `-vN` from
+    `supersedes_id`. The new revision belongs to the same chain.
+    """
+    anchor = _strip_revision_suffix(supersedes_id)
+    submissions_dir = repo_root / "submissions" / period
+    if not submissions_dir.exists():
+        # supersedes_id was passed but nothing's committed — degenerate
+        # state. Treat as first revision off the anchor.
+        return f"{anchor}-v2"
+    n = 2
+    while (submissions_dir / f"{anchor}-v{n}.yml").exists():
+        n += 1
+    return f"{anchor}-v{n}"
+
+
+def resolve_uniqueness_suffix(repo_root: Path, base_id: str, period: str) -> str:
+    """Compute the next available `-{LETTER}` suffix from B onward to keep
+    a fresh submission's ID unique when the base already exists in
+    `submissions/<period>/`.
+
+    Unlike `-vN`, this suffix carries **no semantic relationship** to the
+    original — it's purely for filesystem uniqueness when two independent
+    invoices happen to share a period (e.g. two milestones delivered in
+    the same calendar month).
+
+    Returns `base_id` unchanged when no collision exists. When committed
+    files already use one or more letters, picks the next unused letter.
+    Capped at Z; if exceeded (vanishingly unlikely with monthly cadence),
+    raises so the failure is loud rather than silent.
     """
     submissions_dir = repo_root / "submissions" / period
     if not submissions_dir.exists():
         return base_id
-    candidate = base_id
-    n = 2
-    while (submissions_dir / f"{candidate}.yml").exists():
-        candidate = f"{base_id}-v{n}"
-        n += 1
-    return candidate
+    if not (submissions_dir / f"{base_id}.yml").exists():
+        return base_id
+    # base exists — find next available letter from B onward.
+    for letter in "BCDEFGHIJKLMNOPQRSTUVWXYZ":
+        candidate = f"{base_id}-{letter}"
+        if not (submissions_dir / f"{candidate}.yml").exists():
+            return candidate
+    raise RuntimeError(
+        f"Exhausted A–Z suffix space for {base_id} in {period}. "
+        f"This indicates 26+ independent invoices in a single period, "
+        f"which is far beyond expected use. Investigate before extending."
+    )
+
+
+def _strip_revision_suffix(submission_id: str) -> str:
+    """Return the chain anchor by removing a trailing `-vN` if present.
+
+    `mmcky-invoice-2026-02-v3` → `mmcky-invoice-2026-02`
+    `mmcky-invoice-2026-02-B-v2` → `mmcky-invoice-2026-02-B`
+    `mmcky-invoice-2026-02-B` → `mmcky-invoice-2026-02-B` (unchanged)
+    `mmcky-invoice-2026-02` → `mmcky-invoice-2026-02` (unchanged)
+    """
+    return re.sub(r"-v\d+$", "", submission_id)
 
 
 def resolve_payer_today(fiscal_host_path: Path) -> str:
@@ -116,6 +168,7 @@ def enrich_submission(
     submission_id: str,
     issue_number: int,
     submitted_date: str,
+    supersedes: Optional[str] = None,
 ) -> dict:
     """Combine the parser's submission with contract data + metadata.
 
@@ -154,6 +207,13 @@ def enrich_submission(
         "approved_by": None,
         "approved_date": None,
     }
+    if supersedes:
+        # Revision: stamp both the immediate predecessor and the chain anchor.
+        # `revision_of` is the bare original (or `-B` etc. for a revision of an
+        # independent invoice); `supersedes` is the most recent merged version
+        # this revision replaces.
+        common["supersedes"] = supersedes
+        common["revision_of"] = _strip_revision_suffix(supersedes)
 
     if submission_type == "timesheet":
         if contract_type != "hourly":
@@ -325,17 +385,23 @@ def open_pr(
     body: str,
     cwd: Optional[Path] = None,
     extra_labels: Optional[list[str]] = None,
+    is_revision: bool = False,
 ) -> str:
-    """Open a PR and return its URL."""
+    """Open a PR and return its URL.
+
+    Revisions get a `(revision)` suffix on the PR title so reviewers see
+    the relationship at a glance in the PR list.
+    """
     extra_labels = extra_labels or []
     fd, name = tempfile.mkstemp(suffix=".md", prefix="pr-body-")
     body_path = Path(name)
+    title_suffix = " (revision)" if is_revision else ""
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
         cmd = [
             "gh", "pr", "create",
-            "--title", f"Submission: {issue_title}",
+            "--title", f"Submission: {issue_title}{title_suffix}",
             "--body-file", str(body_path),
             "--label", "submission",
         ]
@@ -437,6 +503,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Skip PDF and PNG rendering (useful for local dry-runs without typst installed).")
     p.add_argument("--png-ppi", type=int, default=DEFAULT_PNG_PPI,
                    help=f"PNG preview resolution in pixels per inch (default: {DEFAULT_PNG_PPI}).")
+    p.add_argument("--supersedes", default=None,
+                   help="Submission ID of the previous merged submission this one "
+                        "revises. Set by the workflow on `issues.reopened` events "
+                        "after looking up the issue's latest merged PR. When set, "
+                        "this submission gets a `-vN` suffix off the supersedes "
+                        "chain anchor, `supersedes` + `revision_of` metadata "
+                        "stamped in the YAML, and `(revision)` appended to the PR "
+                        "title. See PLAN §8 Phase 2.5.")
     args = p.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -474,13 +548,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     base_id = generate_submission_id(
         args.issue_author, parsed["period"], submission_type=submission_type
     )
-    submission_id = resolve_collision_suffix(repo_root, base_id, parsed["period"])
-    if submission_id != base_id:
+
+    is_revision = bool(args.supersedes)
+    if is_revision:
+        submission_id = resolve_revision_suffix(
+            repo_root, args.supersedes, parsed["period"],
+        )
         print(
-            f"Submission ID collision detected on `{base_id}` — using `{submission_id}`. "
-            f"This is a revision; see PLAN §v1.1 for the manual supersede workflow.",
+            f"Revision: superseding `{args.supersedes}` with `{submission_id}`.",
             file=sys.stderr,
         )
+    else:
+        submission_id = resolve_uniqueness_suffix(repo_root, base_id, parsed["period"])
+        if submission_id != base_id:
+            print(
+                f"Collision detected on `{base_id}` — using uniqueness suffix "
+                f"`{submission_id}`. This is an independent second invoice in the "
+                f"same period, not a revision.",
+                file=sys.stderr,
+            )
 
     submission = enrich_submission(
         parsed,
@@ -489,6 +575,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         submission_id=submission_id,
         issue_number=args.issue_number,
         submitted_date=args.submitted_date,
+        supersedes=args.supersedes,
     )
 
     # Write the YAML.
@@ -553,6 +640,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr_url = open_pr(
         args.issue_title, body, cwd=repo_root,
         extra_labels=[submission_type.replace("_", "-")],
+        is_revision=is_revision,
     )
     print(f"Opened PR: {pr_url}")
 

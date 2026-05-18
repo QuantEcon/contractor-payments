@@ -8,13 +8,15 @@ from __future__ import annotations
 import pytest
 
 from scripts.create_submission_pr import (
+    _strip_revision_suffix,
     branch_name_for_issue,
     enrich_submission,
     format_currency_amount,
     generate_submission_id,
     render_pr_body,
-    resolve_collision_suffix,
     resolve_payer_today,
+    resolve_revision_suffix,
+    resolve_uniqueness_suffix,
 )
 
 
@@ -57,33 +59,104 @@ class TestGenerateSubmissionId:
         assert generate_submission_id("jane-doe", "2025-12") == "jane-doe-timesheet-2025-12"
 
 
-class TestResolveCollisionSuffix:
-    def test_no_collision_returns_base(self, tmp_path):
-        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
-        assert result == "janedoe-timesheet-2026-06"
+class TestStripRevisionSuffix:
+    def test_strips_v_suffix(self):
+        assert _strip_revision_suffix("mmcky-invoice-2026-02-v3") == "mmcky-invoice-2026-02"
 
-    def test_first_collision_yields_v2(self, tmp_path):
+    def test_strips_v_off_letter_chain(self):
+        assert _strip_revision_suffix("mmcky-invoice-2026-02-B-v2") == "mmcky-invoice-2026-02-B"
+
+    def test_leaves_letter_suffix_intact(self):
+        assert _strip_revision_suffix("mmcky-invoice-2026-02-B") == "mmcky-invoice-2026-02-B"
+
+    def test_leaves_bare_id_intact(self):
+        assert _strip_revision_suffix("mmcky-invoice-2026-02") == "mmcky-invoice-2026-02"
+
+    def test_only_strips_trailing_v(self):
+        # `v` in the middle of the ID should not be stripped.
+        assert _strip_revision_suffix("mmcky-version-2026-02") == "mmcky-version-2026-02"
+
+
+class TestResolveRevisionSuffix:
+    """Reopen-triggered revisions: append `-vN` to the supersedes chain anchor."""
+
+    def test_first_revision_off_original(self, tmp_path):
         period_dir = tmp_path / "submissions" / "2026-06"
         period_dir.mkdir(parents=True)
         (period_dir / "janedoe-timesheet-2026-06.yml").touch()
-        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
+        result = resolve_revision_suffix(
+            tmp_path, "janedoe-timesheet-2026-06", "2026-06",
+        )
         assert result == "janedoe-timesheet-2026-06-v2"
 
-    def test_second_collision_yields_v3(self, tmp_path):
+    def test_revision_of_revision_walks_chain(self, tmp_path):
         period_dir = tmp_path / "submissions" / "2026-06"
         period_dir.mkdir(parents=True)
         (period_dir / "janedoe-timesheet-2026-06.yml").touch()
         (period_dir / "janedoe-timesheet-2026-06-v2.yml").touch()
-        result = resolve_collision_suffix(tmp_path, "janedoe-timesheet-2026-06", "2026-06")
+        result = resolve_revision_suffix(
+            tmp_path, "janedoe-timesheet-2026-06-v2", "2026-06",
+        )
         assert result == "janedoe-timesheet-2026-06-v3"
 
+    def test_revision_of_letter_chain(self, tmp_path):
+        """Revising an independent second invoice (`-B`) produces `-B-v2`."""
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        (period_dir / "janedoe-timesheet-2026-06-B.yml").touch()
+        result = resolve_revision_suffix(
+            tmp_path, "janedoe-timesheet-2026-06-B", "2026-06",
+        )
+        assert result == "janedoe-timesheet-2026-06-B-v2"
+
+
+class TestResolveUniquenessSuffix:
+    """Fresh-issue submissions with same-period collisions: append `-B`, `-C`, ..."""
+
+    def test_no_collision_returns_base(self, tmp_path):
+        result = resolve_uniqueness_suffix(
+            tmp_path, "janedoe-timesheet-2026-06", "2026-06",
+        )
+        assert result == "janedoe-timesheet-2026-06"
+
+    def test_first_collision_yields_b(self, tmp_path):
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        result = resolve_uniqueness_suffix(
+            tmp_path, "janedoe-timesheet-2026-06", "2026-06",
+        )
+        assert result == "janedoe-timesheet-2026-06-B"
+
+    def test_second_collision_yields_c(self, tmp_path):
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        (period_dir / "janedoe-timesheet-2026-06-B.yml").touch()
+        result = resolve_uniqueness_suffix(
+            tmp_path, "janedoe-timesheet-2026-06", "2026-06",
+        )
+        assert result == "janedoe-timesheet-2026-06-C"
+
+    def test_revision_files_dont_block_letter_assignment(self, tmp_path):
+        """If only `-v2` exists (no `-B`), a fresh issue should get `-B`."""
+        period_dir = tmp_path / "submissions" / "2026-06"
+        period_dir.mkdir(parents=True)
+        (period_dir / "janedoe-timesheet-2026-06.yml").touch()
+        (period_dir / "janedoe-timesheet-2026-06-v2.yml").touch()
+        result = resolve_uniqueness_suffix(
+            tmp_path, "janedoe-timesheet-2026-06", "2026-06",
+        )
+        assert result == "janedoe-timesheet-2026-06-B"
+
     def test_different_handle_no_collision(self, tmp_path):
-        """Collisions are per-handle; another contractor's submission in the
-        same period doesn't trigger a suffix."""
         period_dir = tmp_path / "submissions" / "2026-06"
         period_dir.mkdir(parents=True)
         (period_dir / "alice-timesheet-2026-06.yml").touch()
-        result = resolve_collision_suffix(tmp_path, "bob-timesheet-2026-06", "2026-06")
+        result = resolve_uniqueness_suffix(
+            tmp_path, "bob-timesheet-2026-06", "2026-06",
+        )
         assert result == "bob-timesheet-2026-06"
 
 
@@ -219,6 +292,43 @@ class TestEnrichSubmission:
         bad_contract = {**CONTRACT_HOURLY_AUD, "terms": {"hourly_rate": 45.00}}
         with pytest.raises(ValueError, match="missing required terms"):
             _enrich(contract=bad_contract)
+
+    def test_no_revision_metadata_when_not_revision(self):
+        """Fresh submissions (no `--supersedes` passed) don't carry revision
+        metadata, so the YAML stays minimal for the common case."""
+        result = _enrich()
+        assert "supersedes" not in result
+        assert "revision_of" not in result
+
+    def test_supersedes_stamped_when_revision(self):
+        """When `supersedes` is passed, both `supersedes` and `revision_of` are
+        stamped on the submission."""
+        result = _enrich(
+            submission_id="janedoe-timesheet-2025-01-v2",
+            supersedes="janedoe-timesheet-2025-01",
+        )
+        assert result["supersedes"] == "janedoe-timesheet-2025-01"
+        assert result["revision_of"] == "janedoe-timesheet-2025-01"
+
+    def test_revision_of_traces_to_chain_anchor(self):
+        """A revision-of-revision points `supersedes` at the immediate
+        predecessor but `revision_of` at the bare chain anchor."""
+        result = _enrich(
+            submission_id="janedoe-timesheet-2025-01-v3",
+            supersedes="janedoe-timesheet-2025-01-v2",
+        )
+        assert result["supersedes"] == "janedoe-timesheet-2025-01-v2"
+        assert result["revision_of"] == "janedoe-timesheet-2025-01"
+
+    def test_revision_of_letter_chain(self):
+        """Revising a `-B` (independent invoice) keeps the letter chain as the
+        anchor; `revision_of` is the `-B`, not the bare original."""
+        result = _enrich(
+            submission_id="janedoe-timesheet-2025-01-B-v2",
+            supersedes="janedoe-timesheet-2025-01-B",
+        )
+        assert result["supersedes"] == "janedoe-timesheet-2025-01-B"
+        assert result["revision_of"] == "janedoe-timesheet-2025-01-B"
 
 
 # ─── Enrichment: milestone invoice ──────────────────────────────────────────
