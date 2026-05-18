@@ -358,26 +358,57 @@ def create_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", "-b", branch], cwd=cwd)
 
 
+def checkout_existing_branch(branch: str, cwd: Optional[Path] = None) -> None:
+    """Fetch and check out an existing remote branch.
+
+    Used when the workflow re-fires on an issue whose PR is already open
+    (pre-merge edits) or whose previous branch is being reused for a
+    revision after auto-delete. We regenerate the submission artifacts
+    on top of the existing branch and force-push.
+    """
+    _run(["git", "fetch", "origin", f"{branch}:{branch}"], cwd=cwd)
+    _run(["git", "checkout", branch], cwd=cwd)
+
+
 def stage_and_commit(
     paths: list[Path],
     issue_number: int,
     cwd: Optional[Path] = None,
     submission_type: str = "timesheet",
-) -> None:
+    *,
+    update: bool = False,
+) -> bool:
+    """Stage and commit the listed paths.
+
+    Returns True if a commit was created, False if there were no staged
+    changes (no-op — possible when re-running on an existing branch
+    where the regenerated artifacts are identical to what's already
+    committed). Callers should treat False as "nothing to push".
+    """
     for p in paths:
         _run(["git", "add", str(p)], cwd=cwd)
+    # Has anything been staged? `git diff --cached --quiet` returns 0
+    # when there are no staged diffs, non-zero otherwise.
+    result = _run(["git", "diff", "--cached", "--quiet"], cwd=cwd, check=False)
+    if result.returncode == 0:
+        return False
     type_label = {
         "timesheet": "timesheet",
         "milestone_invoice": "milestone invoice",
     }.get(submission_type, "submission")
+    verb = "Update" if update else "Add"
     _run([
         "git", "commit", "-m",
-        f"Add {type_label} submission from #{issue_number}",
+        f"{verb} {type_label} submission from #{issue_number}",
     ], cwd=cwd)
+    return True
 
 
-def push_branch(branch: str, cwd: Optional[Path] = None) -> None:
-    _run(["git", "push", "-u", "origin", branch], cwd=cwd)
+def push_branch(branch: str, cwd: Optional[Path] = None, *, force: bool = False) -> None:
+    cmd = ["git", "push", "-u", "origin", branch]
+    if force:
+        cmd.insert(2, "--force-with-lease")
+    _run(cmd, cwd=cwd)
 
 
 def open_pr(
@@ -520,17 +551,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.submitted_date is None:
         args.submitted_date = resolve_payer_today(templates_dir / "fiscal-host.yml")
 
-    # Bail early if a branch already exists for this issue. Phase 1 doesn't
-    # handle regeneration; that's deferred per PLAN §4.4.
+    # Branch reuse: when the workflow re-fires on the same issue
+    # (pre-merge edits, or reopen-then-edit on a revision), check out the
+    # existing branch and regenerate artifacts on top of it. Phase 2.5
+    # promoted regeneration to a first-class flow so contractors can
+    # iterate on the issue body and see the PR update.
     branch = branch_name_for_issue(args.issue_number)
-    if remote_branch_exists(branch, cwd=repo_root):
-        print(
-            f"Branch `{branch}` already exists on origin — skipping "
-            f"create_submission_pr. Post-submission edits go on the PR "
-            f"branch directly (Phase 1 doesn't regenerate).",
-            file=sys.stderr,
-        )
-        return 0  # not an error; workflow continues
+    branch_existed = remote_branch_exists(branch, cwd=repo_root)
 
     # Load inputs.
     with open(args.submission_file, encoding="utf-8") as f:
@@ -578,6 +605,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         supersedes=args.supersedes,
     )
 
+    # If the branch already exists, switch to it BEFORE writing any
+    # artifacts so we don't end up with untracked files that conflict
+    # with the branch's tracked content. Phase 2.5 regeneration flow.
+    if branch_existed:
+        checkout_existing_branch(branch, cwd=repo_root)
+
     # Write the YAML.
     yaml_path = write_submission_yaml(submission, repo_root)
     yaml_rel = yaml_path.relative_to(repo_root).as_posix()
@@ -619,15 +652,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         if owner_name:
             png_url = raw_url(owner_name, branch, png_rel)
 
-    # Git: branch, commit, push.
-    create_branch(branch, cwd=repo_root)
-    stage_and_commit(
+    # Git: branch, commit, push. When the branch already exists, we've
+    # already checked it out earlier; just commit + force-push.
+    if not branch_existed:
+        create_branch(branch, cwd=repo_root)
+
+    committed = stage_and_commit(
         paths_to_stage, args.issue_number, cwd=repo_root,
         submission_type=submission_type,
+        update=branch_existed,
     )
-    push_branch(branch, cwd=repo_root)
+    if committed:
+        push_branch(branch, cwd=repo_root, force=branch_existed)
+    else:
+        print("No content changes — branch already reflects the latest "
+              "submission state. Skipping push.", file=sys.stderr)
 
-    # Open PR.
+    if branch_existed:
+        # PR already exists on this branch; the push (if any) updated it
+        # in place. Nothing else to do.
+        print(f"Updated existing branch `{branch}` for issue "
+              f"#{args.issue_number}.")
+        return 0
+
+    # Fresh branch → open a new PR.
     body = render_pr_body(
         issue_number=args.issue_number,
         submitter=args.issue_author,
