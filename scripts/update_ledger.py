@@ -41,22 +41,19 @@ _SUBMISSION_TO_LEDGER_TYPE = {
 }
 
 
-def _empty_ledger(submission: dict) -> dict:
-    """Construct an empty ledger shell matching the submission's contract.
+def empty_ledger(*, ledger_type: str, contract_id: str, currency: str) -> dict:
+    """Construct an empty ledger shell from its parts.
 
-    Used when no ledger file exists yet (first approved submission for the
-    contract). The shape branches on submission type to give hourly its
-    `submissions` list + `hours_to_date` total, milestone its `claims` list
-    + per-claim count.
+    Used in two places: by `_empty_ledger` when the first approved submission
+    arrives and no ledger file exists yet, and by `onboarding/new-contractor.py`
+    when seeding the initial pinned ledger issue at repo-create time. Sharing
+    one constructor keeps the empty-state shape in lockstep across both.
+
+    The shape branches on `ledger_type` to give hourly its `submissions` list
+    + `hours_to_date` total, milestone its `claims` list + per-claim count.
     """
-    submission_type = submission["type"]
-    ledger_type = _SUBMISSION_TO_LEDGER_TYPE.get(submission_type)
-    if ledger_type is None:
-        raise ValueError(f"Unknown submission type `{submission_type}`.")
-
-    currency = submission["totals"]["currency"]
     base = {
-        "contract_id": submission["contract_id"],
+        "contract_id": contract_id,
         "type": ledger_type,
         "currency": currency,
     }
@@ -70,15 +67,29 @@ def _empty_ledger(submission: dict) -> dict:
                 "submissions_count": 0,
             },
         }
-    # milestone
-    return {
-        **base,
-        "claims": [],
-        "totals": {
-            "amount_to_date": 0,
-            "claims_count": 0,
-        },
-    }
+    if ledger_type == "milestone":
+        return {
+            **base,
+            "claims": [],
+            "totals": {
+                "amount_to_date": 0,
+                "claims_count": 0,
+            },
+        }
+    raise ValueError(f"Unknown ledger type `{ledger_type}`.")
+
+
+def _empty_ledger(submission: dict) -> dict:
+    """Construct an empty ledger shell matching the submission's contract."""
+    submission_type = submission["type"]
+    ledger_type = _SUBMISSION_TO_LEDGER_TYPE.get(submission_type)
+    if ledger_type is None:
+        raise ValueError(f"Unknown submission type `{submission_type}`.")
+    return empty_ledger(
+        ledger_type=ledger_type,
+        contract_id=submission["contract_id"],
+        currency=submission["totals"]["currency"],
+    )
 
 
 def _build_entry(submission: dict) -> dict:

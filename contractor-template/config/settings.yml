@@ -1,0 +1,18 @@
+# Contractor identity — written by onboarding/new-contractor.py and edited
+# by hand thereafter (e.g. address updates).
+#
+# Consumed by:
+#   - scripts/generate_pdf.py             reads contractor.{name,github,email,address}
+#   - .github/CODEOWNERS                  references admin (substituted at onboarding)
+#
+# Fiscal-host config (PSL address, document-date timezone, notification
+# recipients) does NOT live here — see contractor-payments/templates/fiscal-host.yml.
+# Currency, hourly rate, and milestone schedule live in contracts/{id}.yml.
+
+contractor:
+  name: "$CONTRACTOR_NAME"
+  github: $CONTRACTOR_HANDLE
+  email: $CONTRACTOR_EMAIL
+  address: $CONTRACTOR_ADDRESS_BLOCK
+
+admin: $ADMIN
