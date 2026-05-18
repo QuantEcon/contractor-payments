@@ -65,6 +65,24 @@
 
 #v(0.2cm)
 
+// ── Revision banner ─────────────────────────────────────────────────────
+// Surfaces when this submission supersedes a previous one (Phase 2.5).
+// Placed at the top so PSL sees it first when opening the PDF.
+#let supersedes_id = data.at("supersedes", default: none)
+#if supersedes_id != none [
+  #block(
+    width: 100%,
+    inset: (x: 12pt, y: 7pt),
+    fill: rgb("#fed7aa"),
+    stroke: (left: 3pt + rgb("#9a3412")),
+    [
+      #text(size: 10.5pt, weight: "bold", fill: rgb("#9a3412"))[⟳ REVISION] —
+      #text(size: 9.5pt)[supersedes #raw(supersedes_id). The original document is no longer authoritative; please use this version for payment processing.]
+    ]
+  )
+  #v(0.25cm)
+]
+
 #grid(
   columns: (auto, 1fr, auto),
   column-gutter: 0.6em,
