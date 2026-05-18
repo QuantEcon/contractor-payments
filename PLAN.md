@@ -16,8 +16,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 3a** — Reusable workflows (engine code centralised; contractor repos are thin callers)
 - [x] **Phase 2** — Merge processing + email notify to PSL (engine code complete; partial E2E verified through ledger update + pinned-issue refresh; SMTP credentials needed to unlock the email step)
 - [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
-- [ ] **Phase 2.5** — Revision + Supplemental handling  ← **current target** (post-merge corrections need engine support before real contractors land; was v1.1, pulled forward)
-- [ ] **Phase 3b** — Onboarding script for new contractor repos
+- [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
+- [ ] **Phase 3b** — Onboarding script for new contractor repos  ← **current target**
 - [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
 - [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
 
@@ -783,7 +783,21 @@ The testing surfaced an operational design question (post-merge corrections), ca
 
 ---
 
-### Phase 2.5 — Revision + Supplemental handling
+### Phase 2.5 — Revision + Supplemental handling ✅
+
+**End-to-end verified** on `contractor-engine-test` (2026-05-18):
+- **Revision flow**: edit closed issue #18 body → engine detected revision via filesystem state → opened PR [#20](https://github.com/QuantEcon/contractor-engine-test/pull/20) (`(revision)` title suffix, REVISION banner on PDF, `supersedes` + `revision_of` metadata) → admin merged → email landed with `REVISION approved` subject → ledger replaced original with v2 (77,000 → 80,000 JPY; superseded entry rendered struck-through in pinned issue [#15](https://github.com/QuantEcon/contractor-engine-test/issues/15)) → cross-comment posted on the now-superseded PR [#19](https://github.com/QuantEcon/contractor-engine-test/pull/19).
+- **Independent `-B` flow**: fresh issue #21 for the same period → engine detected collision but no revision target → assigned `-B` suffix purely for ID uniqueness, no metadata, no banner → admin merged PR #22 → email plain "approved" subject → ledger appended as a third active claim (total now 172,000 JPY across 3 claims; the still-superseded original excluded).
+
+Two bugs were surfaced and fixed during E2E:
+- Branch existence ≠ open PR; gating regeneration on `gh pr list --state open` not on branch existence ([b362bf4](https://github.com/QuantEcon/contractor-payments/commit/b362bf4)).
+- Cross-comment search was substring-matching the revision's own PR body; tightened to `<id>.yml` + explicit current-PR exclusion ([39c7792](https://github.com/QuantEcon/contractor-payments/commit/39c7792)).
+
+Two follow-on polish items also landed during the same testing window:
+- CODEOWNERS added to `contractor-template/.github/CODEOWNERS` (with `$ADMIN` placeholder, substituted by Phase 3b onboarding); deployed literally to `contractor-engine-test`. Auto-requests admin review on every PR — sharper signal than the @mention buried in the PR body, and surfaces on the PR as state until reviewed ([e1bf74b](https://github.com/QuantEcon/contractor-payments/commit/e1bf74b)).
+- Email body uses `approved_by` from the stamped submission: "Approved by QuantEcon @{handle} for processing." instead of the prior generic "admin" string ([e1bf74b](https://github.com/QuantEcon/contractor-payments/commit/e1bf74b)).
+
+
 
 **Motivation (surfaced during BREAK testing — see [`notes/ADMIN_RUNBOOK.md`](../notes/ADMIN_RUNBOOK.md) Scenario 4).**
 
