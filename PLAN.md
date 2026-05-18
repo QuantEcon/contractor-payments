@@ -783,6 +783,10 @@ Once Phase 3a + Phase 2 are implemented, **stop and test thoroughly** before con
 
 ### Phase 3b — Onboarding script for new contractor repos
 - [ ] **`onboarding/new-contractor.py`** per §5 — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally; creates the contractor repo; adds collaborators; sets branch protection; creates labels via `scripts/setup_labels.py`. Multi-select for templates deferred to Phase 5.
+- [ ] **Repo settings to apply on creation** (every new contractor repo gets the same baseline):
+  - `delete_branch_on_merge: true` — keeps the branch list clean after each approved submission. (`gh api -X PATCH /repos/{owner}/{repo} -f delete_branch_on_merge=true`.)
+  - Branch protection on `main`: PR required, **1 approving review required**, no force-push, no direct push. The admin still reviews their own approval but the "Approve" click is a useful safety gate before the merge triggers email + ledger + email-to-PSL once `testing_mode` flips.
+  - Issue auto-deletion not enabled (we keep the submission issues as the audit trail).
 - [ ] **Opens the initial ledger issue** for the first contract (per §8 Phase 2's `update_ledger_issue.py` design). Pins it to the repo's Issues tab. Locks it from comments. Writes the issue number back into `contracts/<contract-id>.yml` as `ledger_issue: <N>` so the approval workflow can find it. Also covers contract-renewal: a small helper opens a fresh ledger issue and closes the predecessor when a new contract YAML is added.
 - [ ] Spin up `QuantEcon/contractor-onboarding-test` via the script; run the full submit → merge loop end-to-end via the reusable workflow.
 

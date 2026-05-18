@@ -191,6 +191,7 @@ jobs:
             --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
             --email-summary /tmp/email_summary.json \
             --issue ${{ steps.find_issue.outputs.issue_number }} \
+            --pr ${{ inputs.pr_number }} \
             --repo "${{ github.repository }}"
 
       - name: Apply `processed` label to the merged PR

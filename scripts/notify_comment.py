@@ -1,10 +1,17 @@
-"""Post a verbose internal-audit comment on the closed submission issue.
+"""Post a verbose internal-audit comment on the closed submission issue
+and (optionally) on the merged PR.
 
 Confirms three things in one place so admins can see at a glance what
 happened on this merge:
   1. The submission was approved (by whom, when).
   2. The ledger was updated (one-line summary + running total).
   3. The approval email was sent (recipients + timestamp + testing_mode).
+
+Posts identical content on both targets. Why both: the issue is the
+contractor-facing surface (they opened it; closing it is the visible
+"done" signal); the PR is the admin-facing surface (anyone reviewing the
+merged PR later sees what happened without hunting for the originating
+issue). One comment body, two destinations.
 
 Designed to be the LAST step in `.github/workflows/process-approved.yml`.
 That ordering means the comment reflects the actual outcome of every
@@ -131,15 +138,19 @@ def compose_comment(
     return "\n".join(lines) + "\n"
 
 
-def post_comment(issue_number: int, body: str, *, repo: Optional[str] = None) -> None:
-    """Post a new comment on the issue via `gh issue comment --body-file`."""
+def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -> None:
+    """Post a new comment on the issue or PR via `gh issue comment --body-file`.
+
+    Works for both issues and PRs because they share GitHub's issue
+    numbering and the issue-comment endpoint accepts either.
+    """
     repo = repo or os.environ.get("GITHUB_REPOSITORY")
     fd, path = tempfile.mkstemp(suffix=".md", prefix="approval-comment-")
     body_path = Path(path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
-        cmd = ["gh", "issue", "comment", str(issue_number),
+        cmd = ["gh", "issue", "comment", str(target_number),
                "--body-file", str(body_path)]
         if repo:
             cmd.extend(["--repo", repo])
@@ -164,6 +175,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "skipped or failed — comment will reflect that.")
     p.add_argument("--issue", type=int, required=True,
                    help="Issue number to comment on (the submission's original issue).")
+    p.add_argument("--pr", type=int, default=None,
+                   help="Optional PR number to also comment on (the merged "
+                        "submission PR). Posts the same body to both targets.")
     p.add_argument("--repo", default=None,
                    help="GitHub owner/name. Default: $GITHUB_REPOSITORY.")
     p.add_argument("--dry-run", action="store_true",
@@ -191,6 +205,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     post_comment(args.issue, body, repo=args.repo)
     print(f"Posted comment on issue #{args.issue}")
+    if args.pr is not None:
+        post_comment(args.pr, body, repo=args.repo)
+        print(f"Posted comment on PR #{args.pr}")
     return 0
 
 
