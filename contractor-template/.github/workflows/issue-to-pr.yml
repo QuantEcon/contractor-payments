@@ -9,7 +9,7 @@ name: Issue to PR
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened, edited, reopened]
 
 jobs:
   process:
@@ -26,4 +26,7 @@ jobs:
       issue_title: ${{ github.event.issue.title }}
       issue_author: ${{ github.event.issue.user.login }}
       issue_body: ${{ github.event.issue.body }}
+      # Phase 2.5: pass through the event action so the engine can
+      # distinguish a reopen (revision trigger) from a fresh open.
+      event_action: ${{ github.event.action }}
     secrets: inherit

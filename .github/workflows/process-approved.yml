@@ -194,6 +194,38 @@ jobs:
             --pr ${{ inputs.pr_number }} \
             --repo "${{ github.repository }}"
 
+      # Phase 2.5: when this submission supersedes a previous one, post a
+      # forward-reference comment on the now-superseded PR so anyone landing
+      # on the old PR sees where the authoritative version moved to. The
+      # superseded PDF + audit trail stay on the original PR as the record
+      # of what was issued to PSL on the original date.
+      - name: Comment on the superseded PR (revisions only)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SUPERSEDES_ID=$(python -c "import yaml,sys; \
+            d=yaml.safe_load(open('${{ steps.find_submission.outputs.submission_file }}')); \
+            print(d.get('supersedes') or '')")
+          if [ -z "$SUPERSEDES_ID" ]; then
+            echo "Not a revision; skipping superseded-PR comment."
+            exit 0
+          fi
+          echo "Revision detected; locating superseded PR for $SUPERSEDES_ID..."
+          # Find the previous merged PR by searching for the superseded
+          # submission ID in PR bodies (the original PR's body contains a
+          # link to its submission YAML, so the ID appears verbatim there).
+          PREV_PR=$(gh pr list --repo "${{ github.repository }}" --state merged \
+            --search "\"$SUPERSEDES_ID\" in:body" --json number \
+            --jq 'first | .number // empty')
+          if [ -z "$PREV_PR" ]; then
+            echo "Could not locate previous PR for $SUPERSEDES_ID; skipping cross-comment."
+            echo "(The revision still landed cleanly; this is a non-fatal audit gap.)"
+            exit 0
+          fi
+          echo "Found previous PR: #$PREV_PR. Posting forward-reference comment."
+          gh pr comment "$PREV_PR" --repo "${{ github.repository }}" --body \
+            "**Superseded by #${{ inputs.pr_number }}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
+
       - name: Apply `processed` label to the merged PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

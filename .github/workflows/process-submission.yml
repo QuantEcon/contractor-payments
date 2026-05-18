@@ -31,6 +31,15 @@ on:
       issue_body:
         required: true
         type: string
+      event_action:
+        description: >
+          The triggering issues event action: 'opened', 'edited', or 'reopened'.
+          On 'reopened', the engine treats the submission as a revision and
+          looks up the previous merged submission for this issue to set the
+          supersedes target. See PLAN §8 Phase 2.5.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   process:
@@ -94,19 +103,45 @@ jobs:
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Phase 2.5: on `issues.reopened`, look up the latest approved
+      # submission tied to this issue. If found, the new submission
+      # becomes a revision and supersedes the previous one. If the
+      # issue was closed without a merge (no approved submission on
+      # record), supersedes stays empty and the submission proceeds as
+      # a normal fresh submission.
+      - name: Detect revision target (on reopened events)
+        id: revision
+        if: inputs.event_action == 'reopened'
+        env:
+          PYTHONPATH: engine
+        run: |
+          SUPERSEDES=$(python -m scripts.find_previous_submission \
+            --issue "${{ inputs.issue_number }}")
+          echo "supersedes=$SUPERSEDES" >> "$GITHUB_OUTPUT"
+          if [ -n "$SUPERSEDES" ]; then
+            echo "Reopen detected; revision will supersede: $SUPERSEDES"
+          else
+            echo "Reopen detected but no previously approved submission found for this issue — treating as fresh submission."
+          fi
+
       - name: Create submission PR (on parse success)
         if: steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
         run: |
+          SUPERSEDES_ARG=""
+          if [ -n "${{ steps.revision.outputs.supersedes }}" ]; then
+            SUPERSEDES_ARG="--supersedes ${{ steps.revision.outputs.supersedes }}"
+          fi
           python -m scripts.create_submission_pr \
             --submission-file /tmp/submission.json \
             --errors-file /tmp/errors.json \
             --issue-number "${{ inputs.issue_number }}" \
             --issue-author "${{ inputs.issue_author }}" \
             --issue-title "${{ inputs.issue_title }}" \
-            --templates-dir engine/templates
+            --templates-dir engine/templates \
+            $SUPERSEDES_ARG
 
       - name: Clear any prior error state (on parse success)
         if: steps.parse.outputs.parse_ok == 'true'
