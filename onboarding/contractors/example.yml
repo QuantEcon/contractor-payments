@@ -1,0 +1,45 @@
+# Example contractor input for onboarding/new-contractor.py.
+#
+# Copy this file to onboarding/contractors/{handle}.yml, fill in the
+# real values, and run:
+#
+#   python onboarding/new-contractor.py --config onboarding/contractors/{handle}.yml
+#
+# Add --dry-run to preview the plan. CLI flags override values from this
+# file, so `--hourly-rate 60` lets you tweak a single field at run time
+# without re-editing the YAML.
+#
+# Files in this directory (other than this example) are gitignored —
+# they may contain personal information (email, postal address).
+
+handle: alice                       # GitHub handle of the contractor
+name: Alice Q. Example              # Real name (free text)
+email: alice@example.com
+admin: mmcky                        # optional, default: mmcky
+address: |                          # optional, multi-line, rendered on PDFs
+  123 Main St
+  Apt 4B
+  SomeCity, 10001
+project: numpy-lectures             # free-form
+
+contract:
+  id: QE-PSL-2026-001               # suggested format: QE-{PAYER}-YYYY-NNN
+  type: hourly                      # hourly | milestone
+  start_date: 2026-01-01
+  end_date: 2026-12-31
+  currency: USD                     # AUD | USD | JPY
+
+  # ── Hourly contracts ──
+  hourly_rate: 50
+  max_hours_per_month: 40           # optional
+
+  # ── Milestone contracts (instead of hourly_rate / max_hours_per_month) ──
+  # milestones:
+  #   - id: 1
+  #     date: 2026-01-15
+  #     amount: 5000
+  #     description: Kick-off deliverable
+  #   - id: 2
+  #     date: 2026-02-15
+  #     amount: 5000
+  #     description: Mid-point review

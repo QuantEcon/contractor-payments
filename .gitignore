@@ -10,4 +10,11 @@ __pycache__/
 # multiple contractor repos from inside this engine repo without
 # chdir-ing elsewhere. Each subdirectory is an independent git
 # checkout of its respective QuantEcon/contractor-{handle} repo.
-contractors/
+# Anchored to repo root so it doesn't shadow onboarding/contractors/.
+/contractors/
+
+# Contractor input YAMLs consumed by onboarding/new-contractor.py via
+# --config. May contain personal info (email, postal address), so kept
+# admin-private. The committed `example.yml` is the documented stub.
+onboarding/contractors/*
+!onboarding/contractors/example.yml

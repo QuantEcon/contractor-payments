@@ -100,6 +100,10 @@ def run(cmd: list[str], *, dry_run: bool,
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--config",
+                   help="Path to a YAML file containing the contractor + "
+                        "contract details. CLI flags override values from "
+                        "the file. See onboarding/contractors/example.yml.")
     p.add_argument("--handle", help="GitHub handle of the new contractor.")
     p.add_argument("--name", help="Contractor's real name (free text).")
     p.add_argument("--email", help="Contractor email.")
@@ -203,62 +207,119 @@ def _open_editor_for_milestones() -> list[dict]:
         tmp_path.unlink(missing_ok=True)
 
 
-def resolve_inputs(args: argparse.Namespace) -> Inputs:
-    """Materialise an Inputs from CLI flags + interactive prompts for gaps.
+def load_config(path: str) -> dict:
+    """Load a contractor-input YAML and flatten it to the same keyspace as
+    the CLI flags. Missing keys are simply absent — the caller fills the
+    gaps from flags or prompts. Dates are coerced to strings because
+    yaml.safe_load returns datetime.date objects for `YYYY-MM-DD`.
+    """
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    contract = raw.get("contract") or {}
 
-    Prompts only fire when stdin is a TTY and the flag wasn't supplied —
+    def _str(v):
+        # yaml.safe_load parses YYYY-MM-DD as datetime.date; the rest of
+        # the script expects strings, so normalise here.
+        if isinstance(v, date):
+            return v.isoformat()
+        return v
+
+    flat = {
+        "handle": raw.get("handle"),
+        "name": raw.get("name"),
+        "email": raw.get("email"),
+        "address": raw.get("address"),  # actual text, not a file path
+        "admin": raw.get("admin"),
+        "project": raw.get("project"),
+        "contract_id": contract.get("id"),
+        "contract_type": contract.get("type"),
+        "start_date": _str(contract.get("start_date")),
+        "end_date": _str(contract.get("end_date")),
+        "currency": contract.get("currency"),
+        "hourly_rate": contract.get("hourly_rate"),
+        "max_hours_per_month": contract.get("max_hours_per_month"),
+        "milestones": contract.get("milestones"),
+    }
+    return {k: v for k, v in flat.items() if v is not None}
+
+
+def resolve_inputs(args: argparse.Namespace) -> Inputs:
+    """Materialise an Inputs from --config YAML + CLI flags + prompts.
+
+    Precedence: CLI flag > config file > interactive prompt. Prompts only
+    fire when stdin is a TTY and neither source supplied the value —
     keeps automation runs (CI, scripted dry-runs) non-blocking.
     """
     interactive = sys.stdin.isatty()
+    config = load_config(args.config) if args.config else {}
 
-    handle = args.handle or _prompt("GitHub handle")
-    name = args.name or _prompt("Real name")
-    email = args.email or _prompt("Email")
+    def pick(arg_val, key):
+        """CLI flag wins if set; otherwise config; otherwise None."""
+        return arg_val if arg_val is not None else config.get(key)
 
-    address = ""
+    handle = pick(args.handle, "handle") or _prompt("GitHub handle")
+    name = pick(args.name, "name") or _prompt("Real name")
+    email = pick(args.email, "email") or _prompt("Email")
+
+    # Address: CLI passes a file path; config carries the actual text.
     if args.address_file:
         address = _read_address_file(args.address_file)
+    elif "address" in config:
+        address = (config["address"] or "").rstrip("\n")
     elif interactive:
         ask = input("Postal address file path (optional, blank to skip): ").strip()
-        if ask:
-            address = _read_address_file(ask)
+        address = _read_address_file(ask) if ask else ""
+    else:
+        address = ""
 
-    admin = args.admin or DEFAULT_ADMIN
-    project = args.project or _prompt("Project name", default=f"{handle}-work")
+    admin = pick(args.admin, "admin") or DEFAULT_ADMIN
+    project = pick(args.project, "project") or _prompt(
+        "Project name", default=f"{handle}-work",
+    )
 
     default_contract = f"QE-{DEFAULT_PAYER}-{date.today().year}-001"
-    contract_id = args.contract_id or _prompt("Contract ID", default=default_contract)
-    contract_type = args.contract_type or _prompt_choice("Contract type", CONTRACT_TYPES)
+    contract_id = pick(args.contract_id, "contract_id") or _prompt(
+        "Contract ID", default=default_contract,
+    )
+    contract_type = pick(args.contract_type, "contract_type") or _prompt_choice(
+        "Contract type", CONTRACT_TYPES,
+    )
 
-    start_date = args.start_date or _prompt(
+    start_date = pick(args.start_date, "start_date") or _prompt(
         "Start date (YYYY-MM-DD)", default=str(date.today().replace(day=1)),
     )
-    end_date = args.end_date or _prompt(
+    end_date = pick(args.end_date, "end_date") or _prompt(
         "End date (YYYY-MM-DD)",
         default=str(date(date.today().year, 12, 31)),
     )
-    currency = args.currency or _prompt_choice("Currency", SUPPORTED_CURRENCIES)
+    currency = pick(args.currency, "currency") or _prompt_choice(
+        "Currency", SUPPORTED_CURRENCIES,
+    )
 
     hourly_rate = None
     max_hours = None
     milestones: list[dict] = []
 
     if contract_type == "hourly":
-        hourly_rate = args.hourly_rate
+        hourly_rate = pick(args.hourly_rate, "hourly_rate")
         if hourly_rate is None:
             hourly_rate = float(_prompt("Hourly rate"))
-        if args.max_hours_per_month is not None:
-            max_hours = args.max_hours_per_month
-        elif interactive:
+        else:
+            hourly_rate = float(hourly_rate)
+        max_hours = pick(args.max_hours_per_month, "max_hours_per_month")
+        if max_hours is None and interactive:
             raw = input("Max hours/month (optional, blank to skip): ").strip()
             if raw:
                 max_hours = float(raw)
+        elif max_hours is not None:
+            max_hours = float(max_hours)
     else:
         if args.milestone_notes_file:
             data = yaml.safe_load(
                 Path(args.milestone_notes_file).read_text(encoding="utf-8"),
             ) or {}
             milestones = data.get("milestones") or []
+        elif "milestones" in config:
+            milestones = config["milestones"] or []
         else:
             milestones = _open_editor_for_milestones()
 

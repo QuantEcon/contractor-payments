@@ -17,8 +17,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 2** — Merge processing + email notify to PSL (engine code complete; partial E2E verified through ledger update + pinned-issue refresh; SMTP credentials needed to unlock the email step)
 - [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
 - [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
-- [ ] **Phase 3b** — Onboarding script for new contractor repos  ← **current target**
-- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
+- [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
+- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)  ← **current target**
 - [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
 
 ## Contents
@@ -870,8 +870,8 @@ The engine doesn't track PSL payment state (out-of-band). Admin uses judgment ba
 ---
 
 ### Phase 3b — Onboarding script for new contractor repos
-- [ ] **`onboarding/new-contractor.py`** per §5 — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally; creates the contractor repo; adds collaborators; sets branch protection; creates labels via `scripts/setup_labels.py`. Multi-select for templates deferred to Phase 5.
-- [ ] **Repo settings to apply on creation** (every new contractor repo gets the same baseline):
+- [x] **`onboarding/new-contractor.py`** per §5 — seeds both Hourly Timesheet and Milestone Invoice templates unconditionally; creates the contractor repo; adds collaborators; creates labels via `scripts/setup_labels.py`; opens the pinned ledger issue and wires `ledger_issue: <N>` back into the contract. Flags-with-prompt-fallback, plus `--config <yaml>` for the full record as a reviewable artifact (admin-private files under `onboarding/contractors/`, gitignored). Multi-select for templates deferred to Phase 5.
+- [x] **Repo settings to apply on creation** (every new contractor repo gets the same baseline):
   - `delete_branch_on_merge: true` — keeps the branch list clean after each approved submission. (`gh api -X PATCH /repos/{owner}/{repo} -f delete_branch_on_merge=true`.)
   - **Branch protection on `main` via an org-level ruleset (not per-repo legacy branch protection).** Required state: PR required, **1 approving review required**, require Code Owners, no force-push, no direct push. The admin still reviews their own approval but the "Approve" click is a useful safety gate before the merge triggers email + ledger + email-to-PSL once `testing_mode` flips. **Implementation note (important — proven the hard way during Phase 2.5 testing):**
     - Legacy branch protection only offers `enforce_admins: true/false` — both modes break the workflow. `true` blocks the `[skip ci]` bot push from `process-approved.yml` (the YAML/PDF re-stamp + ledger update); `false` only exempts human admins, the bot is still rejected with `GH006: Protected branch update failed — Changes must be made through a pull request.`
@@ -881,9 +881,10 @@ The engine doesn't track PSL payment state (out-of-band). Admin uses judgment ba
       - Rule: block force-push and deletion.
       - Bypass actor: GitHub Actions integration (allows the `[skip ci]` workflow push).
     - The onboarding script doesn't configure this per-repo — the org-level ruleset matches new repos automatically the moment they're created with a `contractor-` prefix.
+    - **Script behaviour when the ruleset check can't run:** the ruleset query needs the `admin:org` gh scope, which the admin's token intentionally lacks (security: minimal scopes). The script detects this, prints the ruleset spec inline so the org admin can verify it in the GitHub UI, and proceeds — repo creation only needs the standard `repo` scope.
   - Issue auto-deletion not enabled (we keep the submission issues as the audit trail).
-- [ ] **Opens the initial ledger issue** for the first contract (per §8 Phase 2's `update_ledger_issue.py` design). Pins it to the repo's Issues tab. Locks it from comments. Writes the issue number back into `contracts/<contract-id>.yml` as `ledger_issue: <N>` so the approval workflow can find it. Also covers contract-renewal: a small helper opens a fresh ledger issue and closes the predecessor when a new contract YAML is added.
-- [ ] Spin up `QuantEcon/contractor-onboarding-test` via the script; run the full submit → merge loop end-to-end via the reusable workflow.
+- [x] **Opens the initial ledger issue** for the first contract (per §8 Phase 2's `update_ledger_issue.py` design). Pins it to the repo's Issues tab. Locks it from comments. Writes the issue number back into `contracts/<contract-id>.yml` as `ledger_issue: <N>` so the approval workflow can find it. *(Contract-renewal helper deferred — admin handles renewals manually until the pattern emerges.)*
+- [x] **E2E run on a fresh repo (2026-05-18).** Onboarded `QuantEcon/contractor-mmcky` from scratch with the script, filed a test timesheet via the Issue Form, PR opened with rendered PDF preview + CODEOWNERS review request, merged it; `process-approved.yml` updated `ledger/QE-PSL-2026-099.yml`, re-stamped the PDF with approval metadata, refreshed the pinned ledger issue body, commented on the closed submission issue, and emailed `mmcky@quantecon.org` (testing_mode=true held PSL off). Test repo deleted after verification.
 
 ### Phase 4 — Docs + first real contractors
 
