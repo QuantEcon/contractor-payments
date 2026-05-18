@@ -243,18 +243,29 @@ currency: JPY                 # default currency for milestone claims
 
 project: iuj-visit
 
+milestones:                   # pre-declared schedule; canonical source of truth
+  - id: 1
+    date: 2025-09-15
+    amount: 77000
+    description: Monthly Payment — September
+  - id: 2
+    date: 2025-10-15
+    amount: 77000
+    description: Monthly Payment — October
+  # ... (6 total in this example)
+
 ledger_issue: 6               # GitHub issue # for the auto-updated ledger view (Phase 2)
 
 notes: |
-  Six monthly payments of ¥77,000 (total ¥462,000), payable 15th of each
-  month from Sep 2025 through Feb 2026.
+  Optional free-text addendum — anything that doesn't fit the structured
+  milestones list above (e.g. amendments, side conditions, contact info).
 ```
 
 The `ledger_issue` field is written by Phase 3b's onboarding script when it opens the ledger issue; the approval workflow reads it to know which issue to edit. Optional — if missing, the workflow skips the issue update (the YAML side still gets the entry).
 
-Lightweight by design: the contract declares that it's a milestone contract and what currency claims are denominated in, but does **not** pre-enumerate the milestones. The contractor enters each milestone row at submission time via the issue form (§4.6) — same UX shape as a timesheet entry. The admin verifies the row against the contract's `notes` during PR review.
+**Structured `milestones[]` (Phase 3b, decided 2026-05-18).** The contract pre-declares the payment schedule as structured data: each milestone has an `id` (the number the contractor cites at submission time), `date`, `amount`, and `description`. Onboarding collects these interactively. The parser cross-checks submitted milestone IDs against this list and emits a **non-blocking warning** (surfaced in the PR body alongside other parse warnings) when a submitted ID isn't in the contract — catches typos cheaply without rejecting otherwise-valid submissions. Engine remains permissive; the admin still has the final say during PR review.
 
-> **Future improvement.** A heavier variant — admin pre-declares a `milestones[]` schedule in the contract, contractor picks from a dropdown, parser auto-prevents double-claims — was considered and deferred. The pre-defined schedule gives source-of-truth payment data, automatic total-contract-value tracking, and machine-enforced double-claim prevention, at the cost of admin setup time and rigidity. Worth revisiting when the broader admin infrastructure ([QuantEcon/admin#5](https://github.com/QuantEcon/admin/issues/5)) adds a centralized contract data store, where milestone schedules become structured data the admin tooling can manage.
+Earlier versions of this spec deferred structured milestones to the broader admin infrastructure work ([QuantEcon/admin#5](https://github.com/QuantEcon/admin/issues/5)). Phase 3b pulled it forward because onboarding collects the same data anyway — putting it in a structured field at write-time costs nothing and unlocks the parser warning + future cross-contract reporting.
 
 **Contract ID convention.** QuantEcon uses `QE-{PAYER}-YYYY-NNN`:
 - `QE` — QuantEcon
@@ -495,7 +506,9 @@ For contractors on a milestone contract. The contract is lightweight metadata (�
 - Missing fields (fewer than four pipe-separated segments).
 - Duplicate `ID` within the same submission.
 
-**Admin responsibility on review.** Because the contract doesn't enumerate milestones, the admin verifies during PR review that: (a) the amount matches the contract's stated schedule (in `contract.notes`), (b) this milestone hasn't already been claimed in a prior submission. The merged ledger (`ledger/{contract_id}.yml`) is the cumulative record to check against.
+**Engine cross-check (Phase 3b).** Parser checks each submitted milestone `id` against the contract's structured `milestones[]` list (§4.2). Mismatches surface as **non-blocking warnings** in the PR body — alongside other parse warnings — so the admin sees them at review time without the engine refusing the submission. Same posture as everywhere else: engine warns, admin decides.
+
+**Admin responsibility on review.** Verify during PR review that: (a) the submitted amount matches the contract's `milestones[]` entry for that ID, (b) this milestone hasn't already been claimed in a prior submission. The merged ledger (`ledger/{contract_id}.yml`) is the cumulative record to check against.
 
 **Submission ID:** `{handle}-invoice-{period}` (e.g. `mmcky-invoice-2025-11`). Period-based for consistency with timesheets; collision suffix `-vN` applies the same way (§v1.1).
 
@@ -934,7 +947,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Email credentials | GitHub **org-level** secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) | Scoped at the org so every contractor repo's reusable-workflow run can read them without per-repo setup. Never in any YAML; never committed. |
 | Email recipients & testing | `templates/fiscal-host.yml.notifications` block with `psl_to`, `quantecon_cc`, and a `testing_mode` flag. While `testing_mode: true` is set, mail goes to `quantecon_cc` only — PSL is never contacted. | Lets us iterate on email content / formatting on `contractor-engine-test` without ever spamming PSL. Single-line flip (`testing_mode: false`) in Phase 4 cuts over to live PSL delivery. |
 | v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
-| Milestone contract shape | Lightweight metadata only — contractor enters the milestone row in the form (§4.6), admin verifies against `contract.notes` during PR review | Trivial admin setup; admin already reviews every PR so the eyeball check covers double-claim prevention. Pre-declared `milestones[]` schedule deferred — revisit alongside [admin#5](https://github.com/QuantEcon/admin/issues/5). |
+| Milestone contract shape | Structured `milestones[]` schedule with `(id, date, amount, description)` per row, **plus** the contractor entering the row at submission time. Parser emits a non-blocking warning if the submitted milestone ID isn't in the contract's schedule. | Onboarding collects the schedule interactively, so the structured field is free at write-time. Warnings catch typos cheaply without making the engine a hard gate; admin still verifies during PR review. Originally deferred (lightweight `notes:`-only spec) — flipped 2026-05-18 once Phase 3b's onboarding flow made the structured collection trivial. |
 | Reimbursement contract relationship | Reimbursements are **contractor-level**, not contract-level | RA/staff expenses are ad-hoc, hard to pre-authorize in a contract; authorization happens per-claim via PR review. Reimbursements live in the contractor repo without a `contract_id` reference. |
 | Issue-template seeding | Phase 3 onboarding seeds both Hourly Timesheet and Milestone Invoice unconditionally. Multi-select (incl. Reimbursement) added in **Phase 5**. | With two templates, all payees get both — multi-select adds friction without benefit. Multi-select lands alongside Reimbursement when the third type makes selectivity meaningful (e.g. reimbursement-only payees). Workflow file is identical across all repos either way — routing is by label, unused branches inert. |
 | Engine repo name | `QuantEcon/contractor-payments` | Scope grew beyond timesheets; "contractor-payments" pairs naturally with the `contractor-{handle}` payee repos. Renamed from `QuantEcon/timesheets` during Phase 1.5 alignment. |
