@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_submission_png
+from scripts.parse_issue import cross_check_milestone_ids
 
 
 # ─── Pure data transformations (testable) ───────────────────────────────────
@@ -640,6 +641,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         submitted_date=args.submitted_date,
         supersedes=args.supersedes,
     )
+
+    # Phase 3b: non-blocking cross-check between submitted milestone IDs and
+    # the contract's pre-declared schedule. Surfaces as warnings on the PR
+    # body so the admin sees typos at review time without the engine
+    # rejecting otherwise-valid submissions. No-op for hourly contracts and
+    # for milestone contracts that don't carry a structured `milestones[]`
+    # list yet.
+    for w in cross_check_milestone_ids(submission, contract):
+        warnings.append({"message": w.message})
 
     # If there's an open PR for this branch, switch to the branch BEFORE
     # writing any artifacts (untracked files would conflict with the

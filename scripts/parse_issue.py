@@ -482,6 +482,40 @@ def _parse_milestone_entries(
     return entries, errors, warnings
 
 
+def cross_check_milestone_ids(
+    submission: dict, contract: dict,
+) -> list[ParseWarning]:
+    """Non-blocking cross-check: each submitted milestone `id` should appear
+    in the contract's `milestones[]` list (PLAN §4.2 + §4.6).
+
+    Returns a list of warnings — one per entry whose ID isn't in the
+    contract's schedule. Engine stays permissive: the admin sees the
+    warning in the PR body alongside parse warnings and decides.
+
+    No-op for non-milestone submissions, or when the contract has no
+    `milestones[]` field (legacy contracts pre-dating the structured
+    schema; admin verifies against `contract.notes` in that case).
+    """
+    if submission.get("type") != "milestone_invoice":
+        return []
+    contract_milestones = contract.get("milestones") or []
+    if not contract_milestones:
+        return []
+    # Normalise IDs to strings so 1 (yaml int) and "1" (form string) match.
+    known_ids = {str(m["id"]) for m in contract_milestones if "id" in m}
+    warnings: list[ParseWarning] = []
+    for entry in submission.get("entries", []):
+        entry_id = str(entry.get("id", ""))
+        if entry_id and entry_id not in known_ids:
+            warnings.append(ParseWarning(
+                f"milestone ID `{entry_id}` is not in contract "
+                f"`{contract.get('contract_id', '?')}`'s schedule. "
+                f"Known IDs: {sorted(known_ids, key=lambda s: (len(s), s))}. "
+                f"Admin: please verify this row during PR review."
+            ))
+    return warnings
+
+
 # ─── Top-level parse ────────────────────────────────────────────────────────
 
 # Field labels as they appear in the rendered issue body. The IDs in the form

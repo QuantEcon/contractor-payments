@@ -13,6 +13,7 @@ from scripts.parse_issue import (
     _detect_delimiter,
     _parse_date,
     _parse_hours,
+    cross_check_milestone_ids,
     parse_issue,
 )
 
@@ -561,3 +562,82 @@ class TestMilestoneTypeDetection:
         result = parse_issue(body)
         assert not result.ok
         assert any("No entries section" in m for m in error_messages(result))
+
+
+# ─── Milestone ID cross-check against contract schedule (§4.6) ──────────────
+
+class TestCrossCheckMilestoneIds:
+    """Non-blocking cross-check that submitted milestone IDs appear in the
+    contract's structured `milestones[]` schedule. Engine stays permissive:
+    unknown IDs surface as warnings on the PR body, not parse errors.
+    """
+
+    def _contract(self, milestones=None, contract_id="QE-FOO-2025-001"):
+        c = {"contract_id": contract_id}
+        if milestones is not None:
+            c["milestones"] = milestones
+        return c
+
+    def test_hourly_submission_skipped(self):
+        # Wrong submission type → function is a no-op, even if the contract
+        # has a milestones[] list. Hourly timesheets don't carry milestone IDs.
+        submission = {"type": "timesheet", "entries": [{"id": "99"}]}
+        contract = self._contract(milestones=[{"id": 1}])
+        assert cross_check_milestone_ids(submission, contract) == []
+
+    def test_all_ids_known_no_warning(self):
+        submission = {
+            "type": "milestone_invoice",
+            "entries": [{"id": "1"}, {"id": "2"}],
+        }
+        contract = self._contract(milestones=[
+            {"id": 1, "description": "kick-off"},
+            {"id": 2, "description": "draft"},
+            {"id": 3, "description": "final"},
+        ])
+        assert cross_check_milestone_ids(submission, contract) == []
+
+    def test_one_unknown_id_warns_once(self):
+        submission = {
+            "type": "milestone_invoice",
+            "entries": [{"id": "1"}, {"id": "9"}],
+        }
+        contract = self._contract(milestones=[{"id": 1}, {"id": 2}])
+        warnings = cross_check_milestone_ids(submission, contract)
+        assert len(warnings) == 1
+        assert "9" in warnings[0].message
+        assert "QE-FOO-2025-001" in warnings[0].message
+
+    def test_multiple_unknown_ids_warn_per_entry(self):
+        submission = {
+            "type": "milestone_invoice",
+            "entries": [{"id": "7"}, {"id": "8"}, {"id": "1"}],
+        }
+        contract = self._contract(milestones=[{"id": 1}, {"id": 2}])
+        warnings = cross_check_milestone_ids(submission, contract)
+        assert len(warnings) == 2
+        messages = " | ".join(w.message for w in warnings)
+        assert "7" in messages and "8" in messages
+
+    def test_legacy_contract_without_milestones_field_no_warning(self):
+        # Pre-structured-schema contracts: parser stays silent and the admin
+        # verifies the row against contract.notes during PR review.
+        submission = {
+            "type": "milestone_invoice",
+            "entries": [{"id": "1"}, {"id": "42"}],
+        }
+        contract = self._contract(milestones=None)
+        assert cross_check_milestone_ids(submission, contract) == []
+        # Empty list behaves the same as missing field.
+        contract_empty = self._contract(milestones=[])
+        assert cross_check_milestone_ids(submission, contract_empty) == []
+
+    def test_id_type_coercion_int_vs_string(self):
+        # YAML loads bare `1` as int; the form submission always carries
+        # strings. Both shapes should match without warning.
+        submission = {
+            "type": "milestone_invoice",
+            "entries": [{"id": "1"}],
+        }
+        contract = self._contract(milestones=[{"id": 1}])
+        assert cross_check_milestone_ids(submission, contract) == []
