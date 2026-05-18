@@ -249,7 +249,7 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
             hourly_rate = float(_prompt("Hourly rate"))
         if args.max_hours_per_month is not None:
             max_hours = args.max_hours_per_month
-        else:
+        elif interactive:
             raw = input("Max hours/month (optional, blank to skip): ").strip()
             if raw:
                 max_hours = float(raw)
@@ -332,21 +332,54 @@ def verify_repo_doesnt_exist(handle: str) -> None:
         sys.exit(1)
 
 
-def verify_org_ruleset(*, dry_run: bool) -> None:
-    """Warn if the org-level ruleset for contractor-* branch protection
-    isn't present. Doesn't block — the script proceeds (PR-required gate
-    will simply be missing until the org admin creates the ruleset).
+_RULESET_SPEC = f"""\
+  Org-level ruleset required (one-time, set by a `QuantEcon` org admin in
+  the GitHub UI — Settings → Repository rules → Rulesets → New ruleset):
 
-    See PLAN §8 Phase 3b for the ruleset config the org admin should apply.
+    Name        : contractor-repos-main-protection
+    Target      : repos matching `contractor-*`, branch `main`
+    Enforcement : Active
+    Rules       : - Require pull request before merging
+                    • 1 approving review
+                    • Require review from Code Owners
+                  - Block force pushes
+                  - Restrict deletions
+    Bypass      : GitHub Actions (so `process-approved.yml` can push
+                  the `[skip ci]` ledger + PDF re-stamp commit on merge)
+
+  Without this ruleset, the contractor repo is created successfully but
+  `main` has no branch protection — submissions can be merged without
+  review. Safe for the initial onboarding-test repo; verify before any
+  real contractor goes live."""
+
+
+def verify_org_ruleset(*, dry_run: bool) -> None:
+    """Check the org-level `contractor-*` ruleset.
+
+    The query requires the `admin:org` gh scope, which is intentionally NOT
+    a prerequisite to run this script — repo creation only needs `repo`.
+    When the scope is missing (or the query fails for any reason) we print
+    the ruleset spec inline so the admin can verify in the GitHub UI and
+    then proceed. The check is purely advisory: the ruleset is configured
+    out-of-band, never by this script.
     """
     r = subprocess.run(
         ["gh", "api", f"orgs/{ORG}/rulesets"],
         capture_output=True, text=True,
     )
+
     if r.returncode != 0:
-        print(f"WARNING: couldn't query org rulesets ({r.stderr.strip()}).")
-        print("  Branch protection may be absent on the new repo.")
+        stderr = (r.stderr or "").lower()
+        if "admin:org" in stderr or "scope" in stderr:
+            print("NOTE: org ruleset check skipped — your `gh` token doesn't")
+            print("      have the `admin:org` scope (this is fine; repo creation")
+            print("      only needs `repo`). Verify the ruleset manually:")
+        else:
+            print(f"NOTE: couldn't query org rulesets ({r.stderr.strip()}).")
+            print("      Verify the ruleset manually:")
+        print(_RULESET_SPEC)
         return
+
     try:
         rulesets = json.loads(r.stdout or "[]")
     except json.JSONDecodeError:
@@ -354,13 +387,14 @@ def verify_org_ruleset(*, dry_run: bool) -> None:
     has_contractor_rule = any(
         "contractor" in (rs.get("name") or "").lower() for rs in rulesets
     )
-    if not has_contractor_rule:
-        print("WARNING: no org-level ruleset matching `contractor-*` found.")
-        print(f"  The new repo `{repo_full_name('<handle>')}` will be created")
-        print("  without branch protection. Org admin should create a ruleset")
-        print("  (see PLAN.md §8 Phase 3b for the spec) before any submissions.")
-        if not dry_run:
-            input("  Press Enter to continue anyway, or Ctrl-C to abort...")
+    if has_contractor_rule:
+        return
+
+    print("WARNING: no org-level ruleset matching `contractor-*` was found.")
+    print("  The new repo will be created without branch protection.")
+    print(_RULESET_SPEC)
+    if not dry_run:
+        input("\n  Press Enter to continue anyway, or Ctrl-C to abort...")
 
 
 # ─── Plan rendering ─────────────────────────────────────────────────────────
