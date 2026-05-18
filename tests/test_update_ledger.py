@@ -212,6 +212,132 @@ class TestCrossChecks:
         with pytest.raises(ValueError, match="Type mismatch"):
             append_submission(bad, ledger)
 
+
+# ─── Revisions (Phase 2.5) ──────────────────────────────────────────────────
+
+class TestRevisionHourly:
+    """Hourly ledger: revision marks superseded entry, excludes from totals."""
+
+    def test_revision_supersedes_original_in_hourly_ledger(self):
+        ledger = _empty_ledger(HOURLY_SUBMISSION)
+        ledger = append_submission(HOURLY_SUBMISSION, ledger)
+
+        # Original had 14.5h × $50 = $725. Revision corrects to 16h × $50 = $800.
+        revision = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04",
+            "revision_of": "janedoe-timesheet-2026-04",
+            "totals": {"hours": 16.0, "rate": 50.00, "amount": 800.00, "currency": "AUD"},
+        }
+        out = append_submission(revision, ledger)
+
+        # Original entry kept but marked superseded.
+        assert len(out["submissions"]) == 2
+        superseded = [s for s in out["submissions"] if s.get("status") == "superseded"]
+        assert len(superseded) == 1
+        assert superseded[0]["submission_id"] == "janedoe-timesheet-2026-04"
+        assert superseded[0]["superseded_by"] == "janedoe-timesheet-2026-04-v2"
+
+        # Totals reflect only the revision; original is excluded.
+        assert out["totals"]["hours_to_date"] == 16.0
+        assert out["totals"]["amount_to_date"] == 800.00
+        # Count drops the superseded entry (one active submission, not two).
+        assert out["totals"]["submissions_count"] == 1
+
+    def test_revision_chain_only_counts_latest(self):
+        """Two consecutive revisions: only the most recent counts."""
+        ledger = _empty_ledger(HOURLY_SUBMISSION)
+        ledger = append_submission(HOURLY_SUBMISSION, ledger)
+        v2 = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04",
+            "totals": {"hours": 16.0, "rate": 50.00, "amount": 800.00, "currency": "AUD"},
+        }
+        ledger = append_submission(v2, ledger)
+        v3 = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v3",
+            "supersedes": "janedoe-timesheet-2026-04-v2",
+            "totals": {"hours": 17.5, "rate": 50.00, "amount": 875.00, "currency": "AUD"},
+        }
+        out = append_submission(v3, ledger)
+
+        # All three are present, two superseded, one active.
+        assert len(out["submissions"]) == 3
+        statuses = [s.get("status") for s in out["submissions"]]
+        assert statuses.count("superseded") == 2
+        # Only the active v3 counts toward totals.
+        assert out["totals"]["amount_to_date"] == 875.00
+        assert out["totals"]["hours_to_date"] == 17.5
+        assert out["totals"]["submissions_count"] == 1
+
+
+class TestRevisionMilestone:
+    """Milestone ledger: revision marks superseded claim, excludes from totals."""
+
+    def test_revision_supersedes_original_in_milestone_ledger(self):
+        ledger = _empty_ledger(MILESTONE_SUBMISSION)
+        ledger = append_submission(MILESTONE_SUBMISSION, ledger)
+
+        # Original 77000 JPY → revision corrects to 80000 JPY.
+        revision = {
+            **MILESTONE_SUBMISSION,
+            "submission_id": "mmcky-invoice-2025-11-v2",
+            "supersedes": "mmcky-invoice-2025-11",
+            "revision_of": "mmcky-invoice-2025-11",
+            "totals": {"amount": 80000, "currency": "JPY"},
+        }
+        out = append_submission(revision, ledger)
+
+        # Both claims present, original marked superseded.
+        assert len(out["claims"]) == 2
+        superseded = [c for c in out["claims"] if c.get("status") == "superseded"]
+        assert len(superseded) == 1
+        assert superseded[0]["superseded_by"] == "mmcky-invoice-2025-11-v2"
+
+        # Totals reflect only the revision.
+        assert out["totals"]["amount_to_date"] == 80000
+        assert out["totals"]["claims_count"] == 1
+
+
+class TestRevisionEdgeCases:
+    def test_supersedes_unknown_id_raises(self):
+        ledger = _empty_ledger(HOURLY_SUBMISSION)
+        ledger = append_submission(HOURLY_SUBMISSION, ledger)
+        bad = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04-ghost",  # not in ledger
+        }
+        with pytest.raises(ValueError, match="no entry with that submission_id"):
+            append_submission(bad, ledger)
+
+    def test_independent_second_invoice_b_appends_normally(self):
+        """Independent invoice (-B): no `supersedes`, both entries count.
+        This is the same-period collision case where there's no relationship
+        between the two submissions."""
+        ledger = _empty_ledger(MILESTONE_SUBMISSION)
+        ledger = append_submission(MILESTONE_SUBMISSION, ledger)
+        independent = {
+            **MILESTONE_SUBMISSION,
+            "submission_id": "mmcky-invoice-2025-11-B",
+            # no `supersedes` field — this is an independent invoice
+            "entries": [
+                {"id": "4", "date": "2025-11-20", "amount": 12000,
+                 "description": "Bonus milestone"},
+            ],
+            "totals": {"amount": 12000, "currency": "JPY"},
+        }
+        out = append_submission(independent, ledger)
+
+        # Both claims active and counted.
+        assert len(out["claims"]) == 2
+        assert all(c.get("status") != "superseded" for c in out["claims"])
+        assert out["totals"]["amount_to_date"] == 89000  # 77000 + 12000
+        assert out["totals"]["claims_count"] == 2
+
     def test_currency_mismatch_raises(self):
         ledger = _empty_ledger(HOURLY_SUBMISSION)
         bad = {

@@ -116,10 +116,22 @@ def _build_entry(submission: dict) -> dict:
 
 
 def append_submission(submission: dict, ledger: dict) -> dict:
-    """Pure transform: append a submission to a ledger and recompute totals.
+    """Pure transform: apply a submission to a ledger and recompute totals.
 
     Validates that the ledger and submission agree on contract_id, type,
     and currency. Raises on duplicate submission_id.
+
+    Branches on `submission.get("supersedes")`:
+
+    - **No `supersedes`** — append the new entry. This covers the normal
+      first-time approval AND independent second invoices in the same
+      period (`-B`, `-C` suffix; no relationship to a prior entry).
+    - **`supersedes` set** — this is a revision (Phase 2.5). Mark the
+      superseded entry as superseded (don't remove — kept for audit
+      trail, rendered struck-through and excluded from totals) and
+      append the new entry. The superseded entry's amount no longer
+      counts toward `amount_to_date` or `hours_to_date`, and it doesn't
+      count toward the `*_count` totals either.
     """
     # Cross-checks
     if ledger.get("contract_id") != submission["contract_id"]:
@@ -156,25 +168,69 @@ def append_submission(submission: dict, ledger: dict) -> dict:
             f"the workflow run history before retrying."
         )
 
+    # Revision: mark the superseded entry. Phase 2.5.
+    supersedes = submission.get("supersedes")
+    if supersedes:
+        # Find the entry being superseded. Must exist — if not, the
+        # workflow signalled a revision against something the ledger
+        # doesn't know about, which is a bug to surface.
+        found = False
+        new_items = []
+        for item in items:
+            if item["submission_id"] == supersedes:
+                # Mark this entry as superseded; preserve the rest of its data
+                # for the audit trail rendered by update_ledger_issue.py.
+                # The "superseded_by" reference lets the renderer link forward
+                # to the revision that replaced it.
+                new_items.append({
+                    **item,
+                    "superseded_by": submission_id,
+                    "status": "superseded",
+                })
+                found = True
+            else:
+                new_items.append(item)
+        if not found:
+            raise ValueError(
+                f"Submission `{submission_id}` claims to supersede `{supersedes}` "
+                f"but no entry with that submission_id is present in the ledger. "
+                f"Either the supersedes target was never approved or the workflow "
+                f"is operating on stale state — investigate before retrying."
+            )
+        items = new_items
+
     items.append(_build_entry(submission))
 
     out = dict(ledger)
     out[list_key] = items
+    _recompute_totals(out, items)
+    return out
+
+
+def _recompute_totals(ledger: dict, items: list[dict]) -> None:
+    """Recompute totals over `items`, excluding any marked superseded.
+
+    Superseded entries stay in the ledger for the audit trail (rendered
+    struck-through) but don't count toward any of the running totals,
+    including the count. Net effect of a revision: replace one entry's
+    amount with another's; counts stay the same when revising one entry
+    with one entry.
+    """
+    active_items = [item for item in items if item.get("status") != "superseded"]
     if ledger["type"] == "hourly":
-        total_hours = sum(item["hours"] for item in items)
-        total_amount = sum(item["amount"] for item in items)
-        out["totals"] = {
+        total_hours = sum(item["hours"] for item in active_items)
+        total_amount = sum(item["amount"] for item in active_items)
+        ledger["totals"] = {
             "hours_to_date": round(total_hours, 2),
             "amount_to_date": total_amount,
-            "submissions_count": len(items),
+            "submissions_count": len(active_items),
         }
     else:
-        total_amount = sum(item["amount"] for item in items)
-        out["totals"] = {
+        total_amount = sum(item["amount"] for item in active_items)
+        ledger["totals"] = {
             "amount_to_date": total_amount,
-            "claims_count": len(items),
+            "claims_count": len(active_items),
         }
-    return out
 
 
 def ledger_path_for_submission(submission: dict, repo_root: Path) -> Path:
