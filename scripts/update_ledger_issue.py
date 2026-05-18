@@ -44,14 +44,52 @@ def _fmt_amount(amount: float, currency: str) -> str:
 
 
 def _last_approval(items: list[dict]) -> tuple[Optional[str], Optional[str]]:
-    """Return (last_approved_date, last_approved_by) across all items.
-    The list isn't guaranteed sorted by approval date — but if approvals
-    happen in chronological order (which they do under the merge workflow),
-    the last item is the most recent."""
-    if not items:
+    """Return (last_approved_date, last_approved_by) across active items.
+
+    Superseded entries are skipped — their approval is no longer the most
+    recent authoritative state. Returns the approval metadata of the most
+    recent active entry; if none, returns (None, None).
+    """
+    active = [item for item in items if item.get("status") != "superseded"]
+    if not active:
         return None, None
-    last = items[-1]
+    last = active[-1]
     return last.get("approved_date"), last.get("approved_by")
+
+
+def _submission_link(period: str, submission_id: str) -> str:
+    """Markdown link to the submission YAML."""
+    return f"[`{submission_id}`](submissions/{period}/{submission_id}.yml)"
+
+
+def _submission_cell(item: dict) -> str:
+    """Render the Submission column cell, including the supersedes arrow
+    for superseded entries.
+
+    Active entry: just the link.
+    Superseded entry: ~~original~~ → [revision-id] (link), so the audit
+    trail forward-references the replacement without breaking the column
+    structure.
+    """
+    link = _submission_link(item["period"], item["submission_id"])
+    if item.get("status") == "superseded":
+        successor = item.get("superseded_by")
+        if successor:
+            successor_link = _submission_link(item["period"], successor)
+            return f"~~{link}~~ → {successor_link}"
+        return f"~~{link}~~"
+    return link
+
+
+def _strike(active_cell: str, is_superseded: bool) -> str:
+    """Wrap a markdown cell in strikethrough if the row is superseded.
+
+    Avoids striking through cells that already carry markdown structure
+    that doesn't render well with `~~...~~` (the link cell uses
+    `_submission_cell` directly instead)."""
+    if is_superseded:
+        return f"~~{active_cell}~~"
+    return active_cell
 
 
 # ─── Body rendering ─────────────────────────────────────────────────────────
@@ -93,15 +131,17 @@ def render_hourly_body(ledger: dict, contract: dict) -> str:
             "|---|---|---|---|---|---|",
         ])
         for s in submissions:
-            sub_id = s["submission_id"]
-            sub_link = f"[`{sub_id}`](submissions/{s['period']}/{sub_id}.yml)"
+            is_superseded = s.get("status") == "superseded"
+            period_cell = _strike(s["period"], is_superseded)
+            hours_cell = _strike(str(s["hours"]), is_superseded)
+            rate_cell = _strike(f"{_fmt_amount(s['rate'], currency)} {currency}", is_superseded)
+            amount_cell = _strike(f"{_fmt_amount(s['amount'], currency)} {currency}", is_superseded)
+            approved_cell = _strike(
+                f"{s['approved_date']} by @{s['approved_by']}", is_superseded,
+            )
             lines.append(
-                f"| {s['period']} "
-                f"| {sub_link} "
-                f"| {s['hours']} "
-                f"| {_fmt_amount(s['rate'], currency)} {currency} "
-                f"| {_fmt_amount(s['amount'], currency)} {currency} "
-                f"| {s['approved_date']} by @{s['approved_by']} |"
+                f"| {period_cell} | {_submission_cell(s)} | {hours_cell} "
+                f"| {rate_cell} | {amount_cell} | {approved_cell} |"
             )
         lines.append("")
     else:
@@ -152,15 +192,17 @@ def render_milestone_body(ledger: dict, contract: dict) -> str:
             "|---|---|---|---|---|",
         ])
         for c in claims:
-            sub_id = c["submission_id"]
-            sub_link = f"[`{sub_id}`](submissions/{c['period']}/{sub_id}.yml)"
+            is_superseded = c.get("status") == "superseded"
+            period_cell = _strike(c["period"], is_superseded)
             milestones = ", ".join(f"#{e['id']}" for e in c.get("entries", []))
+            milestones_cell = _strike(milestones, is_superseded)
+            amount_cell = _strike(f"{_fmt_amount(c['amount'], currency)} {currency}", is_superseded)
+            approved_cell = _strike(
+                f"{c['approved_date']} by @{c['approved_by']}", is_superseded,
+            )
             lines.append(
-                f"| {c['period']} "
-                f"| {sub_link} "
-                f"| {milestones} "
-                f"| {_fmt_amount(c['amount'], currency)} {currency} "
-                f"| {c['approved_date']} by @{c['approved_by']} |"
+                f"| {period_cell} | {_submission_cell(c)} | {milestones_cell} "
+                f"| {amount_cell} | {approved_cell} |"
             )
         lines.append("")
     else:
