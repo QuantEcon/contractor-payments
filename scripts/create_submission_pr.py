@@ -354,6 +354,27 @@ def remote_branch_exists(branch: str, cwd: Optional[Path] = None) -> bool:
     return bool(result.stdout.strip())
 
 
+def find_open_pr_for_branch(branch: str, cwd: Optional[Path] = None) -> Optional[int]:
+    """Return the open PR number for `branch` if one exists, else None.
+
+    Used to distinguish "in-progress submission, regenerate in place"
+    (open PR exists) from "stale branch leftover from a previous merged
+    submission, treat as fresh" (no open PR). A stale branch can stick
+    around when auto-delete-on-merge didn't fire — we don't want to
+    block fresh revisions in that case.
+    """
+    result = _run(
+        ["gh", "pr", "list", "--head", branch, "--state", "open",
+         "--json", "number", "--jq", "first | .number // empty"],
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return int(out) if out else None
+
+
 def create_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", "-b", branch], cwd=cwd)
 
@@ -551,13 +572,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.submitted_date is None:
         args.submitted_date = resolve_payer_today(templates_dir / "fiscal-host.yml")
 
-    # Branch reuse: when the workflow re-fires on the same issue
-    # (pre-merge edits, or reopen-then-edit on a revision), check out the
-    # existing branch and regenerate artifacts on top of it. Phase 2.5
-    # promoted regeneration to a first-class flow so contractors can
-    # iterate on the issue body and see the PR update.
+    # Branch + PR state. Two cases that we used to conflate:
+    #
+    # - Open PR exists on this branch → in-progress submission.
+    #   Regenerate artifacts on top of the existing branch; the PR
+    #   auto-updates from the force-push. (Covers pre-merge edits and
+    #   reopen-then-edit on a revision.)
+    # - No open PR → either this is a fresh issue, OR a previous PR for
+    #   this issue was merged/closed and the branch lingered (e.g.
+    #   auto-delete-on-merge didn't fire). In both cases, treat as fresh:
+    #   force-push the new content to the (possibly stale) branch and
+    #   open a NEW PR.
     branch = branch_name_for_issue(args.issue_number)
-    branch_existed = remote_branch_exists(branch, cwd=repo_root)
+    branch_exists_remotely = remote_branch_exists(branch, cwd=repo_root)
+    open_pr_number = find_open_pr_for_branch(branch, cwd=repo_root) if branch_exists_remotely else None
+    has_open_pr = open_pr_number is not None
+    if branch_exists_remotely and not has_open_pr:
+        print(
+            f"Branch `{branch}` exists on origin but has no open PR — "
+            f"treating as a fresh submission and opening a new PR. "
+            f"(Stale branch likely from a previously merged PR.)",
+            file=sys.stderr,
+        )
 
     # Load inputs.
     with open(args.submission_file, encoding="utf-8") as f:
@@ -605,10 +641,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         supersedes=args.supersedes,
     )
 
-    # If the branch already exists, switch to it BEFORE writing any
-    # artifacts so we don't end up with untracked files that conflict
-    # with the branch's tracked content. Phase 2.5 regeneration flow.
-    if branch_existed:
+    # If there's an open PR for this branch, switch to the branch BEFORE
+    # writing any artifacts (untracked files would conflict with the
+    # branch's tracked content on checkout). Stale branches without an
+    # open PR are force-pushed past — they don't need a checkout.
+    if has_open_pr:
         checkout_existing_branch(branch, cwd=repo_root)
 
     # Write the YAML.
@@ -652,27 +689,40 @@ def main(argv: Optional[list[str]] = None) -> int:
         if owner_name:
             png_url = raw_url(owner_name, branch, png_rel)
 
-    # Git: branch, commit, push. When the branch already exists, we've
-    # already checked it out earlier; just commit + force-push.
-    if not branch_existed:
+    # Git: branch, commit, push.
+    # - has_open_pr: we've already checked out the branch; commit + force-push.
+    # - branch_exists_remotely but no open PR: stale branch; create a fresh
+    #   local branch (overwriting the lingering remote on push).
+    # - branch doesn't exist: normal create.
+    if has_open_pr:
+        pass  # already on the branch
+    elif branch_exists_remotely:
+        # Create the local branch fresh; we'll force-push to overwrite
+        # whatever's on origin.
+        create_branch(branch, cwd=repo_root)
+    else:
         create_branch(branch, cwd=repo_root)
 
     committed = stage_and_commit(
         paths_to_stage, args.issue_number, cwd=repo_root,
         submission_type=submission_type,
-        update=branch_existed,
+        update=has_open_pr,
     )
     if committed:
-        push_branch(branch, cwd=repo_root, force=branch_existed)
-    else:
+        # Force-push when the remote already has the branch (open PR or
+        # stale branch). Normal push for a truly new branch.
+        push_branch(branch, cwd=repo_root, force=branch_exists_remotely)
+    elif has_open_pr:
         print("No content changes — branch already reflects the latest "
               "submission state. Skipping push.", file=sys.stderr)
+    else:
+        # Nothing staged on a fresh branch is anomalous, but not fatal.
+        print("No content changes detected; branch left in current state.",
+              file=sys.stderr)
 
-    if branch_existed:
-        # PR already exists on this branch; the push (if any) updated it
-        # in place. Nothing else to do.
-        print(f"Updated existing branch `{branch}` for issue "
-              f"#{args.issue_number}.")
+    if has_open_pr:
+        # PR already open on this branch; the push updated it in place.
+        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
         return 0
 
     # Fresh branch → open a new PR.
