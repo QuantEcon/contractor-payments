@@ -57,6 +57,48 @@ def stamp_approval(
     return out
 
 
+def stamp_superseded(submission: dict, *, superseded_by: str) -> dict:
+    """Pure transform: mark a previously-approved submission as superseded.
+
+    Used on the previous (now-replaced) submission's YAML when a revision
+    is approved. The original PDF stays as the audit record of what was
+    issued; only the YAML metadata changes.
+    """
+    out = dict(submission)
+    out["status"] = "superseded"
+    out["superseded_by"] = superseded_by
+    return out
+
+
+def mark_superseded_yaml(
+    superseded_id: str,
+    revision_id: str,
+    period: str,
+    repo_root: Path,
+) -> Path:
+    """Locate the superseded submission's YAML and stamp it as superseded.
+
+    Returns the path that was updated. Raises FileNotFoundError if the
+    YAML can't be found — caller decides whether to treat that as fatal
+    (it indicates the revision workflow is operating on inconsistent state).
+    """
+    path = repo_root / "submissions" / period / f"{superseded_id}.yml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Cannot mark `{superseded_id}` as superseded: "
+            f"YAML not found at {path}. Workflow state inconsistent."
+        )
+    with open(path, encoding="utf-8") as f:
+        previous = yaml.safe_load(f)
+    stamped = stamp_superseded(previous, superseded_by=revision_id)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            stamped, f,
+            default_flow_style=False, sort_keys=False, allow_unicode=True, width=100,
+        )
+    return path
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--submission", required=True, type=Path,
@@ -106,6 +148,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             default_flow_style=False, sort_keys=False, allow_unicode=True, width=100,
         )
     print(f"Stamped: {submission_path.relative_to(repo_root)}")
+
+    # Revision: stamp the superseded submission's YAML so it carries the
+    # forward link + status flip. The original PDF stays unchanged — it's
+    # the audit record of what was originally issued to PSL.
+    supersedes_id = stamped.get("supersedes")
+    if supersedes_id:
+        superseded_path = mark_superseded_yaml(
+            superseded_id=supersedes_id,
+            revision_id=stamped["submission_id"],
+            period=stamped["period"],
+            repo_root=repo_root,
+        )
+        print(f"Marked superseded: {superseded_path.relative_to(repo_root)}")
 
     # Re-render PDF + PNG, overwriting the pending versions.
     pdf_path = submission_pdf_path(stamped, repo_root)

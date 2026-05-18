@@ -112,8 +112,12 @@ def compose_message(
     real_name = contractor.get("name", submission.get("submitted_by", "Unknown"))
     github_handle = contractor.get("github", submission.get("submitted_by", ""))
 
+    # Revisions get a REVISION marker in the subject so PSL spots the
+    # correction at a glance in their inbox. PDF banner carries the full
+    # "supersedes X" context; the subject just flags the type. Phase 2.5.
+    revision_marker = "REVISION " if submission.get("supersedes") else ""
     subject = (
-        f"[QuantEcon] {type_label} approved — "
+        f"[QuantEcon] {type_label} {revision_marker}approved — "
         f"{real_name} — {period} — {amount_display}"
     )
 
