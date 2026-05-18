@@ -212,11 +212,15 @@ jobs:
           fi
           echo "Revision detected; locating superseded PR for $SUPERSEDES_ID..."
           # Find the previous merged PR by searching for the superseded
-          # submission ID in PR bodies (the original PR's body contains a
-          # link to its submission YAML, so the ID appears verbatim there).
+          # submission YAML path in PR bodies (the original PR's body
+          # contains a link to the YAML, so the path appears verbatim).
+          # Using `<id>.yml` guards against substring matches against the
+          # current revision PR (whose body contains `<id>-v2.yml`, which
+          # would substring-match `<id>` but not `<id>.yml`). Also filter
+          # out the current PR explicitly as belt-and-suspenders.
           PREV_PR=$(gh pr list --repo "${{ github.repository }}" --state merged \
-            --search "\"$SUPERSEDES_ID\" in:body" --json number \
-            --jq 'first | .number // empty')
+            --search "\"${SUPERSEDES_ID}.yml\" in:body" --json number \
+            --jq "map(select(.number != ${{ inputs.pr_number }})) | first | .number // empty")
           if [ -z "$PREV_PR" ]; then
             echo "Could not locate previous PR for $SUPERSEDES_ID; skipping cross-comment."
             echo "(The revision still landed cleanly; this is a non-fatal audit gap.)"
