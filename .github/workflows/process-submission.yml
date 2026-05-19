@@ -211,8 +211,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Look up the PR that create_submission_pr just opened (or updated)
+          # for this issue. Branch name is deterministic per
+          # branch_name_for_issue() in create_submission_pr.py.
+          BRANCH="submission/issue-${{ inputs.issue_number }}"
+          PR_NUMBER=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [ -n "$PR_NUMBER" ]; then
+            COMMENT="Submission filed — see #${PR_NUMBER}. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)."
+          else
+            COMMENT="Submission filed — see the PR linked above. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)."
+          fi
           gh issue close "${{ inputs.issue_number }}" \
-            --comment "Submission filed — see the PR linked above. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)." \
+            --comment "$COMMENT" \
             || echo "Issue close failed (may already be closed); continuing."
           gh issue lock "${{ inputs.issue_number }}" --reason resolved \
             || echo "Issue lock failed (may already be locked); continuing."

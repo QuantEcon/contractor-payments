@@ -527,6 +527,27 @@ def _contract_options_yaml(contract_ids: list[str]) -> str:
     return "\n".join(f'        - "{cid}"' for cid in contract_ids)
 
 
+def _hourly_contract_reminder(inputs: "Inputs") -> str:
+    """Render the active-hourly-contracts reminder block (substitutes into
+    `$HOURLY_CONTRACT_REMINDER`). Each line is indented to match the
+    enclosing `value: |` markdown block.
+
+    Onboarding seeds the first contract; admins extend this list by hand
+    when contracts are renewed (same pattern as the Contract dropdown)."""
+    if inputs.contract_type != "hourly":
+        return "        - _(no hourly contracts yet)_"
+    return f"        - `{inputs.contract_id}` — {inputs.currency}, {inputs.hourly_rate}/hour"
+
+
+def _milestone_contract_reminder(inputs: "Inputs") -> str:
+    """Render the active-milestone-contracts reminder block (substitutes
+    into `$MILESTONE_CONTRACT_REMINDER`). Each line indented to match the
+    enclosing `value: |` markdown block."""
+    if inputs.contract_type != "milestone":
+        return "        - _(no milestone contracts yet)_"
+    return f"        - `{inputs.contract_id}` — {inputs.currency} (milestone)"
+
+
 def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
     """Copy contractor-template/ into clone_dir, then substitute placeholders.
 
@@ -559,6 +580,8 @@ def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
         "CONTRACTOR_ADDRESS_BLOCK": _format_address_yaml(inputs.address),
         "CONTRACT_OPTIONS": _contract_options_yaml(hourly_ids),
         "MILESTONE_CONTRACT_OPTIONS": _contract_options_yaml(milestone_ids),
+        "HOURLY_CONTRACT_REMINDER": _hourly_contract_reminder(inputs),
+        "MILESTONE_CONTRACT_REMINDER": _milestone_contract_reminder(inputs),
     }
     templated_files = [
         ".github/CODEOWNERS",

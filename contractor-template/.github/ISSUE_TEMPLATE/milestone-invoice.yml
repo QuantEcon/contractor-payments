@@ -40,6 +40,13 @@ body:
         Need help? See the
         [Submit a milestone invoice](https://quantecon.github.io/contractor-payments/contractor-guide/submit-invoice/) guide.
 
+  - type: markdown
+    attributes:
+      value: |
+        **Active milestone contracts (reminder):**
+
+$MILESTONE_CONTRACT_REMINDER
+
   - type: dropdown
     id: contract
     attributes:
@@ -56,7 +63,6 @@ $MILESTONE_CONTRACT_OPTIONS
       label: Year
       description: Calendar year of this invoice.
       options:
-        - "2025"
         - "2026"
         - "2027"
     validations:
