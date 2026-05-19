@@ -18,8 +18,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
 - [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
 - [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
-- [ ] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate`  ← **current target**
-- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
+- [x] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate` + period-close reminders (full E2E verified on `contractor-engine-test` 2026-05-19: six scenarios passed including the parse-fail → fix → re-submit arc and reminder idempotency)
+- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)  ← **current target**
 - [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
 
 ## Contents
@@ -926,13 +926,14 @@ This phase reshapes the submission flow so the **issue is a long-lived draft** t
 - [x] **Close + lock issue on successful submission** — `gh issue close` (with a PR-handoff comment) + `gh issue lock --reason resolved` at the end of the submit-success path.
 - [x] **Validate-result content** — `scripts/post_validate_result.py` renders either a ✅ success comment (table of contract / period / hours / rate / total, currency-aware) reusing `enrich_submission` for totals, or a ❌ error comment (same line-specific format as the parse-error path). Single sentinel; comment is upserted across re-runs.
 - [x] **Tests** — 17 tests in `tests/test_post_validate_result.py` (render success + error paths, both submission types), 26 in `tests/test_send_reminders.py` (period extraction, period-closed arithmetic across timezones, reminder render, label routing). Trigger-router gates are GitHub Actions YAML expressions — covered by E2E rather than unit tests. Total suite: **211 passing**.
-- [ ] **E2E on `contractor-engine-test`:**
-  - Open issue via form, leave it for a beat (verify no PR is opened).
-  - Edit body across multiple sessions to add rows.
-  - `/validate` → parser comment posts with success preview + totals.
-  - Edit body to introduce a bad row, `/validate` again → same comment updated in place with line-specific error.
-  - Fix, `/submit` → PR opens, issue closes + locks, downstream pipeline (PDF, CODEOWNERS, etc.) unchanged.
-  - Re-run with the `submit` label path; verify equivalent behaviour and that the label is auto-removed.
+- [x] **E2E on `contractor-engine-test` (2026-05-19).** Six scenarios passed end-to-end:
+  - Issue #27 opened via form → no PR, no workflow side effects (only label-event runs that skipped on the gate).
+  - `/validate` with valid entries → ✅ sentinel comment with computed totals (3 days, 10.5 hours, 525 AUD).
+  - `/validate` with a bad row → same comment **upserted** in place with line-specific error.
+  - `/submit` → PR #28 opened, issue closed + locked with handoff comment, stale validate-result comment cleared.
+  - Issue #29 + `submit` label → bonus parse-fail path validated: `parse-error` label applied + `submit` label auto-removed (re-applicable). Fix + re-apply → PR #30 opened, both labels cleared, issue closed + locked.
+  - Period reminders: `workflow_dispatch` dry-run reported `#11: would remind for 2025-11`; real run posted the 🔔 reminder; second real run reported `already reminded` (idempotency). Stale pre-Phase-1.5 issues (`### Period` single dropdown) skipped cleanly with `couldn't extract period`.
+  - Two sharp edges surfaced and fixed: reminder workflow needed `contents: read` permission (`actions/checkout` rejected the private repo otherwise — fixed in [2f4933a](https://github.com/QuantEcon/contractor-payments/commit/2f4933a)); Month dropdown's em-dash format hurt body editability, dropped in favour of plain `01`–`12` ([24c2024](https://github.com/QuantEcon/contractor-payments/commit/24c2024)).
 - [ ] **Documentation** — Phase 4's contractor guide pages describe the new flow (`docs/contractor-guide/submit-timesheet.md`): fill form → edit body to accumulate entries → `/validate` to check → `/submit` to submit.
 
 **Period-close reminders.**
@@ -947,7 +948,7 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 - [x] **`contractor-template/.github/workflows/period-reminders.yml`** — thin caller with `on: schedule:` (cron `0 9 1 * *`) + `workflow_dispatch` (so admins can run on demand or dry-run against a test repo). Onboarding script picks it up automatically via the existing `rglob` over `contractor-template/`.
 - [x] **Reminder comment content.** 🔔 header naming the closed period + `/validate` and `/submit` next-steps + close-if-nothing-to-file advice + period-encoded sentinel `<!-- submission-reminder:YYYY-MM -->`.
 - [ ] **Escalation (optional, deferred).** Day-7 admin-@-mention follow-up. Not built; revisit if drafts pile up in practice.
-- [ ] **E2E coverage** — on `contractor-engine-test`: manually invoke the reminder workflow (workflow_dispatch) against a synthetic open draft from a closed period; verify the sentinel comment posts; re-run and verify no duplicate; submit the issue and verify subsequent reminder runs skip it.
+- [x] **E2E coverage** — verified during the Phase 3c E2E (2026-05-19): dry-run + real + re-run cycle on issue #11 of `contractor-engine-test` for period `2025-11`. See the Phase 3c E2E checklist above for details.
 
 **Open items for this phase:**
 - **Submitter authorization.** Default: author-only may run `/submit` and `/validate`. Admin-override (so an admin can submit on behalf of an RA in a pinch) deferred until friction is observed.
@@ -1042,6 +1043,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - **Broken doc URLs in `contractor-template/`.** `contractor-template/.github/ISSUE_TEMPLATE/config.yml` and the "Need help?" link inside both `hourly-timesheet.yml` and `milestone-invoice.yml` point at `blob/main/docs/CONTRACTOR_GUIDE.md` — a path that never existed and won't, since the guide is now a published MkDocs site. Repoint at `https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/` (and the invoice equivalent) once those pages land in Phase 4. Tracked in the Phase 4 task list.
 - **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
 - **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
+- **Parser header-row heuristic is too greedy** (Phase 3c E2E finding, 2026-05-19). `_looks_like_header` in `scripts/parse_issue.py` skips any row whose first field contains the substring `date`, `day`, `when`, `id`, or `milestone` — caught us when a contractor typed `bad-date | 2 | oops` as a data row and the parser silently skipped it, producing a false `/validate` success. Fix: tighten the heuristic to recognise the actual seeded header row (`Date | Hours | Description` / `ID | Date | Amount | Description`) rather than matching on keyword substrings. Small change + new test; non-blocking because the contractor would notice that the bad row's hours/amount didn't appear in the `/validate` totals.
 
 ---
 
