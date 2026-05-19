@@ -41,20 +41,24 @@ administrator cross-checks both against the contract during PR review.
 
 ## 2. Open a draft
 
+Throughout this walkthrough we'll use a worked example: you've
+delivered milestone **3** (a monthly payment of `77000` JPY, dated
+`2026-07-15`) and you're about to file the invoice.
+
 Go to your contractor repo's **Issues** tab and click **New Issue**. Pick
 the **🎯 Milestone Invoice** template.
 
-<!-- SCREENSHOT: The "New Issue" template chooser, with the Milestone
-     Invoice card highlighted. -->
+![The New Issue template chooser, with the Milestone Invoice card highlighted.](img/mi-01-template-chooser.png)
 
 Fill in the form:
 
 - **Contract** — pick the milestone contract this invoice applies to.
   Only milestone contracts appear here; hourly contracts are filtered
-  out.
+  out. (In the worked example: `QE-IUJ-2025-002`.)
 - **Year** + **Month** — the period this invoice is filed *against*.
   Usually the month you delivered the milestone, but the engine also
-  accepts out-of-period dates for catch-up submissions (see below).
+  accepts out-of-period dates for catch-up submissions (see below). (In
+  the worked example: `2026` and `07`.)
 - **Milestone Entries** — leave the seeded
   `ID | Date | Amount | Description` table as-is for now; you'll add
   your real row after the issue exists.
@@ -62,8 +66,7 @@ Fill in the form:
 
 Click **Submit new issue**.
 
-<!-- SCREENSHOT: The Milestone Invoice form filled out with the seeded
-     entries table visible. -->
+![The Milestone Invoice form filled out, with the seeded entries table visible in the Milestone Entries field.](img/mi-02-form-filled.png)
 
 !!! info "Nothing is filed yet"
     Creating the issue does **not** create a PR. The issue is a
@@ -78,15 +81,14 @@ claiming in the format:
 ID | YYYY-MM-DD | amount | description
 ```
 
-So for the November milestone above:
+So for the worked example (milestone 3, delivered 2026-07-15):
 
 ```text
 ID | Date | Amount | Description
-3 | 2025-11-15 | 77000 | Monthly Payment — November
+3 | 2026-07-15 | 77000 | Monthly Payment — July
 ```
 
-<!-- SCREENSHOT: The issue body in edit mode showing one milestone row
-     added below the header. -->
+![The issue body in edit mode with one milestone row added below the header.](img/mi-03-edit-body.png)
 
 Things to know:
 
@@ -128,16 +130,14 @@ After a few seconds, a bot reply appears with the parse result.
 
 **On success**, you'll see a confirmation with computed totals:
 
-<!-- SCREENSHOT: The "✅ Validation passed" comment showing the totals
-     table (contract, period, milestones count, total amount). -->
+![The "Validation passed" bot reply, with a table summarising contract, period, milestones, and total amount.](img/mi-04-validate-success.png)
 
 The totals are calculated from the rows you entered, in the contract's
 currency.
 
 **On failure**, you'll see a red-X reply pointing at specific lines:
 
-<!-- SCREENSHOT: The "❌ Validation failed" comment showing a
-     line-specific parse error. -->
+![The "Validation failed" bot reply pointing at a specific line with the parse error.](img/mi-05-validate-error.png)
 
 Common issues:
 
@@ -162,7 +162,7 @@ When validation passes, post:
 
 Or apply the **`submit`** label to the issue.
 
-<!-- SCREENSHOT: The /submit comment with the subsequent bot activity. -->
+![The /submit comment in the issue timeline, followed by the bot's handoff comment linking to the new PR.](img/mi-06-submit-comment.png)
 
 Within ~30 seconds:
 
@@ -172,7 +172,7 @@ Within ~30 seconds:
    reviewer.
 3. The originating issue is **closed and locked**.
 
-<!-- SCREENSHOT: The opened PR showing the inline PNG preview. -->
+![The opened Pull Request with an inline PNG preview of the rendered milestone invoice.](img/mi-07-pr-opened.png)
 
 You don't need to do anything with the PR — your administrator
 reviews, verifies the milestone amount matches the contract, and

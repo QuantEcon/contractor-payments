@@ -18,8 +18,7 @@ do all the work:
 Go to your contractor repo's **Issues** tab and click **New Issue**. Pick
 the **📋 Hourly Timesheet** template.
 
-<!-- SCREENSHOT: The "New Issue" template chooser page showing the two
-     submission templates. Highlight the Hourly Timesheet card. -->
+![The New Issue template chooser, with the Hourly Timesheet card highlighted.](img/ts-01-template-chooser.png)
 
 Fill in the three dropdowns and the confirmation checkbox:
 
@@ -32,9 +31,7 @@ Fill in the three dropdowns and the confirmation checkbox:
 
 Click **Submit new issue**.
 
-<!-- SCREENSHOT: The Hourly Timesheet form filled out with the seeded
-     entries table visible. Highlight the dropdowns and the unchanged
-     seeded entries field. -->
+![The Hourly Timesheet form filled out, with the seeded entries table visible in the Time Entries field.](img/ts-02-form-filled.png)
 
 !!! info "Nothing is filed yet"
     Creating the issue does **not** create a PR. The issue is a
@@ -61,8 +58,7 @@ Date | Hours | Description
 2026-05-12 | 4.0 | CI pipeline fixes
 ```
 
-<!-- SCREENSHOT: The issue body in edit mode, showing several rows added
-     to the entries table below the header. -->
+![The issue body in edit mode, with three time entries added below the header row.](img/ts-03-edit-body.png)
 
 Things to know:
 
@@ -94,16 +90,14 @@ After a few seconds, a bot reply appears with the parse result.
 **On success** you'll see a green-check confirmation with computed
 totals:
 
-<!-- SCREENSHOT: The "✅ Validation passed — ready to submit" comment
-     showing the totals table (contract, period, hours, rate, total). -->
+![The "Validation passed" bot reply, with a table summarising contract, period, entries, hours, rate, and total.](img/ts-04-validate-success.png)
 
 The totals are calculated using your contract's rate and currency, so
 they're exactly what will appear on the rendered PDF.
 
 **On failure** you'll see a red-X reply pointing at specific lines:
 
-<!-- SCREENSHOT: The "❌ Validation failed — not ready to submit" comment
-     showing a line-specific parse error. -->
+![The "Validation failed" bot reply, pointing at a specific line with the parse error.](img/ts-05-validate-error.png)
 
 Common issues:
 
@@ -132,8 +126,7 @@ When validation passes and you're ready to file, post:
 Or, equivalently, apply the **`submit`** label to the issue from the
 right-hand sidebar.
 
-<!-- SCREENSHOT: The /submit comment and/or the label applied, with the
-     subsequent bot activity in the timeline. -->
+![The /submit comment in the issue timeline, followed by the bot's handoff comment linking to the new PR.](img/ts-06-submit-comment.png)
 
 Within ~30 seconds:
 
@@ -147,8 +140,7 @@ Within ~30 seconds:
 You don't need to do anything with the PR — your administrator handles
 review and merging.
 
-<!-- SCREENSHOT: The opened PR showing the inline PNG preview and links
-     to the PDF + YAML files. -->
+![The opened Pull Request with an inline PNG preview of the rendered timesheet and links to the PDF and YAML files.](img/ts-07-pr-opened.png)
 
 ## 5. After submission
 
