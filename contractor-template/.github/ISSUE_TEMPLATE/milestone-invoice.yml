@@ -15,19 +15,27 @@ body:
       value: |
         ## Milestone Invoice Submission
 
-        Submit an invoice for a milestone you have delivered on a
-        milestone contract. On submission, a Pull Request will be
-        automatically created with the structured data. An admin will
-        review and merge; on merge a PDF is generated and the payments
-        manager is notified.
+        Fill out the fields below to open a **draft invoice** for a
+        milestone you have delivered on a milestone contract. After
+        the issue is created you can edit the issue body to add or
+        adjust rows in the Milestone Entries table — useful for
+        catch-up submissions covering multiple missed milestones.
 
         Refer to your contract for the milestone schedule (IDs, dates,
-        amounts). For catch-up submissions covering multiple missed
-        milestones, add one row per milestone.
+        amounts).
 
-        **Corrections after submitting:** edit this issue (the PR will
-        be regenerated), or edit the PR branch directly if you're
-        comfortable with git.
+        When you're ready to file the invoice:
+
+        - Comment **`/validate`** on the issue to check that your
+          entries parse cleanly. You'll get a reply with parse results
+          and computed totals. No PR is opened.
+        - Comment **`/submit`** (or apply the `submit` label) to file
+          the invoice. A Pull Request will open with the rendered
+          PDF; an admin reviews and merges.
+
+        **Corrections before submission:** edit the issue body.
+        **After submission:** the issue is locked; edit the PR branch
+        directly, or ask an admin to revise.
 
         Need help? See the
         [Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md).
@@ -91,8 +99,13 @@ $MILESTONE_CONTRACT_OPTIONS
         Almost always a single row. Add multiple rows only for catch-up
         submissions covering missed prior months. Descriptions may
         contain any text — the parser splits on the first three `|` only.
-      placeholder: |
-        3 | 2026-07-15 | 77000 | Monthly Payment — July
+
+        **Keep the `ID | Date | Amount | Description` header row in
+        place** — the parser uses it to recognise this as the entries
+        table.
+      value: |
+        ID | Date | Amount | Description
+        3 | 2026-07-15 | 77000 | Example entry — replace with your milestone row
       render: text
     validations:
       required: true

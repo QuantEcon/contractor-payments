@@ -1,20 +1,29 @@
 name: Process submission (reusable)
 
-# Reusable workflow that turns a contractor-repo submission issue into a PR
-# with structured YAML + rendered PDF + PNG preview. Called from every
-# contractor repo's thin `.github/workflows/issue-to-pr.yml`.
+# Reusable workflow that handles a contractor-repo submission issue. Two
+# modes, selected by the caller via the `mode` input:
+#
+#   submit   — parse the issue body and (on success) open a PR with
+#              structured YAML + rendered PDF + PNG preview. Close and
+#              lock the originating issue. Remove the `submit` label if
+#              present. Same downstream behaviour as pre-Phase-3c flow.
+#
+#   validate — parse the issue body in dry-run mode and post a
+#              sentinel-marked validate-result comment on the issue.
+#              No branch, no commit, no PR. Lets contractors check parse
+#              correctness + computed totals before triggering `/submit`.
 #
 # Two checkouts:
 #   1. The CALLING repo (contractor-{handle}) at the working directory —
 #      this is where contracts/, settings, submissions/, generated_pdfs/
-#      live, and where the new branch + PR will be created.
+#      live, and where the new branch + PR will be created (submit mode).
 #   2. This (engine) repo at ./engine — provides scripts/ + templates/.
 #
 # Scripts run with PYTHONPATH=engine so `python -m scripts.X` resolves
-# against the engine checkout, while --repo-root . / --templates-dir engine/templates
-# point the working tree and template paths at the right places.
+# against the engine checkout, while paths into the working tree refer to
+# the contractor repo's files.
 #
-# See PLAN.md §8 Phase 3a.
+# See PLAN.md §8 Phase 3a (reusable workflow shape) + Phase 3c (mode + /validate).
 
 on:
   workflow_call:
@@ -33,13 +42,21 @@ on:
         type: string
       event_action:
         description: >
-          The triggering issues event action: 'opened', 'edited', or 'reopened'.
-          On 'reopened', the engine treats the submission as a revision and
-          looks up the previous merged submission for this issue to set the
-          supersedes target. See PLAN §8 Phase 2.5.
+          The triggering event action ('labeled', 'reopened', 'created' for
+          issue_comment, etc.). Kept for diagnostics / future routing.
+          Revision intent is filesystem-derived (find_previous_submission.py),
+          not event-derived.
         required: false
         type: string
         default: ""
+      mode:
+        description: >
+          'submit' (default) — parse + open PR + close/lock issue + remove
+          submit label. 'validate' — parse dry-run + post sentinel-marked
+          result comment, no PR. See PLAN §8 Phase 3c.
+        required: false
+        type: string
+        default: "submit"
 
 jobs:
   process:
@@ -69,7 +86,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml
 
-      - name: Install Typst
+      - name: Install Typst (submit mode only)
+        if: inputs.mode == 'submit'
         run: |
           TYPST_VERSION="0.13.0"
           curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
@@ -77,7 +95,8 @@ jobs:
           sudo mv /tmp/typst-*/typst /usr/local/bin/typst
           typst --version
 
-      - name: Configure git identity
+      - name: Configure git identity (submit mode only)
+        if: inputs.mode == 'submit'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -103,18 +122,41 @@ jobs:
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Phase 2.5: look up the latest approved submission tied to this
-      # issue. Filesystem state — not the event action — determines
-      # revision intent: if any approved submission exists for this
-      # issue, the current run is a revision (regardless of whether
-      # the trigger was `reopened` or `edited`). This is robust to the
-      # order in which a contractor reopens-and-edits a closed issue.
-      # If no approved submission exists (fresh issue, or closed
-      # without merge), supersedes stays empty and the submission
-      # proceeds as a normal fresh submission.
+      # ─── /validate path ───────────────────────────────────────────────────
+      # Dry-run parser pass; post a sentinel-marked result comment, no PR.
+
+      - name: Post validate-success comment
+        if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          CONTRACT_ID=$(python -c "import json; print(json.load(open('/tmp/submission.json'))['contract_id'])")
+          python -m scripts.post_validate_result success \
+            --submission-file /tmp/submission.json \
+            --contract-file "contracts/${CONTRACT_ID}.yml" \
+            --submitter "${{ inputs.issue_author }}" \
+            --issue "${{ inputs.issue_number }}"
+
+      - name: Post validate-error comment
+        if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.post_validate_result error \
+            --errors-file /tmp/errors.json \
+            --issue "${{ inputs.issue_number }}"
+
+      # ─── /submit path ─────────────────────────────────────────────────────
+      # Phase 2.5: revision intent comes from filesystem state — not the
+      # event action. If any approved submission exists for this issue,
+      # the run is a revision regardless of whether the trigger was a
+      # comment, a label, or a reopen.
+
       - name: Detect revision target
         id: revision
-        if: steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           PYTHONPATH: engine
         run: |
@@ -127,8 +169,8 @@ jobs:
             echo "No previously approved submission for this issue; treating as fresh submission."
           fi
 
-      - name: Create submission PR (on parse success)
-        if: steps.parse.outputs.parse_ok == 'true'
+      - name: Create submission PR
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -146,8 +188,8 @@ jobs:
             --templates-dir engine/templates \
             $SUPERSEDES_ARG
 
-      - name: Clear any prior error state (on parse success)
-        if: steps.parse.outputs.parse_ok == 'true'
+      - name: Clear prior submit-error comment
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -155,8 +197,28 @@ jobs:
           python -m scripts.post_error_comment clear \
             --issue "${{ inputs.issue_number }}"
 
-      - name: Post parse-error comment (on parse failure)
-        if: steps.parse.outputs.parse_ok == 'false'
+      - name: Clear prior validate-result comment
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.post_validate_result clear \
+            --issue "${{ inputs.issue_number }}"
+
+      - name: Close and lock the issue
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue close "${{ inputs.issue_number }}" \
+            --comment "Submission filed — see the PR linked above. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)." \
+            || echo "Issue close failed (may already be closed); continuing."
+          gh issue lock "${{ inputs.issue_number }}" --reason resolved \
+            || echo "Issue lock failed (may already be locked); continuing."
+
+      - name: Post submit-error comment (on parse failure)
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -164,3 +226,12 @@ jobs:
           python -m scripts.post_error_comment post \
             --errors-file /tmp/errors.json \
             --issue "${{ inputs.issue_number }}"
+
+      # ─── Always (submit mode): remove `submit` label so re-applying re-triggers
+      - name: Remove `submit` label
+        if: inputs.mode == 'submit'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue edit "${{ inputs.issue_number }}" --remove-label submit \
+            || echo "submit label not present; continuing."

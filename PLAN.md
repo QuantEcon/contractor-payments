@@ -18,7 +18,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
 - [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
 - [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
-- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)  ← **current target**
+- [ ] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate`  ← **current target**
+- [ ] **Phase 4** — Docs + first real contractors (flip `testing_mode: false` here)
 - [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
 
 ## Contents
@@ -615,6 +616,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
    - `parse-error` — applied by the workflow on parse failure
    - `submission` — applied by the workflow when opening the submission PR
    - `processed` — applied by Phase 2 merge processing
+   - (Phase 3c) `submit` — applied by the contractor to trigger PR creation on a draft issue; auto-removed by the workflow after handling so it can be re-applied
    - (Phase 5) `reimbursement` — applied by the Reimbursement Claim form, added when Phase 5 lands
 8. Pushes the initial commit.
 9. Prints the contractor-facing URL and next steps.
@@ -886,6 +888,71 @@ The engine doesn't track PSL payment state (out-of-band). Admin uses judgment ba
 - [x] **Opens the initial ledger issue** for the first contract (per §8 Phase 2's `update_ledger_issue.py` design). Pins it to the repo's Issues tab. Locks it from comments. Writes the issue number back into `contracts/<contract-id>.yml` as `ledger_issue: <N>` so the approval workflow can find it. *(Contract-renewal helper deferred — admin handles renewals manually until the pattern emerges.)*
 - [x] **E2E run on a fresh repo (2026-05-18).** Onboarded `QuantEcon/contractor-mmcky` from scratch with the script, filed a test timesheet via the Issue Form, PR opened with rendered PDF preview + CODEOWNERS review request, merged it; `process-approved.yml` updated `ledger/QE-PSL-2026-099.yml`, re-stamped the PDF with approval metadata, refreshed the pinned ledger issue body, commented on the closed submission issue, and emailed `mmcky@quantecon.org` (testing_mode=true held PSL off). Test repo deleted after verification.
 
+### Phase 3c — Deferred submission: issue-as-draft + `/submit` + `/validate`
+
+**Motivation (decided 2026-05-19).** Today, opening an issue via the Hourly Timesheet form auto-creates a PR on the first parse-success event. In practice an RA accumulates hours across days or weeks before they're ready to submit, which forces them into one of two awkward paths: (a) track hours in an external spreadsheet/notes app and paste a complete table into the form only when ready (extra tools, extra friction, no in-repo audit trail of the in-progress work), or (b) open the issue early and let the engine churn out PR regenerations on every body edit (PR opens against incomplete data; reviewer notifications fire prematurely; the issue is treated as a single-shot data drop rather than a working surface).
+
+This phase reshapes the submission flow so the **issue is a long-lived draft** the RA edits in place, and **PR creation is gated on an explicit submission trigger**. A separate `/validate` comment lets the RA self-check parse-correctness before committing to submission.
+
+**Design — three changes to the existing model.**
+
+1. **Issue body becomes the working draft.** The form-on-creation still provides the structured/restricted UI for the initial seed (§4.4) — dropdowns for Contract/Year/Month, the required-confirmation checkbox, etc. The form seeds a header-bearing markdown table for entries (rather than just a placeholder). After issue creation the RA edits the issue body directly to add rows over time. **HTML-comment format reminders** (`<!-- Add new rows: | YYYY-MM-DD | hours | description | -->`) are seeded next to the table — invisible in the rendered issue, visible every time the body is opened in the editor — so the template's guidance role persists through edits.
+
+2. **PR creation is explicit, not automatic.** Two triggers, both supported:
+   - **Primary:** comment `/submit` on the issue.
+   - **Secondary:** apply the `submit` label.
+
+   Either fires the parser; on success the engine creates the submission PR (same downstream flow as today). On parse failure: error comment posted on the issue (same Layer-2 behaviour as §4.5), no PR created, the trigger is treated as not having fired (label removed by the workflow so re-application re-triggers).
+
+3. **`/validate` for pre-flight checks.** A `/validate` comment runs the parser in dry-run mode and posts a sentinel-marked result comment on the issue — success preview *or* line-specific errors — **without** creating any branch, commit, or PR. Re-running `/validate` updates the same comment in place (sentinel `<!-- timesheet-validate-result -->`). Lets contractors iterate to a clean parse before triggering the real submission.
+
+**Post-submission semantics.**
+- PR is canonical once opened; further corrections go via the PR branch (Phase 2.5 revision flow unchanged for post-merge corrections).
+- On successful `/submit`, the workflow **closes and locks** the originating issue with a comment linking to the PR. The `Closes #N` line in the PR body would close it on merge anyway; explicit close-on-submit makes the "PR is canonical now" handoff visible immediately rather than days later.
+
+**Build tasks.**
+
+- [x] **Form template changes** — `contractor-template/.github/ISSUE_TEMPLATE/hourly-timesheet.yml` and `milestone-invoice.yml`:
+  - Entries textarea now seeds a header-bearing row (`Date | Hours | Description` / `ID | Date | Amount | Description`) plus one example row the contractor edits in place. Parser's existing `_looks_like_header` recognises the seed cleanly.
+  - Top markdown block rewritten to describe the draft → `/validate` → `/submit` flow + corrections semantics.
+  - HTML-comment format reminders deferred — `render: text` puts the entries in a code block where HTML comments render as literal text; the seeded header row carries the format-reminder role instead. Revisit if/when we drop `render: text`.
+- [x] **Workflow trigger changes** — `contractor-template/.github/workflows/issue-to-pr.yml` and engine `.github/workflows/process-submission.yml`:
+  - Caller drops `issues.opened` / `issues.edited` / `issues.reopened`. New triggers: `issues.labeled` (gated on label `submit`) + `issue_comment.created` (gated on body starting with `/submit` or `/validate` and `issue.pull_request == null`).
+  - Engine adds a `mode: submit | validate` input (default `submit`); both paths share parsing + `find_previous_submission` revision detection.
+  - Validate path: post sentinel-marked result comment (`<!-- submission-validate-result -->`), no PR.
+  - Submit path: existing create-PR pipeline, then close+lock issue, then remove `submit` label.
+- [x] **Label bootstrap** — `scripts/setup_labels.py` adds `submit` (description: applied to a draft issue to file the submission; auto-removed by the workflow).
+- [x] **Auto-remove `submit` label after handling** — final step of submit mode (regardless of parse outcome), so re-applying the label re-triggers cleanly after a fix.
+- [x] **Close + lock issue on successful submission** — `gh issue close` (with a PR-handoff comment) + `gh issue lock --reason resolved` at the end of the submit-success path.
+- [x] **Validate-result content** — `scripts/post_validate_result.py` renders either a ✅ success comment (table of contract / period / hours / rate / total, currency-aware) reusing `enrich_submission` for totals, or a ❌ error comment (same line-specific format as the parse-error path). Single sentinel; comment is upserted across re-runs.
+- [x] **Tests** — 17 tests in `tests/test_post_validate_result.py` (render success + error paths, both submission types), 26 in `tests/test_send_reminders.py` (period extraction, period-closed arithmetic across timezones, reminder render, label routing). Trigger-router gates are GitHub Actions YAML expressions — covered by E2E rather than unit tests. Total suite: **211 passing**.
+- [ ] **E2E on `contractor-engine-test`:**
+  - Open issue via form, leave it for a beat (verify no PR is opened).
+  - Edit body across multiple sessions to add rows.
+  - `/validate` → parser comment posts with success preview + totals.
+  - Edit body to introduce a bad row, `/validate` again → same comment updated in place with line-specific error.
+  - Fix, `/submit` → PR opens, issue closes + locks, downstream pipeline (PDF, CODEOWNERS, etc.) unchanged.
+  - Re-run with the `submit` label path; verify equivalent behaviour and that the label is auto-removed.
+- [ ] **Documentation** — Phase 4's contractor guide pages describe the new flow (`docs/contractor-guide/submit-timesheet.md`): fill form → edit body to accumulate entries → `/validate` to check → `/submit` to submit.
+
+**Period-close reminders.**
+
+Once submission is explicit (rather than automatic on issue creation), there's a real risk of RAs leaving drafts open past the period they cover — either because they forgot, were busy, or abandoned an unused draft. A scheduled workflow catches both the legitimate "forgot to submit" case (the high-value one) and surfaces stale drafts cheaply.
+
+Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron, monthly) and invokes a new engine reusable workflow `send-reminders.yml`. The engine workflow scans open issues with the `timesheet` or `milestone-invoice` label, computes each issue's period from its form metadata, and — for any whose period has ended without a `/submit` — posts a sentinel-marked reminder comment. Sentinel encodes the period (`<!-- reminder:timesheet:2026-04 -->`) so the workflow is idempotent across re-runs; it won't double-comment on the same draft for the same period.
+
+- [x] **`scripts/send_reminders.py`** — scans the contractor repo's open issues via `gh issue list`, filters to submission labels, parses each issue's period from the form metadata (regex over `### Year` / `### Month` sections — no full parse, so malformed-but-period-extractable drafts still get reminded), identifies open drafts where the period has closed, posts the sentinel-marked reminder comment. `--dry-run` for log-without-post.
+- [x] **Period-closed semantics.** Period closes at the first instant of the next month in the **payer's timezone** (`fiscal-host.yml.psl_foundation.timezone`, default UTC if missing) — consistent with how document dates are computed (§9). Grace period not yet configurable (defaults to 0); add as a `--grace-days` flag if friction emerges.
+- [x] **`.github/workflows/send-reminders.yml`** (engine) — `on: workflow_call` with `dry_run` boolean input.
+- [x] **`contractor-template/.github/workflows/period-reminders.yml`** — thin caller with `on: schedule:` (cron `0 9 1 * *`) + `workflow_dispatch` (so admins can run on demand or dry-run against a test repo). Onboarding script picks it up automatically via the existing `rglob` over `contractor-template/`.
+- [x] **Reminder comment content.** 🔔 header naming the closed period + `/validate` and `/submit` next-steps + close-if-nothing-to-file advice + period-encoded sentinel `<!-- submission-reminder:YYYY-MM -->`.
+- [ ] **Escalation (optional, deferred).** Day-7 admin-@-mention follow-up. Not built; revisit if drafts pile up in practice.
+- [ ] **E2E coverage** — on `contractor-engine-test`: manually invoke the reminder workflow (workflow_dispatch) against a synthetic open draft from a closed period; verify the sentinel comment posts; re-run and verify no duplicate; submit the issue and verify subsequent reminder runs skip it.
+
+**Open items for this phase:**
+- **Submitter authorization.** Default: author-only may run `/submit` and `/validate`. Admin-override (so an admin can submit on behalf of an RA in a pinch) deferred until friction is observed.
+- **Pre-merge edit handling.** Once a PR is open, the previous "edit the issue, PR regenerates" behaviour is gone (issue is locked). Corrections go via the PR branch only. Re-evaluate after first real submissions whether a `/regenerate` comment on the PR is worth adding.
+
 ### Phase 4 — Docs + first real contractors
 
 **Docs site** — MkDocs Material on GitHub Pages, deployed via Actions artifact (no `gh-pages` branch). Public site source lives in `docs/`; internal runbooks live in `notes/`.
@@ -949,6 +1016,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Email recipients & testing | `templates/fiscal-host.yml.notifications` block with `psl_to`, `quantecon_cc`, and a `testing_mode` flag. While `testing_mode: true` is set, mail goes to `quantecon_cc` only — PSL is never contacted. | Lets us iterate on email content / formatting on `contractor-engine-test` without ever spamming PSL. Single-line flip (`testing_mode: false`) in Phase 4 cuts over to live PSL delivery. |
 | v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
 | Milestone contract shape | Structured `milestones[]` schedule with `(id, date, amount, description)` per row, **plus** the contractor entering the row at submission time. Parser emits a non-blocking warning if the submitted milestone ID isn't in the contract's schedule. | Onboarding collects the schedule interactively, so the structured field is free at write-time. Warnings catch typos cheaply without making the engine a hard gate; admin still verifies during PR review. Originally deferred (lightweight `notes:`-only spec) — flipped 2026-05-18 once Phase 3b's onboarding flow made the structured collection trivial. |
+| Submission trigger | Issue is a long-lived draft; PR opens only on an explicit `/submit` comment or `submit` label. `/validate` comment runs the parser in dry-run mode (no PR), reporting parse status + computed totals as a sentinel-marked comment that updates in place across re-runs. Form layer still provides the structured/restricted UI for the initial body seed; HTML-comment format reminders persist through edits. | Lets RAs accumulate hours across days/weeks inside the issue body itself rather than maintaining an external spreadsheet, surfaces parse errors before commit, and keeps the issue as a working surface rather than a single-shot form drop. PR remains canonical once opened (issue closed + locked on `/submit`). Decided 2026-05-19; Phase 3c builds it. |
 | Reimbursement contract relationship | Reimbursements are **contractor-level**, not contract-level | RA/staff expenses are ad-hoc, hard to pre-authorize in a contract; authorization happens per-claim via PR review. Reimbursements live in the contractor repo without a `contract_id` reference. |
 | Issue-template seeding | Phase 3 onboarding seeds both Hourly Timesheet and Milestone Invoice unconditionally. Multi-select (incl. Reimbursement) added in **Phase 5**. | With two templates, all payees get both — multi-select adds friction without benefit. Multi-select lands alongside Reimbursement when the third type makes selectivity meaningful (e.g. reimbursement-only payees). Workflow file is identical across all repos either way — routing is by label, unused branches inert. |
 | Engine repo name | `QuantEcon/contractor-payments` | Scope grew beyond timesheets; "contractor-payments" pairs naturally with the `contractor-{handle}` payee repos. Renamed from `QuantEcon/timesheets` during Phase 1.5 alignment. |

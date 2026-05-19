@@ -1,21 +1,54 @@
 name: Issue to PR
 
 # Thin caller for the reusable workflow in QuantEcon/contractor-payments.
-# All pipeline logic — parsing, PR creation, error comments, PDF render —
-# lives there. Updates to the engine flow through to this repo on every
-# push to the engine's main branch (no per-contractor-repo sync needed).
+# All pipeline logic lives in the engine; this file just routes the right
+# events with the right `mode` input.
 #
-# See PLAN.md §8 Phase 3a.
+# Phase 3c (deferred submission) flow:
+#   - Opening / editing an issue no longer triggers the engine. The issue
+#     body is a long-lived draft the contractor edits over time.
+#   - `/submit` comment OR `submit` label → engine runs in submit mode
+#     (parse + open PR + close/lock issue + remove submit label).
+#   - `/validate` comment → engine runs in validate mode (parse dry-run +
+#     post sentinel-marked result comment, no PR).
+#   - Revisions (Phase 2.5): reopen the closed issue, edit the body, then
+#     `/submit` — filesystem-based revision detection in the engine
+#     handles the supersede semantics.
+#
+# See PLAN.md §8 Phase 3a (reusable workflow shape) + Phase 3c (this caller).
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [labeled]
+  issue_comment:
+    types: [created]
 
 jobs:
   process:
+    # Gate: only act on submission-typed issues, and only on the right trigger.
+    # The label predicate works for both events (issue_comment events carry
+    # `github.event.issue.labels`). Comment matching uses startsWith so
+    # `/submit` followed by anything still fires; the engine is the source
+    # of truth on whether the body parses.
     if: >-
-      contains(github.event.issue.labels.*.name, 'timesheet') ||
-      contains(github.event.issue.labels.*.name, 'milestone-invoice')
+      (
+        contains(github.event.issue.labels.*.name, 'timesheet') ||
+        contains(github.event.issue.labels.*.name, 'milestone-invoice')
+      ) && (
+        (
+          github.event_name == 'issues' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'submit'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request == null &&
+          (
+            startsWith(github.event.comment.body, '/submit') ||
+            startsWith(github.event.comment.body, '/validate')
+          )
+        )
+      )
     uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main
     permissions:
       contents: write
@@ -26,7 +59,9 @@ jobs:
       issue_title: ${{ github.event.issue.title }}
       issue_author: ${{ github.event.issue.user.login }}
       issue_body: ${{ github.event.issue.body }}
-      # Phase 2.5: pass through the event action so the engine can
-      # distinguish a reopen (revision trigger) from a fresh open.
       event_action: ${{ github.event.action }}
+      # `/validate` comments select validate mode; everything else (the
+      # `submit` label, `/submit` comments) routes to submit mode.
+      mode: >-
+        ${{ (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/validate')) && 'validate' || 'submit' }}
     secrets: inherit

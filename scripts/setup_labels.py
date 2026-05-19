@@ -31,6 +31,7 @@ LABELS: list[tuple[str, str, str]] = [
     ("reimbursement",    "Reimbursement claim submission (Phase 5+)",  "1d76db"),
     ("pending-review",   "Awaiting admin review",                      "fbca04"),
     ("parse-error",      "Submission has parse errors; see comment",   "d73a4a"),
+    ("submit",           "Apply to a draft issue to file the submission (auto-removed by the workflow)", "0e8a16"),
     ("submission",       "Auto-generated submission PR",               "0e8a16"),
     ("processed",        "Submission merged and recorded in ledger",   "6f42c1"),
 ]

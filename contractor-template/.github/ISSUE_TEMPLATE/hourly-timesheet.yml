@@ -14,14 +14,23 @@ body:
       value: |
         ## Hourly Timesheet Submission
 
-        Fill out the fields below. On submission, a Pull Request will be
-        automatically created with the structured data. An admin will
-        review and merge; on merge a PDF is generated and the payments
-        manager is notified.
+        Fill out the fields below to open a **draft timesheet** for
+        this period. After the issue is created you can edit the issue
+        body to add rows to the Time Entries table — accumulate
+        entries as you work, no need to file everything at once.
 
-        **Corrections after submitting:** edit this issue (the PR will
-        be regenerated), or edit the PR branch directly if you're
-        comfortable with git.
+        When you're ready to file the timesheet:
+
+        - Comment **`/validate`** on the issue to check that your
+          entries parse cleanly. You'll get a reply with parse results
+          and computed totals. No PR is opened.
+        - Comment **`/submit`** (or apply the `submit` label) to file
+          the timesheet. A Pull Request will open with the rendered
+          PDF; an admin reviews and merges.
+
+        **Corrections before submission:** edit the issue body.
+        **After submission:** the issue is locked; edit the PR branch
+        directly, or ask an admin to revise.
 
         Need help? See the
         [Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md).
@@ -74,15 +83,19 @@ $CONTRACT_OPTIONS
     attributes:
       label: Time Entries
       description: |
-        Enter one row per day worked, in the format:
+        One row per day worked, in the format:
         `YYYY-MM-DD | hours | description`
 
-        Hours may be fractional (e.g. 4.5). Descriptions may contain any
-        text — the parser splits on the first two `|` only.
-      placeholder: |
-        2026-04-06 | 3.5 | Reviewed NumPy lecture exercises
-        2026-04-13 | 5.0 | Developed plotting examples
-        2026-04-20 | 4.0 | Fixed CI pipeline issues
+        You can leave the seeded header row as-is when first creating
+        the issue, and add entries by editing the issue body over time.
+        Hours may be fractional (e.g. 4.5). Descriptions may contain
+        any text — the parser splits on the first two `|` only.
+
+        **Keep the `Date | Hours | Description` header row in place** —
+        the parser uses it to recognise this as the entries table.
+      value: |
+        Date | Hours | Description
+        2026-04-06 | 3.5 | Example entry — replace or extend with your own rows
       render: text
     validations:
       required: true
