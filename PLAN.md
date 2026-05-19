@@ -968,8 +968,15 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
   - PR-rendered screenshots (`ts-07` + `mi-07`) have the contractor info column redacted with a black box; test repo settings still contain real PII so a future cleanup task (sanitize `contractor-engine-test/config/settings.yml`) will let future captures be unredacted.
 - [x] **Fixed broken doc URLs in `contractor-template/`** — `ISSUE_TEMPLATE/config.yml`, both issue templates, and `README.md` now point at `https://quantecon.github.io/contractor-payments/...` instead of the never-existed `blob/main/docs/CONTRACTOR_GUIDE.md`. README's "Submitting" section also updated to describe the Phase 3c flow (`/validate` + `/submit`) instead of the pre-Phase-3c auto-PR-on-creation flow.
 - [ ] Admin guide — deferred; the admin runbook content can live in `notes/` or as a separate non-public section. Decide before flipping `testing_mode`.
-- [ ] Flip `notifications.testing_mode` to `false` — PSL starts receiving real approval emails.
-- [ ] Onboard a small number of real contractors; iterate on friction.
+- [ ] **First real contractor onboarding checklist.** Run before / during the first real `onboarding/new-contractor.py` invocation:
+  - [ ] Confirm `vars.PSL_EMAIL` + `vars.QUANTECON_EMAIL_REVIEWER` are still set on the `QuantEcon` org (`gh variable list --org QuantEcon`). Both were set during Phase 2 (§9 Email recipient policy); a one-line sanity check before going live.
+  - [ ] Confirm all five org-level SMTP secrets are still set on `QuantEcon` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`). Set during Phase 2 ([notes/EMAIL_SETUP.md](../notes/EMAIL_SETUP.md)).
+  - [ ] Confirm the org-level **branch-protection ruleset** for `contractor-*` repos still exists and grants bypass to the GitHub Actions integration (so `[skip ci]` workflow pushes are accepted). One-time setup from Phase 3b §8; verify it survived any org-settings changes.
+  - [ ] Decide and announce `testing_mode` policy with the first contractor: either keep `testing_mode: true` through their first cycle (their first approval emails go to `vars.QUANTECON_EMAIL_REVIEWER` only — extra safety) or flip to `false` ahead of their first merge (approval emails go straight to PSL). Default position: keep `true` for the first cycle, flip after their first successful merge has been verified.
+  - [ ] Run `onboarding/new-contractor.py` with their YAML (`onboarding/contractors/{handle}.yml` based on `example.yml`). Use `--dry-run` first to preview.
+  - [ ] After onboarding completes, share the contractor-facing guide link (<https://quantecon.github.io/contractor-payments/>) and the new repo URL with them via the onboarding email.
+- [ ] **Flip `notifications.testing_mode` to `false`** in [templates/fiscal-host.yml](../templates/fiscal-host.yml) once first-contractor flow is verified. This is the final cutover — PSL starts receiving real approval emails.
+- [ ] Onboard a small number of additional real contractors; iterate on friction.
 
 ### Phase 5 — Reimbursement Claim engine + multi-select onboarding (post-launch)
 

@@ -34,17 +34,31 @@ companion contractor-facing guide will live at
 **Situation.** Contractor submits a timesheet or milestone invoice for
 the most recent completed period. No edits, no errors.
 
-**What happens (the golden path).**
+**What happens (the golden path).** Phase 3c (deferred submission) flow:
 
 1. Contractor opens a GitHub issue via the form
-   (`hourly-timesheet.yml` or `milestone-invoice.yml`).
-2. `issue-to-pr.yml` fires within ~30s. Parses the issue body,
-   generates `submission/YYYY-MM/<id>.yml`, renders a PDF + PNG
-   preview, opens a PR with the PNG embedded inline.
-3. Admin reviews the PR (visual PDF check via the PNG, sanity-check
+   (`hourly-timesheet.yml` or `milestone-invoice.yml`). The issue is a
+   **draft** — no workflow fires, no PR opens.
+2. Contractor edits the issue body over the period to add entries (one
+   row per day worked for timesheets, one row per milestone for
+   invoices).
+3. Optionally: contractor comments `/validate` to check that their
+   entries parse cleanly. The engine posts a sentinel-marked comment
+   with computed totals (hours × rate, or amount × N). No PR opens.
+   `/validate` can be re-run as many times as needed; the same comment
+   updates in place.
+4. When ready, contractor comments `/submit` (or applies the `submit`
+   label).
+5. `process-submission.yml` fires within ~30s. Parses the issue body,
+   generates `submissions/YYYY-MM/<id>.yml`, renders a PDF + PNG
+   preview, opens a PR with the PNG embedded inline, **closes and
+   locks the originating issue** with a handoff comment linking to the
+   PR (e.g. *"Submission filed — see #32..."*), and removes the
+   `submit` label if applied.
+6. Admin reviews the PR (visual PDF check via the PNG, sanity-check
    amounts/period/contract).
-4. Admin approves + merges the PR.
-5. `process-approved.yml` fires on merge:
+7. Admin approves + merges the PR.
+8. `process-approved.yml` fires on merge:
    - Re-renders the PDF + PNG with approval metadata (amber → green
      banner; approver + date stamped on both).
    - Appends the entry to `ledger/<contract-id>.yml`.
@@ -56,6 +70,11 @@ the most recent completed period. No edits, no errors.
    - Applies the `processed` label to the PR.
    - Auto-deletes the submission branch.
 
+**Reminders.** On the 1st of each month, `period-reminders.yml` fires
+on each contractor repo and posts a sentinel-marked reminder on any
+open draft issue whose period has ended without a `/submit`.
+Idempotent per (issue, period). Catches contractors who forgot to file.
+
 **Admin actions.**
 
 - Review PR within ~24h to keep contractor experience tight.
@@ -66,32 +85,53 @@ the most recent completed period. No edits, no errors.
 
 ---
 
-## 2. Resubmission before merge — contractor edits the issue
+## 2. Resubmission before merge — corrections after `/submit`
 
-**Situation.** Contractor opened the submission, then noticed an error
-(wrong hours, wrong date, wrong amount). PR has not been merged yet.
+**Situation.** Contractor already ran `/submit` (a PR is open), then
+noticed an error.
 
-**What happens.**
+**Phase 3c behaviour.** Once `/submit` fires, the originating issue is
+**closed and locked**. Editing the issue body no longer regenerates
+the PR (the `issues.edited` trigger was removed in Phase 3c). The PR
+is canonical for any corrections.
 
-The contractor **edits the original issue body** in GitHub's UI. The
-workflow re-fires on the `issues.edited` event:
+**Two paths to fix.**
 
-- Re-parses the body.
-- Force-pushes an updated YAML + PDF + PNG to the same
-  `submission/issue-N` branch.
-- The existing PR auto-updates with the new content (no new PR
-  opens). Inline PNG preview refreshes.
+**Path A (recommended) — admin edits the PR branch.** The admin has
+write access and can:
+
+1. Check out `submission/issue-N` locally.
+2. Edit the submission YAML directly (the `.yml` under `submissions/<period>/`).
+3. Re-render the PDF + PNG: `python -m scripts.generate_pdf --submission ... --settings ... --output ...`
+4. Commit + push. The PR auto-updates.
+
+Useful for small fixes (a typo in the description, an amount nudged by
+one digit) where it's cheaper than a full revision cycle.
+
+**Path B — close the PR, reopen the issue, edit + `/submit`.** Heavier
+but cleaner if the contractor wants to redo the whole submission:
+
+1. Admin closes the PR without merging (no `Closes #N` cleanup needed —
+   the issue is already closed and locked).
+2. Admin unlocks the issue if needed (`gh issue unlock`) and reopens
+   it (`gh issue reopen`).
+3. Contractor edits the body to fix the errors.
+4. Contractor re-runs `/submit`. The engine opens a fresh PR (the old
+   branch is force-pushed since no open PR exists on it).
 
 **Admin actions.**
 
-- If the contractor adds a comment on the PR or issue explaining what
-  they changed, acknowledge it.
+- For most pre-merge corrections, take Path A — it's lower friction.
+- If the contractor wants to drive the fix themselves, use Path B.
+- Acknowledge any contractor comments on the PR explaining what
+  changed.
 - Re-review the updated PDF before merging.
 
-**Contractor-facing nuance.** Contractors should know **they edit the
-issue body, not the PR**. The PR is generated; editing it directly is
-fruitless (the workflow will overwrite). Cover this in the Phase 4
-contractor guide.
+**Contractor-facing nuance.** Contractors should know **post-`/submit`
+edits go via the PR, not the issue**. The issue is locked as a signal
+that the PR is now canonical. This is covered in the
+[Corrections and revisions](https://quantecon.github.io/contractor-payments/contractor-guide/corrections/)
+guide.
 
 ---
 

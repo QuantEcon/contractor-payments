@@ -5,10 +5,13 @@ hourly timesheets, milestone invoices, and (post-launch) reimbursement claims.
 Contractors submit via a GitHub Issue Form, an admin reviews via PR, and an
 approved PDF is emailed to the fiscal host on merge.
 
-> **Status:** active development. Phase 1 (Hourly Timesheet) and Phase 1.5
-> (Milestone Invoice) engines are complete; Phase 3a (reusable workflow) ships
-> the pipeline as a single source of truth. See [PLAN.md](PLAN.md#at-a-glance)
-> for the live phase checklist.
+> **Status:** ready to onboard first real contractors. Phases 1, 1.5, 2,
+> 2.5, 3a, 3b, 3c shipped; Phase 4 docs + first onboardings in progress.
+> Engine handles hourly timesheets and milestone invoices end-to-end, from
+> deferred-submission draft through `/submit`, PR review + merge, ledger
+> update, and email to PSL Foundation. See [PLAN.md](PLAN.md#at-a-glance)
+> for the live phase checklist. Contractor-facing docs at
+> <https://quantecon.github.io/contractor-payments/>.
 
 ## What this repo is
 
@@ -41,18 +44,24 @@ QuantEcon/contractor-{handle}       ← per-contractor (private)
 
 ## How a submission flows
 
-1. **Submit.** Contractor opens their private repo → New Issue → picks the
+1. **Draft.** Contractor opens their private repo → New Issue → picks the
    right submission template (Hourly Timesheet / Milestone Invoice) and fills
-   it out.
-2. **Parse + PR.** The thin caller workflow fires `process-submission.yml` in
-   this repo. Scripts parse the issue body, write a structured submission YAML,
-   render PDF + PNG via Typst, and open a PR on the contractor's repo with the
-   PNG embedded inline.
-3. **Review.** Admin reviews the PR — verifies the contract reference, amounts,
-   description.
-4. **Approve.** Admin merges. (Phase 2: re-render PDF with approval block,
-   update the ledger, email the approved PDF to the fiscal host with Cc to
-   the QuantEcon admin mailbox.)
+   it out. The issue is a *draft* — the contractor edits the body over days
+   or weeks as they accumulate entries.
+2. **Validate (optional).** Contractor comments `/validate` to check that
+   their entries parse cleanly. The engine posts a sentinel-marked comment
+   with computed totals — no PR opens.
+3. **Submit.** When ready, contractor comments `/submit` (or applies the
+   `submit` label). The thin caller workflow fires `process-submission.yml`
+   in this repo. Scripts parse the issue body, write a structured submission
+   YAML, render PDF + PNG via Typst, open a PR on the contractor's repo
+   with the PNG embedded inline, and close+lock the originating issue.
+4. **Review.** Admin reviews the PR — verifies the contract reference,
+   amounts, description.
+5. **Approve.** Admin merges. The engine re-renders the PDF with the
+   approval block, updates the ledger, emails the approved PDF to PSL
+   Foundation (with the QuantEcon admin Cc'd), and posts an audit comment
+   on the closed issue.
 
 ## Why this exists
 
@@ -92,6 +101,8 @@ load-bearing:
 |---|---|
 | What's built and what's next | [PLAN.md — At a glance](PLAN.md#at-a-glance) |
 | Full design | [PLAN.md](PLAN.md) |
+| Contractor-facing guide | <https://quantecon.github.io/contractor-payments/> |
+| Admin operational runbook | [notes/ADMIN_RUNBOOK.md](notes/ADMIN_RUNBOOK.md) (internal) |
 | How submissions are parsed | [scripts/parse_issue.py](scripts/parse_issue.py) |
 | How PDFs are rendered | [scripts/generate_pdf.py](scripts/generate_pdf.py) + [templates/timesheet.typ](templates/timesheet.typ) + [templates/invoice.typ](templates/invoice.typ) |
 | Reusable workflow | [.github/workflows/process-submission.yml](.github/workflows/process-submission.yml) |
