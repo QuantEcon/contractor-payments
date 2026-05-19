@@ -960,11 +960,12 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 
 - [x] **Scaffold + landing page** (commit [18cd80e](https://github.com/QuantEcon/contractor-payments/commit/18cd80e)) — `mkdocs.yml`, `docs/index.md` placeholder ("guide coming soon"), gh-pages branch workflow. Moved `EMAIL_SETUP.md` from `docs/` to `notes/` so it's not published as part of the public site.
 - [x] **Switched to Pages artifact deploy** (commit [4b174ce](https://github.com/QuantEcon/contractor-payments/commit/4b174ce)) — `.github/workflows/docs.yml` uses `actions/upload-pages-artifact` + `actions/deploy-pages`; `gh-pages` branch deleted. Repo Pages source set to "GitHub Actions". Site live at https://quantecon.github.io/contractor-payments/.
-- [x] **Contractor guide pages** (under `docs/contractor-guide/`) — prose drafted with `<!-- SCREENSHOT: ... -->` placeholders describing the captures admin will drop in during first-real-contractor onboarding:
-  - [x] `submit-timesheet.md` — hourly timesheet walk-through, full Phase 3c flow (draft → `/validate` → `/submit`)
-  - [x] `submit-invoice.md` — milestone invoice variant, including catch-up submissions and milestone-ID warning behaviour
-  - [x] `corrections.md` — per-stage correction paths (pre-submit, pre-merge, pre-payment revision, post-payment), plus parse-error recovery and "bot didn't respond" troubleshooting
-  - Index page rewritten to point at the three tutorials with one-paragraph "how the flow works" preamble
+- [x] **Contractor guide pages** (under `docs/contractor-guide/`) — three tutorials shipped with 14 screenshots captured from `contractor-engine-test` (commit [0c9889d](https://github.com/QuantEcon/contractor-payments/commit/0c9889d)):
+  - [x] `submit-timesheet.md` — hourly timesheet walk-through, full Phase 3c flow (draft → `/validate` → `/submit`); 7 screenshots showing chooser, form, body-edit, `/validate` success + error (upsert visible via "Last edited by github-actions"), `/submit` + close + lock, and the opened PR with inline PNG preview.
+  - [x] `submit-invoice.md` — milestone invoice variant. Worked example anchored to milestone 3 / 2026-07-15 / 77000 JPY; 7 screenshots paralleling the timesheet sequence. Covers catch-up submissions and the milestone-ID warning behaviour.
+  - [x] `corrections.md` — per-stage correction paths (pre-submit, pre-merge, pre-payment revision, post-payment), plus parse-error recovery and "bot didn't respond" troubleshooting. Text-only.
+  - Index page rewritten to point at the three tutorials with one-paragraph "how the flow works" preamble.
+  - PR-rendered screenshots (`ts-07` + `mi-07`) have the contractor info column redacted with a black box; test repo settings still contain real PII so a future cleanup task (sanitize `contractor-engine-test/config/settings.yml`) will let future captures be unredacted.
 - [x] **Fixed broken doc URLs in `contractor-template/`** — `ISSUE_TEMPLATE/config.yml`, both issue templates, and `README.md` now point at `https://quantecon.github.io/contractor-payments/...` instead of the never-existed `blob/main/docs/CONTRACTOR_GUIDE.md`. README's "Submitting" section also updated to describe the Phase 3c flow (`/validate` + `/submit`) instead of the pre-Phase-3c auto-PR-on-creation flow.
 - [ ] Admin guide — deferred; the admin runbook content can live in `notes/` or as a separate non-public section. Decide before flipping `testing_mode`.
 - [ ] Flip `notifications.testing_mode` to `false` — PSL starts receiving real approval emails.
