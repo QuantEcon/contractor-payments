@@ -33,7 +33,7 @@ body:
         directly, or ask an admin to revise.
 
         Need help? See the
-        [Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md).
+        [Submit a timesheet](https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/) guide.
 
   - type: dropdown
     id: contract

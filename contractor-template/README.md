@@ -12,11 +12,15 @@ and approved by the admin.
 2. Pick a template:
    - 📋 **Hourly Timesheet** — monthly hours on an hourly contract.
    - 🎯 **Milestone Invoice** — a milestone delivered on a milestone contract.
-3. Fill out the form and submit. A PR is opened automatically with a
-   rendered PDF preview; the admin reviews and merges.
+3. Fill the form to open a **draft** issue. Edit the issue body over
+   time to add entries.
+4. Comment **`/validate`** to check your entries parse cleanly (with
+   computed totals; no PR yet).
+5. Comment **`/submit`** (or apply the `submit` label) to file the
+   submission. A PR opens automatically with the rendered PDF; the
+   admin reviews and merges.
 
-See the
-[Contractor Guide](https://github.com/QuantEcon/contractor-payments/blob/main/docs/CONTRACTOR_GUIDE.md)
+See the [Contractor Guide](https://quantecon.github.io/contractor-payments/)
 for the full walkthrough.
 
 ## What's in this repo

@@ -18,6 +18,10 @@ theme:
 
 nav:
   - Home: index.md
+  - Contractor guide:
+      - Submit a timesheet: contractor-guide/submit-timesheet.md
+      - Submit a milestone invoice: contractor-guide/submit-invoice.md
+      - Corrections and revisions: contractor-guide/corrections.md
 
 markdown_extensions:
   - admonition

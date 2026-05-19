@@ -960,11 +960,12 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 
 - [x] **Scaffold + landing page** (commit [18cd80e](https://github.com/QuantEcon/contractor-payments/commit/18cd80e)) — `mkdocs.yml`, `docs/index.md` placeholder ("guide coming soon"), gh-pages branch workflow. Moved `EMAIL_SETUP.md` from `docs/` to `notes/` so it's not published as part of the public site.
 - [x] **Switched to Pages artifact deploy** (commit [4b174ce](https://github.com/QuantEcon/contractor-payments/commit/4b174ce)) — `.github/workflows/docs.yml` uses `actions/upload-pages-artifact` + `actions/deploy-pages`; `gh-pages` branch deleted. Repo Pages source set to "GitHub Actions". Site live at https://quantecon.github.io/contractor-payments/.
-- [ ] **Contractor guide pages** (under `docs/contractor-guide/`):
-  - [ ] `submit-timesheet.md` — hourly timesheet walk-through with screenshots
-  - [ ] `submit-invoice.md` — milestone invoice walk-through with screenshots
-  - [ ] `corrections.md` — how to amend a submission before/after PR merge
-- [ ] **Fix broken doc URLs in `contractor-template/`** (see §10) — `ISSUE_TEMPLATE/config.yml` and the two issue templates currently point at `blob/main/docs/CONTRACTOR_GUIDE.md` which never existed. Repoint at the published site URLs once `submit-timesheet.md` lands.
+- [x] **Contractor guide pages** (under `docs/contractor-guide/`) — prose drafted with `<!-- SCREENSHOT: ... -->` placeholders describing the captures admin will drop in during first-real-contractor onboarding:
+  - [x] `submit-timesheet.md` — hourly timesheet walk-through, full Phase 3c flow (draft → `/validate` → `/submit`)
+  - [x] `submit-invoice.md` — milestone invoice variant, including catch-up submissions and milestone-ID warning behaviour
+  - [x] `corrections.md` — per-stage correction paths (pre-submit, pre-merge, pre-payment revision, post-payment), plus parse-error recovery and "bot didn't respond" troubleshooting
+  - Index page rewritten to point at the three tutorials with one-paragraph "how the flow works" preamble
+- [x] **Fixed broken doc URLs in `contractor-template/`** — `ISSUE_TEMPLATE/config.yml`, both issue templates, and `README.md` now point at `https://quantecon.github.io/contractor-payments/...` instead of the never-existed `blob/main/docs/CONTRACTOR_GUIDE.md`. README's "Submitting" section also updated to describe the Phase 3c flow (`/validate` + `/submit`) instead of the pre-Phase-3c auto-PR-on-creation flow.
 - [ ] Admin guide — deferred; the admin runbook content can live in `notes/` or as a separate non-public section. Decide before flipping `testing_mode`.
 - [ ] Flip `notifications.testing_mode` to `false` — PSL starts receiving real approval emails.
 - [ ] Onboard a small number of real contractors; iterate on friction.
