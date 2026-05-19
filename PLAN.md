@@ -302,7 +302,7 @@ The interface contractors interact with. GitHub renders this YAML as a web form 
 
 1. **Contract** (dropdown, required) — populated with the contractor's active contract IDs. Onboarding script writes the initial list; admin edits the list when a contract is renewed.
 2. **Year** (dropdown, required) — 4-digit year. Short list (~3-4 entries: current year ± a year for back/forward catch-up); admin appends one entry when the year rolls over.
-3. **Month** (dropdown, required) — static list `01 — January` through `12 — December`. Parser takes the leading two digits; the friendly suffix is for readability.
+3. **Month** (dropdown, required) — static list `01` through `12`. Parser is lenient (accepts `5`, `05`, and legacy `05 — May` from pre-Phase-3c issues) but the dropdown serves only the digits. The "— January" suffix was dropped in Phase 3c because the em-dash made post-creation body edits painful, and the rendered PDF only uses the numeric period anyway (`2026-05`) — see §8 Phase 3c.
 4. **Time Entries** (textarea, required) — **one row per day worked**, pipe-delimited `YYYY-MM-DD | hours | description`. Variable rows: contractor only enters days they actually worked, not a fixed grid of 30 rows.
 5. **Additional notes** (textarea, optional) — free text.
 6. **Confirmation** (checkbox, required) — single ack of accuracy.
