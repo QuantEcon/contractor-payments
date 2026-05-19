@@ -29,6 +29,7 @@ jobs:
   remind:
     uses: QuantEcon/contractor-payments/.github/workflows/send-reminders.yml@main
     permissions:
+      contents: read
       issues: write
     with:
       dry_run: ${{ inputs.dry_run || false }}
