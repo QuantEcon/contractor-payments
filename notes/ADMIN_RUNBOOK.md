@@ -559,6 +559,272 @@ when the workflow tries to add a file that conflicts.
 
 ---
 
+## Branch protection (deferred)
+
+**Status as of 2026-05-20: contractor repos run without branch protection.**
+This is a deliberate short-term acceptance, not an oversight. The
+section below records (a) what's at risk in the current state, (b) why
+the original design no longer works, and (c) the step-by-step migration
+plan to fix it once we have time.
+
+### Current state and risk
+
+Every contractor repo is created private with two collaborators:
+the contractor (Write) and the admin (Admin). Nothing on the repo's
+`main` branch is technically enforced — either collaborator can push
+directly, force-push, or delete `main`. The intended approval flow
+(issue → PR → admin review → merge → engine workflow) is **operationally**
+enforced (we follow it) but not **technically** enforced (nothing stops
+us deviating).
+
+Why this is acceptable for the first contractor:
+
+- Private repo, two known parties, neither has an incentive to bypass
+  the flow that pays them.
+- Anomalous direct-to-`main` activity is visible on the repo timeline
+  and would be obvious in retrospect.
+- The fiscal-host email (which actually triggers payment) only fires
+  on a merged PR via `process-approved.yml`. A direct push to `main`
+  doesn't trigger payment; it just bypasses review of the on-record
+  artifact.
+
+Why this is **not** acceptable as a permanent state:
+
+- The protection's intent is to make the system robust to mistakes,
+  not just to ill intent. A typo `git push origin main` from a
+  half-baked submission YAML would commit it to the canonical record.
+- The contractor base will grow beyond fully-trusted internal staff.
+
+### Why the original design no longer works
+
+PLAN.md §8 Phase 3b originally specified an **org-level Ruleset**
+targeting `contractor-*` repos, with the `github-actions` integration
+in the bypass list (so the post-merge `[skip ci]` push from
+`process-approved.yml` could land the ledger + PDF re-stamp). That path
+is closed for two reasons:
+
+1. **Modern Rulesets UI doesn't expose the integration as a bypass actor.**
+   Verified 2026-05-20: the org-level Ruleset bypass picker, filtered
+   for `actions` or `github`, returns "No suggestions." Whatever path
+   the original spec relied on has been removed or moved.
+
+2. **Classic per-repo branch protection is also a dead end** — empirically
+   verified Phase 2.5. With `enforce_admins: true` the bot push is
+   rejected (admins are subject to the rule, bot inherits that).
+   With `enforce_admins: false` the bot push is *still* rejected with
+   `GH006: Protected branch update failed — Changes must be made through
+   a pull request.` Only human admins are exempted; the synthetic
+   `github-actions[bot]` actor isn't.
+
+In effect, Phase 3b's "E2E verified" test on `contractor-mmcky` succeeded
+because the org had **no** ruleset in place — the workflow's `[skip ci]`
+push went through because nothing blocked it, not because bypass was
+working. Protection has never actually been operational in this project.
+
+### Migration plan — Option A (dedicated GitHub App)
+
+Use a **dedicated org-owned GitHub App** as the actor for the engine
+push. Installed Apps appear in the Ruleset bypass picker (unlike the
+built-in `github-actions` integration), and short-lived App tokens are
+the modern GitHub-recommended pattern for any automation that needs to
+write to protected branches.
+
+**Prerequisite to verify before committing fully** — install a throwaway
+GitHub App on `contractor-engine-test` and open the bypass picker. If
+the App appears under the "Apps" / "Integrations" section, the migration
+will work as designed. If it does not, we need to fall back to either
+Option B (restructure to avoid the post-merge push entirely) or stay on
+Option C (no protection) until GitHub provides a path. **Don't skip this
+test.** Everything below depends on it.
+
+#### Step 1 — Create the App
+
+1. Navigate to `https://github.com/organizations/QuantEcon/settings/apps`.
+2. Click **New GitHub App**.
+3. Fill in:
+   - **GitHub App name:** `QuantEcon Contractor Engine` (the displayed
+     identity on commits; choose a name that's clearly attributable).
+   - **Homepage URL:** `https://github.com/QuantEcon/contractor-payments`.
+   - **Webhook → Active:** **uncheck**. We don't need webhook delivery;
+     the App is purely a token-minting identity.
+4. **Repository permissions:**
+   - **Contents:** Read & write — required for the `[skip ci]` ledger
+     and PDF re-stamp push.
+   - **Pull requests:** Read & write — required if we later want the
+     App to comment on or label PRs.
+   - **Issues:** Read & write — required for the close-comment step
+     on the submission issue and ledger-issue updates.
+   - **Metadata:** Read-only (auto-required).
+5. **Where can this GitHub App be installed?** → **Only on this account.**
+6. Click **Create GitHub App**. You'll land on the App's settings page.
+7. **Generate a private key** — scroll to "Private keys", click
+   "Generate a private key". A `.pem` file downloads. **This is the
+   only time GitHub will give you the key — store it immediately**
+   (1Password or equivalent; do not commit).
+8. **Note the App ID** — shown at the top of the App settings page,
+   under the name. A small integer like `12345`.
+
+#### Step 2 — Install the App on contractor repos
+
+From the App settings page, click **Install App** in the left sidebar.
+
+1. Click **Install** next to `QuantEcon`.
+2. Choose **All repositories** if you want the App to pick up future
+   `contractor-*` repos automatically, OR **Only select repositories**
+   and pick the existing `contractor-*` ones (and any test repos like
+   `contractor-engine-test`).
+3. Confirm install.
+
+#### Step 3 — Store credentials as org secrets
+
+The engine workflow needs the App ID + private key to mint tokens.
+Both live as **org-level** Actions secrets on `QuantEcon` (so every
+contractor repo's reusable-workflow run reads them without per-repo
+setup, matching the SMTP secret pattern from Phase 2):
+
+```bash
+# App ID is non-sensitive but easier to keep with the key.
+gh secret set ENGINE_APP_ID --org QuantEcon --body "12345" \
+  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+
+# Private key — paste the contents of the downloaded .pem.
+gh secret set ENGINE_APP_PRIVATE_KEY --org QuantEcon \
+  --body "$(cat ~/Downloads/quantecon-contractor-engine.*.private-key.pem)" \
+  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+```
+
+Use `--visibility all` if/when the App is installed on all org repos.
+The `--repos` list must match the App's install scope.
+
+#### Step 4 — Update the engine workflow
+
+In `contractor-payments/.github/workflows/process-approved.yml`, the
+push step currently runs as `github-actions[bot]` with the auto-issued
+`GITHUB_TOKEN`. Two changes:
+
+1. **Add a token-mint step** at the top of the job using the official
+   action:
+
+   ```yaml
+   - name: Mint engine push token
+     id: engine_token
+     uses: actions/create-github-app-token@v1
+     with:
+       app-id: ${{ secrets.ENGINE_APP_ID }}
+       private-key: ${{ secrets.ENGINE_APP_PRIVATE_KEY }}
+       owner: ${{ github.repository_owner }}
+       repositories: ${{ github.event.repository.name }}
+   ```
+
+2. **Use the minted token for the checkout and push.** Change the
+   relevant `actions/checkout@v4` to pass the App token, and adjust
+   the git identity config to match the App's bot username:
+
+   ```yaml
+   - uses: actions/checkout@v4
+     with:
+       token: ${{ steps.engine_token.outputs.token }}
+       ref: main
+       fetch-depth: 2
+   ```
+
+   ```yaml
+   - name: Configure git identity
+     run: |
+       git config user.name "quantecon-contractor-engine[bot]"
+       git config user.email "<App-installation-ID>+quantecon-contractor-engine[bot]@users.noreply.github.com"
+   ```
+
+   (Find the installation ID at
+   `https://github.com/organizations/QuantEcon/settings/installations`
+   — click into the App, the URL contains it.)
+
+The thin caller `contractor-template/.github/workflows/process-approved.yml`
+needs no change; it just pins `@main` and inherits the new behaviour.
+
+#### Step 5 — Verify the App appears in the bypass picker
+
+This is the prerequisite check. On `contractor-engine-test`:
+
+1. Go to `https://github.com/QuantEcon/contractor-engine-test/settings/rules`
+   (or org-level rules if testing org-level).
+2. Click **New ruleset** → **New branch ruleset**.
+3. In **Bypass list**, click **+ Add bypass**, filter for
+   `contractor` or the App name.
+4. **Expect:** the App appears, likely under an "Apps" or "Integrations"
+   section. Add it.
+5. If the App does **not** appear here, stop. The migration as designed
+   won't work; reopen the design discussion before going further.
+
+#### Step 6 — Configure the ruleset
+
+Assuming Step 5 succeeded, create the **org-level ruleset** (so it
+auto-covers future `contractor-*` repos):
+
+- **Name:** `contractor-repos-main-protection`
+- **Enforcement:** Active
+- **Target repositories:** dynamic list matching `contractor-*`
+- **Target branches:** default branch (`main`)
+- **Bypass list:** Repository admin (Always allow) + the engine App
+- **Branch rules:**
+  - Restrict deletions ✓
+  - Block force pushes ✓
+  - Require a pull request before merging — 1 approval, require
+    review from Code Owners
+
+Click **Create**.
+
+#### Step 7 — End-to-end verify on `contractor-engine-test`
+
+1. Open a test submission issue, `/validate`, `/submit`.
+2. Confirm a PR opens and `process-approved.yml` runs with the new
+   App token (check the Actions run logs — git push should report
+   the App's bot identity, not `github-actions[bot]`).
+3. Merge the PR. The post-merge workflow should successfully push the
+   `[skip ci]` ledger commit to `main` without GH006.
+4. Confirm `ledger/<contract>.yml` updated, PDF re-stamped, pinned
+   ledger issue refreshed.
+
+If all of that works, the migration is solid. Roll out by retro-applying
+the ruleset (or repo-level protection) to all existing `contractor-*`
+repos.
+
+#### Step 8 — Update the engine and onboarding
+
+- Replace the `notify_protection_deferred` pre-flight in
+  `onboarding/new-contractor.py` with a real verification step (the
+  org ruleset will auto-apply, but the script can verify the App is
+  installed on the just-created repo).
+- Update PLAN.md §8 Phase 3b: move "Branch protection — DEFERRED" to
+  "Branch protection — implemented via App + org ruleset".
+- Update `## 11. Security posture` in PLAN.md correspondingly.
+
+### What data lives where (why retrofit is data-preserving)
+
+Migration touches *metadata* on the repo (the ruleset + bypass list)
+and the **engine workflow** (one push step). All actual data — every
+`submissions/*.yml`, `ledger/*.yml`, `contracts/*.yml`, the generated
+PDFs, the issue threads, the PR histories — is untouched. The same
+contractor continues with the same repo at the same URL after migration.
+
+### If Step 5 fails (the App doesn't appear in the bypass picker)
+
+The fallback options, in rough order of preference:
+
+1. **Option B — restructure to avoid the post-merge push.** Stop
+   committing ledger updates and PDF re-stamps to `main`; rely on the
+   pinned ledger Issue (already implemented for UX) as the canonical
+   running record, and accept that the on-merge PDF in the PR is the
+   final artifact (no approval-date re-stamp). The git merge commit
+   timestamp records the approval moment. Material redesign — touches
+   `process-approved.yml` and the ledger workflow. Half-day of work.
+2. **Stay on Option C indefinitely** — keep accepting unprotected
+   contractor repos, document the gap, build it into the
+   trust/onboarding model. Acceptable for a small set of known
+   contractors; doesn't scale.
+
+---
+
 ## Open dev questions surfaced by this runbook
 
 Capturing the development implications in one place for triage:

@@ -17,7 +17,6 @@ See PLAN.md §5 for the full spec.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -48,7 +47,6 @@ ORG = "QuantEcon"
 DEFAULT_ADMIN = "mmcky"
 TEMPLATE_DIR = ENGINE_ROOT / "contractor-template"
 CLONES_DIR = ENGINE_ROOT / "contractors"
-RULESET_REPO_PREFIX = "contractor-"  # ruleset targets repos matching `contractor-*`
 
 SUPPORTED_CURRENCIES = {"AUD", "USD", "JPY"}
 CONTRACT_TYPES = {"hourly", "milestone"}
@@ -84,10 +82,10 @@ def run(cmd: list[str], *, dry_run: bool,
         cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     """Run a write-side shell command, or print + skip under --dry-run.
 
-    Read-side commands (the pre-flight checks for gh auth, the ruleset,
-    and existing-repo detection) call subprocess.run directly so they
-    fire even under dry-run — we want the dry-run to faithfully preview
-    whether a real run would succeed.
+    Read-side commands (the pre-flight checks for gh auth and existing-repo
+    detection) call subprocess.run directly so they fire even under
+    dry-run — we want the dry-run to faithfully preview whether a real
+    run would succeed.
     """
     if dry_run:
         print(f"  [dry-run] {' '.join(cmd)}")
@@ -452,69 +450,43 @@ def verify_repo_doesnt_exist(handle: str) -> None:
         sys.exit(1)
 
 
-_RULESET_SPEC = f"""\
-  Org-level ruleset required (one-time, set by a `QuantEcon` org admin in
-  the GitHub UI — Settings → Repository rules → Rulesets → New ruleset):
+_NO_PROTECTION_NOTICE = """\
+  ⚠ Branch protection on `main` is currently DEFERRED.
 
-    Name        : contractor-repos-main-protection
-    Target      : repos matching `contractor-*`, branch `main`
-    Enforcement : Active
-    Rules       : - Require pull request before merging
-                    • 1 approving review
-                    • Require review from Code Owners
-                  - Block force pushes
-                  - Restrict deletions
-    Bypass      : GitHub Actions (so `process-approved.yml` can push
-                  the `[skip ci]` ledger + PDF re-stamp commit on merge)
+  The contractor's repo will be created with no protection on `main`,
+  which means anyone with Write access (the contractor + the admin)
+  can in principle push directly without a PR. The intended approval
+  flow (issue → PR → admin review → merge) is operationally enforced,
+  not technically enforced.
 
-  Without this ruleset, the contractor repo is created successfully but
-  `main` has no branch protection — submissions can be merged without
-  review. Safe for the initial onboarding-test repo; verify before any
-  real contractor goes live."""
+  Background: the original Phase 3b design relied on an org-level
+  ruleset granting bypass to the `github-actions` integration.
+  GitHub's modern Rulesets UI no longer exposes that integration as
+  a selectable bypass actor, and classic protection's
+  `enforce_admins: false` doesn't admit the bot push either
+  (PLAN.md §8 documents both findings). The durable fix is a
+  dedicated GitHub App for the engine push — see
+  `notes/ADMIN_RUNBOOK.md` → "Branch protection (deferred)" for the
+  migration recipe. Migration is data-preserving; no need to
+  recreate this contractor's repo when we land it.
+
+  Proceeding without protection is acceptable for a private repo with
+  a single trusted contractor + admin; revisit once the GitHub App
+  path is implemented."""
 
 
-def verify_org_ruleset(*, dry_run: bool) -> None:
-    """Check the org-level `contractor-*` ruleset.
+def notify_protection_deferred(*, dry_run: bool) -> None:
+    """Surface the deferred-protection decision at onboarding time.
 
-    The query requires the `admin:org` gh scope, which is intentionally NOT
-    a prerequisite to run this script — repo creation only needs `repo`.
-    When the scope is missing (or the query fails for any reason) we print
-    the ruleset spec inline so the admin can verify in the GitHub UI and
-    then proceed. The check is purely advisory: the ruleset is configured
-    out-of-band, never by this script.
-    """
-    r = subprocess.run(
-        ["gh", "api", f"orgs/{ORG}/rulesets"],
-        capture_output=True, text=True,
-    )
-
-    if r.returncode != 0:
-        stderr = (r.stderr or "").lower()
-        if "admin:org" in stderr or "scope" in stderr:
-            print("NOTE: org ruleset check skipped — your `gh` token doesn't")
-            print("      have the `admin:org` scope (this is fine; repo creation")
-            print("      only needs `repo`). Verify the ruleset manually:")
-        else:
-            print(f"NOTE: couldn't query org rulesets ({r.stderr.strip()}).")
-            print("      Verify the ruleset manually:")
-        print(_RULESET_SPEC)
-        return
-
-    try:
-        rulesets = json.loads(r.stdout or "[]")
-    except json.JSONDecodeError:
-        rulesets = []
-    has_contractor_rule = any(
-        "contractor" in (rs.get("name") or "").lower() for rs in rulesets
-    )
-    if has_contractor_rule:
-        return
-
-    print("WARNING: no org-level ruleset matching `contractor-*` was found.")
-    print("  The new repo will be created without branch protection.")
-    print(_RULESET_SPEC)
+    Replaces the old `verify_org_ruleset` pre-flight (which urged the
+    admin to set up a ruleset we now know doesn't work — see PLAN.md
+    §8 "Branch protection on `main` — DEFERRED"). Under --dry-run the
+    notice prints but the script doesn't pause; under a real run the
+    admin presses Enter to acknowledge before any repo is created."""
+    print(_NO_PROTECTION_NOTICE)
     if not dry_run:
-        input("\n  Press Enter to continue anyway, or Ctrl-C to abort...")
+        input("\n  Press Enter to acknowledge and continue, "
+              "or Ctrl-C to abort...")
 
 
 # ─── Plan rendering ─────────────────────────────────────────────────────────
@@ -856,7 +828,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     verify_repo_doesnt_exist(inputs.handle)
-    verify_org_ruleset(dry_run=args.dry_run)
+    notify_protection_deferred(dry_run=args.dry_run)
 
     print(render_plan(inputs))
 
