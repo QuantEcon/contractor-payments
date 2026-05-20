@@ -125,7 +125,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--hourly-rate", type=float,
                    help="Hourly rate (hourly contracts only).")
     p.add_argument("--max-hours-per-month", type=float,
-                   help="Optional cap on hours per month (hourly contracts only).")
+                   help="Cap on hours per month (hourly contracts only). "
+                        "Submissions exceeding this are flagged in the PR "
+                        "as information for the approver — not blocked. "
+                        "Pair with --no-max-hours-per-month to declare the "
+                        "contract uncapped instead.")
+    p.add_argument("--no-max-hours-per-month", action="store_true",
+                   help="Declare an hourly contract as uncapped (no monthly "
+                        "ceiling). Required on hourly contracts unless "
+                        "--max-hours-per-month is supplied.")
     p.add_argument("--milestone-notes-file",
                    help="Path to a YAML file containing the structured "
                         "`milestones:` list (milestone contracts only). "
@@ -157,6 +165,29 @@ def _prompt_choice(label: str, choices: set[str]) -> str:
         if raw in choices:
             return raw
         print(f"  (must be one of: {options})")
+
+
+def _prompt_max_hours_per_month() -> Optional[float]:
+    """Prompt for the monthly cap. Returns a positive float, or None for
+    an explicit "uncapped" declaration (typed as `none` / `null`). Loops
+    on invalid input — empty is not accepted, the admin must make a
+    deliberate choice."""
+    while True:
+        raw = input("Max hours/month (number, or `none` for uncapped): ").strip()
+        if not raw:
+            print("  (required — enter a number or `none`)")
+            continue
+        if raw.lower() in ("none", "null"):
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            print("  (must be a number or `none`)")
+            continue
+        if value <= 0:
+            print("  (must be > 0)")
+            continue
+        return value
 
 
 def _read_address_file(path: str) -> str:
@@ -239,7 +270,12 @@ def load_config(path: str) -> dict:
         "max_hours_per_month": contract.get("max_hours_per_month"),
         "milestones": contract.get("milestones"),
     }
-    return {k: v for k, v in flat.items() if v is not None}
+    cleaned = {k: v for k, v in flat.items() if v is not None}
+    # Preserve explicit `max_hours_per_month: null` (uncapped) — distinct
+    # from "key absent" so resolve_inputs can require a deliberate choice.
+    if "max_hours_per_month" in contract:
+        cleaned["max_hours_per_month"] = contract.get("max_hours_per_month")
+    return cleaned
 
 
 def resolve_inputs(args: argparse.Namespace) -> Inputs:
@@ -305,13 +341,29 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
             hourly_rate = float(_prompt("Hourly rate"))
         else:
             hourly_rate = float(hourly_rate)
-        max_hours = pick(args.max_hours_per_month, "max_hours_per_month")
-        if max_hours is None and interactive:
-            raw = input("Max hours/month (optional, blank to skip): ").strip()
-            if raw:
-                max_hours = float(raw)
-        elif max_hours is not None:
-            max_hours = float(max_hours)
+        # Cap is required on hourly contracts: a number caps monthly hours
+        # (over-cap submissions are flagged in the PR for the approver to
+        # consider); an explicit `null` / --no-max-hours-per-month declares
+        # the contract uncapped. Three input paths:
+        #   - --no-max-hours-per-month flag → uncapped
+        #   - --max-hours-per-month <num> → numeric cap (CLI wins over config)
+        #   - config has the key (numeric or null) → use config value
+        #   - interactive prompt requiring a number or `none`
+        if args.no_max_hours_per_month:
+            max_hours = None
+        elif args.max_hours_per_month is not None:
+            max_hours = float(args.max_hours_per_month)
+        elif "max_hours_per_month" in config:
+            raw_cap = config["max_hours_per_month"]
+            max_hours = float(raw_cap) if raw_cap is not None else None
+        elif interactive:
+            max_hours = _prompt_max_hours_per_month()
+        else:
+            raise SystemExit(
+                "ERROR: hourly contracts require --max-hours-per-month <N> or "
+                "--no-max-hours-per-month (or `max_hours_per_month: <N>|null` "
+                "in the config file)."
+            )
     else:
         if args.milestone_notes_file:
             data = yaml.safe_load(
@@ -353,6 +405,13 @@ def validate(inputs: Inputs) -> list[str]:
         errors.append(f"contract_type `{inputs.contract_type}` invalid.")
     if inputs.contract_type == "hourly" and inputs.hourly_rate is None:
         errors.append("hourly contracts require --hourly-rate.")
+    if (inputs.contract_type == "hourly"
+            and inputs.max_hours_per_month is not None
+            and inputs.max_hours_per_month <= 0):
+        errors.append(
+            f"max_hours_per_month must be > 0 "
+            f"(got `{inputs.max_hours_per_month}`; use null/--no-max-hours-per-month for uncapped)."
+        )
     if inputs.contract_type == "milestone":
         for i, m in enumerate(inputs.milestones):
             if "id" not in m or "date" not in m or "amount" not in m:
@@ -477,8 +536,8 @@ def render_plan(inputs: Inputs) -> str:
     ]
     if inputs.contract_type == "hourly":
         lines.append(f"  Hourly rate   : {inputs.hourly_rate} {inputs.currency}")
-        if inputs.max_hours_per_month is not None:
-            lines.append(f"  Max hrs/month : {inputs.max_hours_per_month}")
+        cap = inputs.max_hours_per_month
+        lines.append(f"  Max hrs/month : {cap if cap is not None else 'uncapped'}")
     else:
         lines.append(f"  Milestones    : {len(inputs.milestones)} entries")
         for m in inputs.milestones:
@@ -612,11 +671,12 @@ def build_contract_yaml(inputs: Inputs) -> dict:
             "terms": {
                 "hourly_rate": inputs.hourly_rate,
                 "currency": inputs.currency,
+                # Always written: numeric = cap, null = explicitly uncapped.
+                # enrich_submission rejects hourly contracts missing this key.
+                "max_hours_per_month": inputs.max_hours_per_month,
             },
             "project": inputs.project,
         }
-        if inputs.max_hours_per_month is not None:
-            contract["terms"]["max_hours_per_month"] = inputs.max_hours_per_month
         return contract
     return {
         "contract_id": inputs.contract_id,

@@ -223,13 +223,19 @@ def enrich_submission(
                 f"but a hourly timesheet submission requires a `hourly` contract."
             )
         terms = contract.get("terms", {})
-        if "hourly_rate" not in terms or "currency" not in terms:
+        required = ("hourly_rate", "currency", "max_hours_per_month")
+        missing = [k for k in required if k not in terms]
+        if missing:
             raise ValueError(
-                f"Contract `{contract_id_in_contract}` is missing required terms "
-                f"(`hourly_rate` and `currency`)."
+                f"Contract `{contract_id_in_contract}` is missing required terms: "
+                f"{', '.join(f'`{k}`' for k in missing)}."
             )
         hourly_rate = float(terms["hourly_rate"])
         currency = terms["currency"]
+        # max_hours_per_month is required on the contract but may be null
+        # (explicit "uncapped" — admin chose not to set a monthly cap).
+        raw_cap = terms["max_hours_per_month"]
+        max_hours_per_month = float(raw_cap) if raw_cap is not None else None
         total_hours = submission["totals"]["hours"]
         amount = format_currency_amount(total_hours * hourly_rate, currency)
         rate_display = format_currency_amount(hourly_rate, currency)
@@ -242,6 +248,7 @@ def enrich_submission(
                 "rate": rate_display,
                 "amount": amount,
                 "currency": currency,
+                "max_hours_per_month": max_hours_per_month,
             },
         }
 
@@ -313,6 +320,16 @@ def render_pr_body(
         lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
     lines.append(f"**Total amount:** {totals['amount']} {totals['currency']}")
     lines.append("")
+    if submission_type == "timesheet":
+        cap = totals.get("max_hours_per_month")
+        if cap is not None and totals["hours"] > cap:
+            lines.extend([
+                f"> ⚠️ **Above contract cap** — submitted hours "
+                f"**{totals['hours']}** exceed the contract's "
+                f"`max_hours_per_month` of **{cap}**. "
+                f"Confirm out-of-band approval before merging.",
+                "",
+            ])
     if png_url:
         lines.extend([
             "### Preview",

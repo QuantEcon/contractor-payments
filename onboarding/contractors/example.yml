@@ -31,7 +31,11 @@ contract:
 
   # ── Hourly contracts ──
   hourly_rate: 50
-  max_hours_per_month: 40           # optional
+  # Required on hourly contracts. Submissions exceeding this cap are flagged
+  # in the PR description as information for the approver (not blocked) —
+  # so an RA can submit over-cap hours when out-of-band approval allows it.
+  # Set to `null` to declare the contract uncapped (no monthly ceiling).
+  max_hours_per_month: 40
 
   # ── Milestone contracts (instead of hourly_rate / max_hours_per_month) ──
   # milestones:

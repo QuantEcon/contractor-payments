@@ -246,6 +246,16 @@ class TestEnrichSubmission:
         assert result["totals"]["rate"] == 45.00
         assert result["totals"]["amount"] == 382.50
         assert result["totals"]["currency"] == "AUD"
+        # Cap propagated into totals so renderers can flag over-cap submissions.
+        assert result["totals"]["max_hours_per_month"] == 40
+
+    def test_uncapped_contract_propagates_null(self):
+        contract = {
+            **CONTRACT_HOURLY_AUD,
+            "terms": {**CONTRACT_HOURLY_AUD["terms"], "max_hours_per_month": None},
+        }
+        result = _enrich(contract=contract)
+        assert result["totals"]["max_hours_per_month"] is None
 
     def test_jpy_totals_are_integers(self):
         contract = {
@@ -291,6 +301,16 @@ class TestEnrichSubmission:
     def test_missing_terms_raises(self):
         bad_contract = {**CONTRACT_HOURLY_AUD, "terms": {"hourly_rate": 45.00}}
         with pytest.raises(ValueError, match="missing required terms"):
+            _enrich(contract=bad_contract)
+
+    def test_missing_max_hours_per_month_raises(self):
+        """The cap key is required (value may be null = uncapped) — admin
+        must make a deliberate choice rather than silently omitting it."""
+        bad_contract = {
+            **CONTRACT_HOURLY_AUD,
+            "terms": {"hourly_rate": 45.00, "currency": "AUD"},
+        }
+        with pytest.raises(ValueError, match="max_hours_per_month"):
             _enrich(contract=bad_contract)
 
     def test_no_revision_metadata_when_not_revision(self):
@@ -460,6 +480,64 @@ class TestRenderPrBody:
             warnings=[],
         )
         assert "Parse warnings" not in body
+
+    def test_over_cap_flag_appears_when_hours_exceed_cap(self):
+        """Info-only flag for the approver: hours > max_hours_per_month."""
+        over_cap_parsed = {
+            **PARSED_SAMPLE,
+            "entries": [{"date": "2025-01-06", "hours": 45.0, "description": "Heavy month"}],
+            "totals": {"hours": 45.0},
+        }
+        submission = enrich_submission(
+            over_cap_parsed,
+            CONTRACT_HOURLY_AUD,
+            submitter="janedoe",
+            submission_id="janedoe-timesheet-2025-01",
+            issue_number=42,
+            submitted_date="2025-02-01",
+        )
+        body = render_pr_body(
+            issue_number=42, submitter="janedoe",
+            submission=submission, submission_path_rel=self._path(),
+        )
+        assert "Above contract cap" in body
+        assert "45.0" in body
+        assert "40" in body
+
+    def test_no_flag_when_under_cap(self):
+        body = render_pr_body(
+            issue_number=42, submitter="janedoe",
+            submission=self._sample_submission(),
+            submission_path_rel=self._path(),
+        )
+        # 8.5 hours, cap 40 — should not flag.
+        assert "Above contract cap" not in body
+
+    def test_no_flag_when_contract_is_uncapped(self):
+        """Explicit null cap means the admin opted out of monthly ceiling —
+        no flag regardless of submitted hours."""
+        uncapped_contract = {
+            **CONTRACT_HOURLY_AUD,
+            "terms": {**CONTRACT_HOURLY_AUD["terms"], "max_hours_per_month": None},
+        }
+        big_parsed = {
+            **PARSED_SAMPLE,
+            "entries": [{"date": "2025-01-06", "hours": 200.0, "description": "Big push"}],
+            "totals": {"hours": 200.0},
+        }
+        submission = enrich_submission(
+            big_parsed,
+            uncapped_contract,
+            submitter="janedoe",
+            submission_id="janedoe-timesheet-2025-01",
+            issue_number=42,
+            submitted_date="2025-02-01",
+        )
+        body = render_pr_body(
+            issue_number=42, submitter="janedoe",
+            submission=submission, submission_path_rel=self._path(),
+        )
+        assert "Above contract cap" not in body
 
 
 # ─── Branch naming ──────────────────────────────────────────────────────────
