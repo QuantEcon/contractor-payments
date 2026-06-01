@@ -10,9 +10,11 @@ Recipients policy (PLAN §6, §9):
   - `testing_mode: true`  → To: $QUANTECON_EMAIL_REVIEWER, no Cc (PSL is
     NEVER contacted while testing_mode is on).
 
-The flag lives in `templates/fiscal-host.yml` under
-`notifications.testing_mode`. Defaults to true (testing) if missing —
-fail-safe to "don't email PSL".
+`testing_mode` resolves per-repo, most specific wins (see
+`_effective_testing_mode`):
+  1. contractor `config/settings.yml` → notifications.testing_mode
+  2. engine `templates/fiscal-host.yml` → notifications.testing_mode
+  3. True (fail-safe — "don't email PSL" if nothing is configured)
 
 Reply-To header is set to $SMTP_FROM (the payments@ alias). PSL's
 "Reply" lands at payments@ → routed to the underlying admin mailbox
@@ -77,7 +79,34 @@ def _read_testing_mode(fiscal_host_path: Path) -> bool:
         return True
     fiscal_host = _load_yaml(fiscal_host_path)
     notifications = fiscal_host.get("notifications", {}) or {}
-    return bool(notifications.get("testing_mode", True))
+    value = notifications.get("testing_mode", True)
+    # Present-but-null (`testing_mode:` with no value) parses to None; treat it
+    # as unset and fail safe to True rather than letting bool(None) == False
+    # silently enable production emailing.
+    return True if value is None else bool(value)
+
+
+def _effective_testing_mode(settings: dict, fiscal_host_path: Path) -> tuple[bool, str]:
+    """Resolve testing_mode with the per-repo override taking precedence over
+    the engine-wide default. Order (most specific wins):
+
+      1. contractor `config/settings.yml` → notifications.testing_mode
+      2. engine `templates/fiscal-host.yml` → notifications.testing_mode
+      3. True (fail-safe — never email PSL if nothing is configured)
+
+    The per-repo layer lets production and test repos coexist: a real
+    contractor opts into PSL delivery with `testing_mode: false` in their own
+    settings, while a test repo inherits the safe default with no config.
+    Returns (testing_mode, source) — `source` names the deciding layer for
+    operational logging and the audit comment."""
+    repo_notifications = settings.get("notifications") or {}
+    repo_value = repo_notifications.get("testing_mode")
+    # `is not None` (not `in`) so a present-but-null override counts as unset and
+    # falls through to the engine default — a blank `testing_mode:` must never
+    # silently flip a repo into production emailing.
+    if repo_value is not None:
+        return bool(repo_value), "repo settings.yml"
+    return _read_testing_mode(fiscal_host_path), "engine fiscal-host.yml default"
 
 
 def _require_env(name: str) -> str:
@@ -204,7 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     contractor = settings.get("contractor", {})
 
     fiscal_host_path = args.fiscal_host or (args.engine_templates / "fiscal-host.yml")
-    testing_mode = _read_testing_mode(fiscal_host_path)
+    testing_mode, testing_mode_source = _effective_testing_mode(settings, fiscal_host_path)
 
     psl_email = os.environ.get("PSL_EMAIL", "").strip()
     reviewer_email = os.environ.get("QUANTECON_EMAIL_REVIEWER", "").strip()
@@ -217,8 +246,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if testing_mode:
         to_addr = reviewer_email
         cc_addr = None
-        print(f"testing_mode=true — sending to {reviewer_email} only "
-              f"(PSL will not be contacted).", file=sys.stderr)
+        print(f"testing_mode=true ({testing_mode_source}) — sending to "
+              f"{reviewer_email} only (PSL will not be contacted).",
+              file=sys.stderr)
     else:
         if not psl_email:
             raise RuntimeError(
@@ -226,8 +256,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         to_addr = psl_email
         cc_addr = reviewer_email
-        print(f"testing_mode=false — sending to {psl_email} (Cc {reviewer_email}).",
-              file=sys.stderr)
+        print(f"testing_mode=false ({testing_mode_source}) — sending to "
+              f"{psl_email} (Cc {reviewer_email}).", file=sys.stderr)
 
     sender = _require_env("SMTP_FROM") if not args.dry_run else os.environ.get("SMTP_FROM", "<SMTP_FROM>")
     msg = compose_message(
@@ -267,6 +297,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "subject": msg["Subject"],
         "sent_at": sent_at,
         "testing_mode": testing_mode,
+        "testing_mode_source": testing_mode_source,
         "dry_run": args.dry_run,
     }
 

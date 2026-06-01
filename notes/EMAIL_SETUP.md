@@ -281,12 +281,18 @@ service-account mailbox by default. Two ways to handle:
 
 ## Once Phase 2 ships
 
-1. End-to-end test runs with `notifications.testing_mode: true` in
-   `templates/fiscal-host.yml`. PSL is never contacted — all mail goes to
-   `vars.QUANTECON_EMAIL_REVIEWER`.
-2. When you're satisfied (likely after a month of internal-only runs),
-   open `templates/fiscal-host.yml`, set `testing_mode: false`, commit
-   and push. Next merge fires email to PSL.
+`testing_mode` resolves per-repo (most specific wins): a contractor repo's
+`config/settings.yml` → `notifications.testing_mode` overrides the
+engine-wide default in `templates/fiscal-host.yml`, which stays `true` as the
+fail-safe. So:
 
-The flip is a one-line change. No code change needed, no credential
-shuffle. By design.
+1. End-to-end test runs stay safe by default — any repo that doesn't set
+   `testing_mode` inherits the engine `true`, so PSL is never contacted and
+   all mail goes to `vars.QUANTECON_EMAIL_REVIEWER`.
+2. To put a contractor into production, set `notifications.testing_mode: false`
+   in *their* `config/settings.yml`, commit and push. Their next merge fires
+   email to PSL; every other repo is unaffected. (`onboarding/new-contractor.py
+   --production` seeds this at onboarding time.)
+
+Production is a per-repo opt-in, not a global flip. No code change, no
+credential shuffle. By design.

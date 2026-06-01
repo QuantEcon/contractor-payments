@@ -111,7 +111,9 @@ def compose_comment(
             recipients = f"{recipients} (Cc {cc})"
         sent_at = email_summary.get("sent_at", "—")
         testing_mode = email_summary.get("testing_mode", True)
-        mode_note = " — `testing_mode=true`, PSL not contacted" if testing_mode else ""
+        source = email_summary.get("testing_mode_source")
+        src_suffix = f" (via {source})" if source else ""
+        mode_note = f" — `testing_mode=true`{src_suffix}, PSL not contacted" if testing_mode else ""
         dry_run = email_summary.get("dry_run", False)
         if dry_run:
             email_line = (
