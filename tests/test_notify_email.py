@@ -24,6 +24,9 @@ def _write_fiscal_host(tmp_path: Path, testing_mode) -> Path:
     path = tmp_path / "fiscal-host.yml"
     if testing_mode is _OMIT:
         path.write_text("notifications: {}\n", encoding="utf-8")
+    elif testing_mode is None:
+        # `testing_mode:` with no value — parses to None; must fail safe.
+        path.write_text("notifications:\n  testing_mode: null\n", encoding="utf-8")
     else:
         path.write_text(
             f"notifications:\n  testing_mode: {str(testing_mode).lower()}\n",
@@ -75,3 +78,15 @@ class TestEffectiveTestingMode:
         fh = _write_fiscal_host(tmp_path, True)
         assert _effective_testing_mode({"notifications": {"testing_mode": 0}}, fh)[0] is False
         assert _effective_testing_mode({"notifications": {"testing_mode": 1}}, fh)[0] is True
+
+    def test_engine_null_is_failsafe_true(self, tmp_path):
+        # `testing_mode: null` in the engine file must NOT coerce to production.
+        fh = _write_fiscal_host(tmp_path, None)
+        assert _effective_testing_mode({}, fh) == (True, _ENGINE_DEFAULT)
+
+    def test_repo_null_falls_through_not_production(self, tmp_path):
+        # A present-but-null repo override is "unset" — it falls through to the
+        # engine default rather than silently enabling production routing.
+        fh = _write_fiscal_host(tmp_path, True)
+        settings = {"notifications": {"testing_mode": None}}
+        assert _effective_testing_mode(settings, fh) == (True, _ENGINE_DEFAULT)

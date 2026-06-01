@@ -79,7 +79,11 @@ def _read_testing_mode(fiscal_host_path: Path) -> bool:
         return True
     fiscal_host = _load_yaml(fiscal_host_path)
     notifications = fiscal_host.get("notifications", {}) or {}
-    return bool(notifications.get("testing_mode", True))
+    value = notifications.get("testing_mode", True)
+    # Present-but-null (`testing_mode:` with no value) parses to None; treat it
+    # as unset and fail safe to True rather than letting bool(None) == False
+    # silently enable production emailing.
+    return True if value is None else bool(value)
 
 
 def _effective_testing_mode(settings: dict, fiscal_host_path: Path) -> tuple[bool, str]:
@@ -96,8 +100,12 @@ def _effective_testing_mode(settings: dict, fiscal_host_path: Path) -> tuple[boo
     Returns (testing_mode, source) — `source` names the deciding layer for
     operational logging and the audit comment."""
     repo_notifications = settings.get("notifications") or {}
-    if "testing_mode" in repo_notifications:
-        return bool(repo_notifications["testing_mode"]), "repo settings.yml"
+    repo_value = repo_notifications.get("testing_mode")
+    # `is not None` (not `in`) so a present-but-null override counts as unset and
+    # falls through to the engine default — a blank `testing_mode:` must never
+    # silently flip a repo into production emailing.
+    if repo_value is not None:
+        return bool(repo_value), "repo settings.yml"
     return _read_testing_mode(fiscal_host_path), "engine fiscal-host.yml default"
 
 
