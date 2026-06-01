@@ -16,3 +16,11 @@ contractor:
   address: $CONTRACTOR_ADDRESS_BLOCK
 
 admin: $ADMIN
+
+# Approval-email routing for THIS repo. Overrides the engine-wide default in
+# contractor-payments/templates/fiscal-host.yml (notifications.testing_mode).
+#   testing_mode: false → approved submissions email PSL Foundation (production)
+#   testing_mode: true  → emails stay with the QuantEcon reviewer only (safe)
+# Delete this block to inherit the engine default (fail-safe: testing).
+notifications:
+  testing_mode: $TESTING_MODE

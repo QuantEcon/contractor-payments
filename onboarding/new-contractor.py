@@ -73,6 +73,7 @@ class Inputs:
     currency: str
     hourly_rate: Optional[float] = None
     max_hours_per_month: Optional[float] = None
+    testing_mode: bool = True
     milestones: list[dict] = field(default_factory=list)
 
 
@@ -136,6 +137,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="Path to a YAML file containing the structured "
                         "`milestones:` list (milestone contracts only). "
                         "If omitted, $EDITOR opens a template.")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--production", action="store_true",
+                      help="Set notifications.testing_mode=false for this repo: "
+                           "approved submissions email PSL Foundation (production). "
+                           "Default is testing mode (emails stay with the reviewer).")
+    mode.add_argument("--testing", action="store_true",
+                      help="Force notifications.testing_mode=true (the default): "
+                           "approval emails stay internal to the QuantEcon reviewer.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the plan; skip all side effects.")
     p.add_argument("-y", "--yes", action="store_true",
@@ -267,6 +276,7 @@ def load_config(path: str) -> dict:
         "hourly_rate": contract.get("hourly_rate"),
         "max_hours_per_month": contract.get("max_hours_per_month"),
         "milestones": contract.get("milestones"),
+        "testing_mode": raw.get("testing_mode"),
     }
     cleaned = {k: v for k, v in flat.items() if v is not None}
     # Preserve explicit `max_hours_per_month: null` (uncapped) — distinct
@@ -373,12 +383,23 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
         else:
             milestones = _open_editor_for_milestones()
 
+    # Email mode: production (testing_mode=false) is an explicit opt-in, so both
+    # the default and the silence-fallback are "testing" (never email PSL).
+    if args.production:
+        testing_mode = False
+    elif args.testing:
+        testing_mode = True
+    elif "testing_mode" in config:
+        testing_mode = bool(config["testing_mode"])
+    else:
+        testing_mode = True
+
     return Inputs(
         handle=handle, name=name, email=email, address=address, admin=admin,
         project=project, contract_id=contract_id, contract_type=contract_type,
         start_date=start_date, end_date=end_date, currency=currency,
         hourly_rate=hourly_rate, max_hours_per_month=max_hours,
-        milestones=milestones,
+        testing_mode=testing_mode, milestones=milestones,
     )
 
 
@@ -517,6 +538,10 @@ def render_plan(inputs: Inputs) -> str:
                 f"    #{m['id']:>2} {m['date']}  "
                 f"{m['amount']} {inputs.currency}  {m.get('description', '')}"
             )
+    mode_str = ("TESTING — emails go to the QuantEcon reviewer only (PSL NOT contacted)"
+                if inputs.testing_mode
+                else "PRODUCTION — approved submissions email PSL Foundation")
+    lines.append(f"  Email mode    : {mode_str}")
     lines += [
         "",
         "Steps:",
@@ -613,6 +638,7 @@ def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
         "MILESTONE_CONTRACT_OPTIONS": _contract_options_yaml(milestone_ids),
         "HOURLY_CONTRACT_REMINDER": _hourly_contract_reminder(inputs),
         "MILESTONE_CONTRACT_REMINDER": _milestone_contract_reminder(inputs),
+        "TESTING_MODE": "true" if inputs.testing_mode else "false",
     }
     templated_files = [
         ".github/CODEOWNERS",

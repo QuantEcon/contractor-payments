@@ -65,6 +65,9 @@ the most recent completed period. No edits, no errors.
    - Updates the pinned ledger issue with the new running total.
    - Sends approval email (To: PSL when `testing_mode: false`, Cc the
      QuantEcon reviewer; To: reviewer only when `testing_mode: true`).
+     `testing_mode` resolves per-repo: the contractor repo's
+     `config/settings.yml` overrides the engine default in
+     `templates/fiscal-host.yml` (which stays `true` as fail-safe).
    - Posts an audit comment on **both** the original submission issue
      and the merged PR.
    - Applies the `processed` label to the PR.
