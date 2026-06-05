@@ -414,8 +414,9 @@ class TestEnrichMilestoneSubmission:
         assert "hours" not in result["totals"]
         assert "rate" not in result["totals"]
 
-    def test_funding_code_passthrough(self):
-        # Milestone contracts carry the same `project` funding code.
+    def test_project_field_passthrough(self):
+        # The contract's `project` field passes through on milestone invoices
+        # too — passthrough is value-agnostic (no funding-code format enforced).
         result = _enrich_milestone()
         assert result["project"] == "iuj-visit"
 
