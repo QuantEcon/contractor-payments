@@ -20,7 +20,8 @@ address: |                          # optional, multi-line, rendered on PDFs
   123 Main St
   Apt 4B
   SomeCity, 10001
-project: numpy-lectures             # free-form
+project: CHOW                       # PSL funding/billing code — rendered as "Project" on PDFs (optional)
+role: Research Assistant            # descriptive role — contract metadata only (optional)
 
 contract:
   id: QE-PSL-2026-001               # suggested format: QE-{PAYER}-YYYY-NNN

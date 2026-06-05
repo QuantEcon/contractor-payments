@@ -239,6 +239,19 @@ class TestEnrichSubmission:
         assert result["contract_start_date"] == "2025-01-01"
         assert result["contract_end_date"] == "2025-12-31"
 
+    def test_funding_code_passthrough(self):
+        # The PSL funding/billing code on the contract flows into the enriched
+        # submission as `project`, which the template renders as "Project".
+        contract = {**CONTRACT_HOURLY_AUD, "project": "CHOW"}
+        result = _enrich(contract=contract)
+        assert result["project"] == "CHOW"
+
+    def test_funding_code_none_when_contract_omits_it(self):
+        # CONTRACT_HOURLY_AUD carries no `project` — enrichment passes None
+        # through so the template omits the Project line (backward-compat).
+        result = _enrich()
+        assert result["project"] is None
+
     def test_totals_computed_correctly(self):
         result = _enrich()
         # 8.5 hours * 45.00 AUD = 382.50
@@ -400,6 +413,11 @@ class TestEnrichMilestoneSubmission:
         assert result["totals"]["currency"] == "JPY"
         assert "hours" not in result["totals"]
         assert "rate" not in result["totals"]
+
+    def test_funding_code_passthrough(self):
+        # Milestone contracts carry the same `project` funding code.
+        result = _enrich_milestone()
+        assert result["project"] == "iuj-visit"
 
     def test_milestone_entries_amounts_formatted_for_currency(self):
         # JPY should produce int amounts (no decimals).

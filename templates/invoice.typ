@@ -7,6 +7,7 @@
 // Required data fields:
 //   submission_id (str), contract_id (str), type ("milestone_invoice"),
 //   period (str), contract_start_date (str ISO), contract_end_date (str ISO),
+//   project (str, optional — PSL funding/billing code shown as "Project"),
 //   submitted_date (str ISO), submitted_by (str), issue_number (int),
 //   entries (list of {id, date, amount, amount_display, description}),
 //   totals ({amount_amount_display, currency}),
@@ -129,7 +130,17 @@
   [#data.contractor.email · `@`#data.contractor.github],
   if contractor_address != none { contractor_address } else { none },
 )
-#let contract_cell = column_stack([#data.contract_id], contract_window)
+// PSL funding/billing code, rendered under the contract window as "Project".
+// Optional — only contracts carrying a code render this line (column_stack
+// drops the `none` an unset code produces).
+#let contract_project = data.at("project", default: none)
+#let contract_cell = column_stack(
+  [#data.contract_id],
+  contract_window,
+  if contract_project != none and contract_project != "" {
+    [#label("Project") #h(0.5em) #contract_project]
+  },
+)
 #let period_cell = column_stack([#data.period])
 
 #block(
