@@ -65,7 +65,8 @@ class Inputs:
     email: str
     address: str  # may be empty
     admin: str
-    project: str
+    project: str  # PSL funding/billing code (e.g. CHOW); shown as "Project" on PDFs
+    role: str     # descriptive role (e.g. Research Assistant); contract metadata only
     contract_id: str
     contract_type: str
     start_date: str
@@ -111,7 +112,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         "postal address (optional, multi-line allowed).")
     p.add_argument("--admin", default=DEFAULT_ADMIN,
                    help=f"Admin handle for CODEOWNERS (default: {DEFAULT_ADMIN}).")
-    p.add_argument("--project", help="Free-form project name (e.g. python-lectures).")
+    p.add_argument("--project",
+                   help="PSL funding/billing code, e.g. CHOW. Rendered as "
+                        "'Project' on generated PDFs — the project billed against.")
+    p.add_argument("--role",
+                   help="Descriptive role, e.g. \"Research Assistant\". Stored as "
+                        "contract metadata; not shown on PDFs.")
     p.add_argument("--contract-id",
                    help="Contract ID, e.g. QE-PSL-2026-001. Suggested format "
                         "QE-{PAYER}-YYYY-NNN; system accepts any string.")
@@ -268,6 +274,7 @@ def load_config(path: str) -> dict:
         "address": raw.get("address"),  # actual text, not a file path
         "admin": raw.get("admin"),
         "project": raw.get("project"),
+        "role": raw.get("role"),
         "contract_id": contract.get("id"),
         "contract_type": contract.get("type"),
         "start_date": _str(contract.get("start_date")),
@@ -316,9 +323,25 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
         address = ""
 
     admin = pick(args.admin, "admin") or DEFAULT_ADMIN
-    project = pick(args.project, "project") or _prompt(
-        "Project name", default=f"{handle}-work",
-    )
+
+    # `project` carries the PSL funding/billing code (e.g. CHOW) — the project
+    # billed against, surfaced as "Project" on PDFs. Optional: not every
+    # contract has a code assigned at onboarding time, so blank is allowed.
+    project = pick(args.project, "project")
+    if project is None and interactive:
+        project = input(
+            "Funding/billing code (e.g. CHOW, optional — blank to skip): "
+        ).strip()
+    project = project or ""
+
+    # `role` is the descriptive role (e.g. Research Assistant) — contract
+    # metadata only, not rendered on PDFs.
+    role = pick(args.role, "role")
+    if role is None and interactive:
+        role = input(
+            "Role (e.g. Research Assistant, optional — blank to skip): "
+        ).strip()
+    role = role or ""
 
     default_contract = f"QE-{DEFAULT_PAYER}-{date.today().year}-001"
     contract_id = pick(args.contract_id, "contract_id") or _prompt(
@@ -396,7 +419,8 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
 
     return Inputs(
         handle=handle, name=name, email=email, address=address, admin=admin,
-        project=project, contract_id=contract_id, contract_type=contract_type,
+        project=project, role=role, contract_id=contract_id,
+        contract_type=contract_type,
         start_date=start_date, end_date=end_date, currency=currency,
         hourly_rate=hourly_rate, max_hours_per_month=max_hours,
         testing_mode=testing_mode, milestones=milestones,
@@ -522,7 +546,8 @@ def render_plan(inputs: Inputs) -> str:
         f"  Email         : {inputs.email}",
         f"  Address       : {inputs.address or '(none)'}",
         f"  Admin         : @{inputs.admin}",
-        f"  Project       : {inputs.project}",
+        f"  Project (code): {inputs.project or '(none)'}",
+        f"  Role          : {inputs.role or '(none)'}",
         f"  Contract      : {inputs.contract_id} ({inputs.contract_type}, "
         f"{inputs.currency})",
         f"  Period        : {inputs.start_date} → {inputs.end_date}",
@@ -673,19 +698,27 @@ def build_contract_yaml(inputs: Inputs) -> dict:
                 # enrich_submission rejects hourly contracts missing this key.
                 "max_hours_per_month": inputs.max_hours_per_month,
             },
-            "project": inputs.project,
         }
+        # project = PSL funding code (optional); role = descriptive metadata.
+        if inputs.project:
+            contract["project"] = inputs.project
+        if inputs.role:
+            contract["role"] = inputs.role
         return contract
-    return {
+    contract = {
         "contract_id": inputs.contract_id,
         "type": "milestone",
         "status": "active",
         "start_date": inputs.start_date,
         "end_date": inputs.end_date,
         "currency": inputs.currency,
-        "project": inputs.project,
-        "milestones": inputs.milestones,
     }
+    if inputs.project:
+        contract["project"] = inputs.project
+    if inputs.role:
+        contract["role"] = inputs.role
+    contract["milestones"] = inputs.milestones
+    return contract
 
 
 def write_contract(clone_dir: Path, contract: dict, *, dry_run: bool) -> Path:

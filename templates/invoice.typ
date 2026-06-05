@@ -7,6 +7,7 @@
 // Required data fields:
 //   submission_id (str), contract_id (str), type ("milestone_invoice"),
 //   period (str), contract_start_date (str ISO), contract_end_date (str ISO),
+//   project (str, optional — PSL funding/billing code shown as "Project"),
 //   submitted_date (str ISO), submitted_by (str), issue_number (int),
 //   entries (list of {id, date, amount, amount_display, description}),
 //   totals ({amount_amount_display, currency}),
@@ -129,7 +130,27 @@
   [#data.contractor.email · `@`#data.contractor.github],
   if contractor_address != none { contractor_address } else { none },
 )
-#let contract_cell = column_stack([#data.contract_id], contract_window)
+// PSL funding/billing code — a "Project" sub-section inside the Contract
+// column: contract id + window, then (when a code is present) a "Project"
+// label with an underline and the code below, styled like the column headers.
+#let contract_project = data.at("project", default: none)
+#let has_project = contract_project != none and contract_project != ""
+#let contract_cell = {
+  column_stack([#data.contract_id], contract_window)
+  if has_project {
+    // Zero default inter-paragraph spacing so the Project sub-section mirrors
+    // the band's header→rule→value rhythm: a 2pt gap under the label (the
+    // header inset) and row-gutter (0.55em) + inset below the rule — the same
+    // title→content spacing the Contract column above uses.
+    set par(spacing: 0pt)
+    v(0.16cm)
+    label("Project")
+    v(2pt)
+    line(length: 100%, stroke: 0.4pt + rule)
+    v(0.55em + 2pt)
+    contract_project
+  }
+}
 #let period_cell = column_stack([#data.period])
 
 #block(

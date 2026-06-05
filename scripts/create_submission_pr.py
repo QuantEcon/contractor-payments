@@ -198,6 +198,9 @@ def enrich_submission(
         "contract_id": contract_id_in_submission,
         "contract_start_date": contract.get("start_date"),
         "contract_end_date": contract.get("end_date"),
+        # PSL funding/billing code — rendered as "Project" on the PDF. Absent
+        # on contracts that pre-date the field (None → template omits the line).
+        "project": contract.get("project"),
         "type": submission_type,
         "period": submission["period"],
         "submitted_date": submitted_date,

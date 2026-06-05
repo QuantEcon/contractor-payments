@@ -222,7 +222,8 @@ terms:
   currency: AUD               # ISO 4217 — AUD | USD | JPY supported in v1
   max_hours_per_month: 40
 
-project: python-lectures      # free-form
+project: CHOW                 # PSL funding/billing code (billed-against); shown as "Project" on PDFs
+role: Research Assistant      # descriptive role — contract metadata only
 
 ledger_issue: 5               # GitHub issue # for the auto-updated ledger view (Phase 2)
 
@@ -242,7 +243,8 @@ end_date: 2026-02-28
 
 currency: JPY                 # default currency for milestone claims
 
-project: iuj-visit
+project: CHOW                 # PSL funding/billing code (billed-against); shown as "Project" on PDFs
+role: Visiting Researcher     # descriptive role — contract metadata only
 
 milestones:                   # pre-declared schedule; canonical source of truth
   - id: 1
@@ -603,7 +605,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
    - Real name
    - Email
    - Payments manager GitHub handle (defaulted from a config or prior run)
-   - First contract: type (hourly | milestone), start date, end date, rate (hourly) or schedule notes (milestone), **currency** (AUD / USD / JPY; validates against the v1 supported list), project name
+   - First contract: type (hourly | milestone), start date, end date, rate (hourly) or schedule notes (milestone), **currency** (AUD / USD / JPY; validates against the v1 supported list), project funding code (e.g. CHOW), role
 2. Creates `QuantEcon/contractor-{handle}` as a private repo.
 3. Seeds the repo from `contractor-template/`, substituting prompted values into `config/settings.yml`, `README.md`, `CODEOWNERS`, and the contract YAML. Both `hourly-timesheet.yml` and `milestone-invoice.yml` issue templates are seeded unconditionally; the contractor's "New Issue" page surfaces whichever ones the dropdowns aren't empty for (which is governed by the contract types they have).
 4. Generates `contracts/{contract-id}.yml` from the prompted contract details.
