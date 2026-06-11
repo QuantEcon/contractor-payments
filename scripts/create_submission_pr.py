@@ -1,11 +1,16 @@
-"""Create a submission PR from a parsed timesheet issue.
+"""Create a submission PR from a parsed submission issue.
 
 Pipeline:
   1. Load the parsed submission JSON (parse_issue.py --output-json).
-  2. Load the referenced contract from contracts/{contract_id}.yml.
+  2. Load the referenced contract from contracts/{contract_id}.yml —
+     or, for contractor-level reimbursement claims, the repo's
+     config/reimbursements.yml (funding project code; no contract).
   3. Enrich the submission with metadata (id, dates, submitter) and computed
-     totals (rate, amount, currency derived from the contract).
-  4. Write the submission YAML to submissions/{period}/{submission_id}.yml.
+     totals (rate, amount, currency derived from the contract; entry sums
+     for invoices and claims).
+  4. Write the submission YAML to submissions/{period}/{submission_id}.yml
+     (+ fetched receipt files under receipts/{period}/{submission_id}/ for
+     reimbursements — see fetch_receipts.py).
   5. Create a branch, commit, push.
   6. Open a PR with `Closes #{issue}` in the body.
 
@@ -23,6 +28,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +48,7 @@ from scripts.parse_issue import cross_check_milestone_ids
 _TYPE_SLUG = {
     "timesheet": "timesheet",
     "milestone_invoice": "invoice",
+    "reimbursement": "reimbursement",
 }
 
 
@@ -289,6 +296,142 @@ def enrich_submission(
     raise ValueError(f"Unknown submission type `{submission_type}`.")
 
 
+def enrich_reimbursement(
+    submission: dict,
+    reimbursements_config: dict,
+    *,
+    submitter: str,
+    submission_id: str,
+    issue_number: int,
+    submitted_date: str,
+    supersedes: Optional[str] = None,
+    receipts_manifest: Optional[list[dict]] = None,
+) -> dict:
+    """Combine the parser's reimbursement submission with the repo's
+    `config/reimbursements.yml` + metadata.
+
+    Reimbursements are contractor-level (§4.7): there is no contract
+    reference, and the PSL funding `project` code comes from the
+    reimbursements config. Kept separate from `enrich_submission` so the
+    contract-backed production path keeps its signature and its
+    contract-mismatch guard untouched.
+
+    `receipts_manifest` is the fetch_receipts manifest (`filename` +
+    `source_url` per receipt); the committed YAML references the committed
+    filenames, keeping the original attachment URL for audit only. When the
+    fetch hasn't run (validate dry-run, --skip flows) the parser's
+    attachment links are recorded as-is.
+    """
+    if submission.get("type") != "reimbursement":
+        raise ValueError(
+            f"enrich_reimbursement called with type "
+            f"`{submission.get('type')}` — expected `reimbursement`."
+        )
+
+    currency = submission["totals"]["currency"]
+    entries = sorted(submission["entries"], key=lambda e: e["date"])
+    for e in entries:
+        e["amount"] = format_currency_amount(e["amount"], currency)
+    total_amount = format_currency_amount(
+        sum(e["amount"] for e in entries),
+        currency,
+    )
+
+    if receipts_manifest:
+        receipts = [
+            {"filename": m["filename"], "source_url": m["source_url"]}
+            for m in receipts_manifest
+        ]
+    else:
+        receipts = [
+            {"filename": r["name"], "source_url": r["url"]}
+            for r in submission.get("receipts", [])
+        ]
+
+    enriched = {
+        "submission_id": submission_id,
+        # PSL funding/billing code — rendered as "Project" on the PDF, in
+        # place of the contract reference the other types carry.
+        "project": reimbursements_config["project"],
+        "type": "reimbursement",
+        "period": submission["period"],
+        "submitted_date": submitted_date,
+        "submitted_by": submitter,
+        "issue_number": issue_number,
+        "trip_context": submission.get("trip_context", ""),
+        "receipts": receipts,
+        "notes": submission.get("notes", ""),
+        "status": "pending",
+        "approved_by": None,
+        "approved_date": None,
+    }
+    if supersedes:
+        enriched["supersedes"] = supersedes
+        enriched["revision_of"] = _strip_revision_suffix(supersedes)
+    enriched["entries"] = entries
+    enriched["totals"] = {"amount": total_amount, "currency": currency}
+    return enriched
+
+
+def load_reimbursements_config(
+    repo_root: Path,
+    rel_path: str = "config/reimbursements.yml",
+) -> dict:
+    """Load the repo's reimbursement arrangement. Fails loud: a reimbursement
+    submission reaching this point in a repo without the config (or without a
+    funding `project` code) is a repo misconfiguration, not contractor error."""
+    path = repo_root / rel_path
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Reimbursements config not found: {path}. Reimbursement claims "
+            f"require config/reimbursements.yml (PSL funding `project` code, "
+            f"`allowed_categories`); enable reimbursements for this repo via "
+            f"onboarding/sync_templates.py."
+        )
+    with open(path, encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    if not config.get("project"):
+        raise ValueError(
+            f"`project` (PSL funding code) is missing from {path} — required "
+            f"so PSL can bill the claim against the right cost centre."
+        )
+    return config
+
+
+def place_receipts(
+    staging_dir: Path,
+    receipts_manifest: list[dict],
+    submission: dict,
+    repo_root: Path,
+) -> list[Path]:
+    """Copy fetched receipt files from the staging dir into the repo at
+    `receipts/{period}/{submission_id}/`.
+
+    Runs after suffix resolution so -B / -vN claims get their own directory
+    (which is why fetch_receipts stages to a temp dir first). Returns the
+    in-repo paths for staging."""
+    out_dir = (
+        repo_root / "receipts" / submission["period"] / submission["submission_id"]
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    placed: list[Path] = []
+    for entry in receipts_manifest:
+        destination = out_dir / entry["filename"]
+        shutil.copy2(staging_dir / entry["filename"], destination)
+        placed.append(destination)
+    return placed
+
+
+# PR-body size warnings for committed receipts: Gmail rejects messages over
+# ~25 MB, and the approval email carries the claim PDF + every receipt.
+_RECEIPT_FILE_WARN_BYTES = 10 * 1024 * 1024
+_RECEIPT_TOTAL_WARN_BYTES = 15 * 1024 * 1024
+
+
+def _mb(size_in_bytes: int) -> str:
+    return f"{size_in_bytes / (1024 * 1024):.1f} MB"
+
+
 def render_pr_body(
     issue_number: int,
     submitter: str,
@@ -297,17 +440,22 @@ def render_pr_body(
     pdf_path_rel: Optional[str] = None,
     png_url: Optional[str] = None,
     warnings: Optional[list[dict]] = None,
+    receipts_manifest: Optional[dict] = None,
 ) -> str:
     """Compose the PR body. Includes `Closes #N` so merge closes the issue.
 
     `png_url` is a full raw URL to the rendered preview image so reviewers
     see it inline in the PR description without leaving the review surface.
+    `receipts_manifest` is fetch_receipts' output (`receipts` + `total_bytes`)
+    for reimbursement claims — rendered as a file list with sizes plus
+    non-blocking warnings when the bundle approaches the email size cap.
     """
     totals = submission["totals"]
     submission_type = submission.get("type", "timesheet")
     type_label = {
         "timesheet": "Timesheet",
         "milestone_invoice": "Milestone Invoice",
+        "reimbursement": "Reimbursement Claim",
     }.get(submission_type, "Submission")
 
     lines = [
@@ -315,12 +463,17 @@ def render_pr_body(
         "",
         f"**Type:** {type_label}",
         f"**Period:** `{submission['period']}`",
-        f"**Contract:** `{submission['contract_id']}`",
     ]
-    if submission_type == "timesheet":
-        lines.append(f"**Total hours:** {totals['hours']}")
+    if submission_type == "reimbursement":
+        # Contractor-level: no contract; the PSL funding code stands in.
+        lines.append(f"**Project:** `{submission['project']}`")
+        lines.append(f"**Line items:** {len(submission['entries'])}")
     else:
-        lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
+        lines.append(f"**Contract:** `{submission['contract_id']}`")
+        if submission_type == "timesheet":
+            lines.append(f"**Total hours:** {totals['hours']}")
+        else:
+            lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
     lines.append(f"**Total amount:** {totals['amount']} {totals['currency']}")
     lines.append("")
     if submission_type == "timesheet":
@@ -331,6 +484,32 @@ def render_pr_body(
                 f"**{totals['hours']}** exceed the contract's "
                 f"`max_hours_per_month` of **{cap}**. "
                 f"Confirm out-of-band approval before merging.",
+                "",
+            ])
+    if submission_type == "reimbursement" and receipts_manifest:
+        receipt_entries = receipts_manifest.get("receipts", [])
+        total_bytes = receipts_manifest.get(
+            "total_bytes", sum(e.get("bytes", 0) for e in receipt_entries)
+        )
+        lines.append("### Receipts")
+        lines.append("")
+        for entry in receipt_entries:
+            lines.append(f"- `{entry['filename']}` — {_mb(entry['bytes'])}")
+        lines.append(f"- **Total:** {_mb(total_bytes)} across {len(receipt_entries)} file(s)")
+        lines.append("")
+        oversized = [e for e in receipt_entries if e.get("bytes", 0) > _RECEIPT_FILE_WARN_BYTES]
+        for entry in oversized:
+            lines.extend([
+                f"> ⚠️ **Large receipt** — `{entry['filename']}` is "
+                f"{_mb(entry['bytes'])}. The approval email attaches every "
+                f"receipt; consider a smaller export.",
+                "",
+            ])
+        if total_bytes > _RECEIPT_TOTAL_WARN_BYTES:
+            lines.extend([
+                f"> ⚠️ **Receipts bundle is {_mb(total_bytes)}** — the approval "
+                f"email (claim PDF + receipts) may exceed the ~25 MB send limit. "
+                f"Consider splitting the claim before merging.",
                 "",
             ])
     if png_url:
@@ -437,6 +616,7 @@ def stage_and_commit(
     type_label = {
         "timesheet": "timesheet",
         "milestone_invoice": "milestone invoice",
+        "reimbursement": "reimbursement claim",
     }.get(submission_type, "submission")
     verb = "Update" if update else "Add"
     _run([
@@ -584,6 +764,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "chain anchor, `supersedes` + `revision_of` metadata "
                         "stamped in the YAML, and `(revision)` appended to the PR "
                         "title. See PLAN §8 Phase 2.5.")
+    p.add_argument("--receipts-manifest", default=None,
+                   help="Manifest JSON from fetch_receipts.py. Reimbursement "
+                        "claims only; ignored (and may be absent/empty) for "
+                        "other types.")
+    p.add_argument("--receipts-staging-dir", default=None,
+                   help="Staging directory fetch_receipts.py downloaded into. "
+                        "Required when --receipts-manifest has entries.")
     args = p.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -626,9 +813,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             errs_data = json.load(f)
         warnings = errs_data.get("warnings", [])
 
-    contract = load_contract(repo_root, parsed["contract_id"])
-
     submission_type = parsed.get("type", "timesheet")
+
+    # Contract-backed types load their contract; reimbursements are
+    # contractor-level and load config/reimbursements.yml instead.
+    contract: Optional[dict] = None
+    reimbursements_config: Optional[dict] = None
+    if submission_type == "reimbursement":
+        reimbursements_config = load_reimbursements_config(repo_root)
+    else:
+        contract = load_contract(repo_root, parsed["contract_id"])
+
+    receipts_manifest_data: Optional[dict] = None
+    if args.receipts_manifest and Path(args.receipts_manifest).exists():
+        with open(args.receipts_manifest, encoding="utf-8") as f:
+            manifest_candidate = json.load(f)
+        if manifest_candidate.get("receipts"):
+            receipts_manifest_data = manifest_candidate
+
     base_id = generate_submission_id(
         args.issue_author, parsed["period"], submission_type=submission_type
     )
@@ -652,24 +854,39 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-    submission = enrich_submission(
-        parsed,
-        contract,
-        submitter=args.issue_author,
-        submission_id=submission_id,
-        issue_number=args.issue_number,
-        submitted_date=args.submitted_date,
-        supersedes=args.supersedes,
-    )
+    if submission_type == "reimbursement":
+        submission = enrich_reimbursement(
+            parsed,
+            reimbursements_config,
+            submitter=args.issue_author,
+            submission_id=submission_id,
+            issue_number=args.issue_number,
+            submitted_date=args.submitted_date,
+            supersedes=args.supersedes,
+            receipts_manifest=(
+                receipts_manifest_data["receipts"]
+                if receipts_manifest_data else None
+            ),
+        )
+    else:
+        submission = enrich_submission(
+            parsed,
+            contract,
+            submitter=args.issue_author,
+            submission_id=submission_id,
+            issue_number=args.issue_number,
+            submitted_date=args.submitted_date,
+            supersedes=args.supersedes,
+        )
 
-    # Phase 3b: non-blocking cross-check between submitted milestone IDs and
-    # the contract's pre-declared schedule. Surfaces as warnings on the PR
-    # body so the admin sees typos at review time without the engine
-    # rejecting otherwise-valid submissions. No-op for hourly contracts and
-    # for milestone contracts that don't carry a structured `milestones[]`
-    # list yet.
-    for w in cross_check_milestone_ids(submission, contract):
-        warnings.append({"message": w.message})
+        # Phase 3b: non-blocking cross-check between submitted milestone IDs
+        # and the contract's pre-declared schedule. Surfaces as warnings on
+        # the PR body so the admin sees typos at review time without the
+        # engine rejecting otherwise-valid submissions. No-op for hourly
+        # contracts and for milestone contracts that don't carry a structured
+        # `milestones[]` list yet.
+        for w in cross_check_milestone_ids(submission, contract):
+            warnings.append({"message": w.message})
 
     # If there's an open PR for this branch, switch to the branch BEFORE
     # writing any artifacts (untracked files would conflict with the
@@ -683,13 +900,31 @@ def main(argv: Optional[list[str]] = None) -> int:
     yaml_rel = yaml_path.relative_to(repo_root).as_posix()
     print(f"Wrote {yaml_rel}")
 
+    # Commit fetched receipts alongside the claim (reimbursements only).
+    # Placement happens here — after suffix resolution — so -B / -vN claims
+    # land in their own receipts/{period}/{submission_id}/ directory.
+    receipt_paths: list[Path] = []
+    if receipts_manifest_data:
+        if not args.receipts_staging_dir:
+            print("ERROR: --receipts-manifest has entries but "
+                  "--receipts-staging-dir was not given.", file=sys.stderr)
+            return 2
+        receipt_paths = place_receipts(
+            Path(args.receipts_staging_dir),
+            receipts_manifest_data["receipts"],
+            submission,
+            repo_root,
+        )
+        for receipt_path in receipt_paths:
+            print(f"Wrote {receipt_path.relative_to(repo_root).as_posix()}")
+
     # Render the PDF + PNG preview (both in pending state — approval block
     # says "PENDING REVIEW"). PDF is the authoritative artifact for the
     # payments manager; PNG is the inline preview embedded in the PR body
     # so reviewers see it without leaving the PR.
     pdf_rel: Optional[str] = None
     png_url: Optional[str] = None
-    paths_to_stage: list[Path] = [yaml_path]
+    paths_to_stage: list[Path] = [yaml_path, *receipt_paths]
     if not args.skip_pdf:
         pdf_path = submission_pdf_path(submission, repo_root)
         png_path = submission_png_path(submission, repo_root)
@@ -764,6 +999,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         pdf_path_rel=pdf_rel,
         png_url=png_url,
         warnings=warnings,
+        receipts_manifest=receipts_manifest_data,
     )
     pr_url = open_pr(
         args.issue_title, body, cwd=repo_root,

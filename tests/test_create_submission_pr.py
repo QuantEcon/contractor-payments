@@ -10,6 +10,7 @@ import pytest
 from scripts.create_submission_pr import (
     _strip_revision_suffix,
     branch_name_for_issue,
+    enrich_reimbursement,
     enrich_submission,
     format_currency_amount,
     generate_submission_id,
@@ -564,3 +565,239 @@ class TestRenderPrBody:
 class TestBranchNaming:
     def test_branch_name_format(self):
         assert branch_name_for_issue(42) == "submission/issue-42"
+
+
+# ─── Reimbursement enrichment (§4.7, Phase 5) ───────────────────────────────
+
+PARSED_REIMBURSEMENT_SAMPLE = {
+    "type": "reimbursement",
+    "period": "2026-06",
+    "entries": [
+        {"date": "2026-06-05", "amount": 300.0, "category": "meals",
+         "description": "Team dinner"},
+        {"date": "2026-06-03", "amount": 12000.0, "category": "accommodation",
+         "description": "Hotel one night"},
+    ],
+    "totals": {"amount": 12300.0, "currency": "JPY"},
+    "trip_context": "PyCon JP — invited talk.",
+    "receipts": [
+        {"name": "taxi-receipt.png",
+         "url": "https://github.com/user-attachments/assets/aaa"},
+        {"name": "hotel-invoice.pdf",
+         "url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf"},
+    ],
+    "notes": "",
+    "status": "pending",
+}
+
+REIMBURSEMENTS_CONFIG = {
+    "project": "CHOW",
+    "allowed_categories": ["travel", "accommodation", "meals"],
+    "ledger_issue": 7,
+}
+
+RECEIPTS_MANIFEST_ENTRIES = [
+    {"filename": "01-taxi-receipt.png",
+     "source_url": "https://github.com/user-attachments/assets/aaa",
+     "bytes": 120_000, "sha256": "aa" * 32},
+    {"filename": "02-hotel-invoice.pdf",
+     "source_url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf",
+     "bytes": 480_000, "sha256": "bb" * 32},
+]
+
+
+def _enrich_reimbursement(parsed=None, config=REIMBURSEMENTS_CONFIG, **overrides):
+    import copy
+    defaults = dict(
+        submitter="janedoe",
+        submission_id="janedoe-reimbursement-2026-06",
+        issue_number=42,
+        submitted_date="2026-06-11",
+    )
+    defaults.update(overrides)
+    return enrich_reimbursement(
+        copy.deepcopy(parsed or PARSED_REIMBURSEMENT_SAMPLE), config, **defaults
+    )
+
+
+class TestGenerateReimbursementId:
+    def test_reimbursement_slug(self):
+        assert (generate_submission_id("janedoe", "2026-06", "reimbursement")
+                == "janedoe-reimbursement-2026-06")
+
+
+class TestEnrichReimbursement:
+    def test_project_from_config_no_contract_keys(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["project"] == "CHOW"
+        assert "contract_id" not in enriched
+        assert "contract_start_date" not in enriched
+        assert "contract_end_date" not in enriched
+
+    def test_entries_sorted_and_jpy_amounts_int(self):
+        enriched = _enrich_reimbursement()
+        assert [e["date"] for e in enriched["entries"]] == ["2026-06-03", "2026-06-05"]
+        assert enriched["totals"] == {"amount": 12300, "currency": "JPY"}
+        assert all(isinstance(e["amount"], int) for e in enriched["entries"])
+
+    def test_aud_amounts_two_decimals(self):
+        parsed = {
+            **PARSED_REIMBURSEMENT_SAMPLE,
+            "entries": [
+                {"date": "2026-06-03", "amount": 184.505, "category": "travel",
+                 "description": "Taxi"},
+            ],
+            "totals": {"amount": 184.505, "currency": "AUD"},
+        }
+        enriched = _enrich_reimbursement(parsed=parsed)
+        assert enriched["totals"]["amount"] == 184.5
+        assert enriched["totals"]["currency"] == "AUD"
+
+    def test_receipts_from_manifest_substitute_filenames(self):
+        enriched = _enrich_reimbursement(receipts_manifest=RECEIPTS_MANIFEST_ENTRIES)
+        assert enriched["receipts"] == [
+            {"filename": "01-taxi-receipt.png",
+             "source_url": "https://github.com/user-attachments/assets/aaa"},
+            {"filename": "02-hotel-invoice.pdf",
+             "source_url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf"},
+        ]
+
+    def test_receipts_fallback_to_parser_links_without_manifest(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["receipts"][0] == {
+            "filename": "taxi-receipt.png",
+            "source_url": "https://github.com/user-attachments/assets/aaa",
+        }
+
+    def test_trip_context_and_metadata(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["trip_context"].startswith("PyCon JP")
+        assert enriched["submitted_by"] == "janedoe"
+        assert enriched["issue_number"] == 42
+        assert enriched["status"] == "pending"
+        assert enriched["approved_by"] is None
+
+    def test_supersedes_stamps_revision_metadata(self):
+        enriched = _enrich_reimbursement(
+            submission_id="janedoe-reimbursement-2026-06-v2",
+            supersedes="janedoe-reimbursement-2026-06",
+        )
+        assert enriched["supersedes"] == "janedoe-reimbursement-2026-06"
+        assert enriched["revision_of"] == "janedoe-reimbursement-2026-06"
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(ValueError):
+            _enrich_reimbursement(parsed={**PARSED_SAMPLE})
+
+
+class TestLoadReimbursementsConfig:
+    def test_missing_file_raises_pointed_error(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        with pytest.raises(FileNotFoundError) as exc:
+            load_reimbursements_config(tmp_path)
+        assert "config/reimbursements.yml" in str(exc.value)
+
+    def test_missing_project_raises(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "reimbursements.yml").write_text(
+            "allowed_categories: [travel]\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            load_reimbursements_config(tmp_path)
+        assert "project" in str(exc.value)
+
+    def test_loads_full_config(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "reimbursements.yml").write_text(
+            "project: CHOW\nallowed_categories: [travel, meals]\nledger_issue: 7\n"
+        )
+        config = load_reimbursements_config(tmp_path)
+        assert config["project"] == "CHOW"
+        assert config["ledger_issue"] == 7
+
+
+class TestPlaceReceipts:
+    def test_copies_into_period_and_id_directory(self, tmp_path):
+        from scripts.create_submission_pr import place_receipts
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "01-taxi-receipt.png").write_bytes(b"\x89PNG fake")
+        (staging / "02-hotel-invoice.pdf").write_bytes(b"%PDF fake")
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        submission = {
+            "period": "2026-06",
+            "submission_id": "janedoe-reimbursement-2026-06-B",
+        }
+        placed = place_receipts(
+            staging, RECEIPTS_MANIFEST_ENTRIES, submission, repo_root,
+        )
+        expected_dir = repo_root / "receipts" / "2026-06" / "janedoe-reimbursement-2026-06-B"
+        assert [p.parent for p in placed] == [expected_dir, expected_dir]
+        assert (expected_dir / "01-taxi-receipt.png").read_bytes() == b"\x89PNG fake"
+        assert (expected_dir / "02-hotel-invoice.pdf").read_bytes() == b"%PDF fake"
+
+
+class TestRenderPrBodyReimbursement:
+    def _manifest(self, entries=None, total=None):
+        entries = entries if entries is not None else RECEIPTS_MANIFEST_ENTRIES
+        return {
+            "receipts": entries,
+            "total_bytes": total if total is not None else sum(e["bytes"] for e in entries),
+        }
+
+    def _body(self, manifest=...):
+        enriched = _enrich_reimbursement(receipts_manifest=RECEIPTS_MANIFEST_ENTRIES)
+        return render_pr_body(
+            issue_number=42, submitter="janedoe",
+            submission=enriched,
+            submission_path_rel="submissions/2026-06/janedoe-reimbursement-2026-06.yml",
+            receipts_manifest=self._manifest() if manifest is ... else manifest,
+        )
+
+    def test_project_line_replaces_contract_line(self):
+        body = self._body()
+        assert "**Project:** `CHOW`" in body
+        assert "**Contract:**" not in body
+
+    def test_line_items_and_total(self):
+        body = self._body()
+        assert "**Line items:** 2" in body
+        assert "12300 JPY" in body
+
+    def test_receipts_listed_with_sizes(self):
+        body = self._body()
+        assert "### Receipts" in body
+        assert "`01-taxi-receipt.png` — 0.1 MB" in body
+        assert "`02-hotel-invoice.pdf` — 0.5 MB" in body
+        assert "across 2 file(s)" in body
+
+    def test_no_size_warnings_under_thresholds(self):
+        body = self._body()
+        assert "Large receipt" not in body
+        assert "may exceed" not in body
+
+    def test_oversized_file_warns(self):
+        entries = [
+            {**RECEIPTS_MANIFEST_ENTRIES[0], "bytes": 11 * 1024 * 1024},
+            RECEIPTS_MANIFEST_ENTRIES[1],
+        ]
+        body = self._body(manifest=self._manifest(entries=entries))
+        assert "Large receipt" in body
+        assert "01-taxi-receipt.png" in body
+
+    def test_oversized_bundle_warns(self):
+        entries = [
+            {**RECEIPTS_MANIFEST_ENTRIES[0], "bytes": 9 * 1024 * 1024},
+            {**RECEIPTS_MANIFEST_ENTRIES[1], "bytes": 8 * 1024 * 1024},
+        ]
+        body = self._body(manifest=self._manifest(entries=entries))
+        assert "may exceed" in body
+
+    def test_no_manifest_no_receipts_section(self):
+        body = self._body(manifest=None)
+        assert "### Receipts" not in body

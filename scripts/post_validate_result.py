@@ -32,7 +32,11 @@ from typing import Optional
 
 import yaml
 
-from scripts.create_submission_pr import enrich_submission, format_currency_amount
+from scripts.create_submission_pr import (
+    enrich_reimbursement,
+    enrich_submission,
+    format_currency_amount,
+)
 
 
 SENTINEL = "<!-- submission-validate-result -->"
@@ -43,7 +47,6 @@ SENTINEL = "<!-- submission-validate-result -->"
 def render_success_comment(enriched: dict) -> str:
     """Render a positive validate-result comment from an enriched submission."""
     submission_type = enriched["type"]
-    contract_id = enriched["contract_id"]
     period = enriched["period"]
     totals = enriched["totals"]
     entries = enriched["entries"]
@@ -55,7 +58,11 @@ def render_success_comment(enriched: dict) -> str:
     lines.append("")
     lines.append("| Field | Value |")
     lines.append("|---|---|")
-    lines.append(f"| Contract | `{contract_id}` |")
+    if submission_type == "reimbursement":
+        # Contractor-level: no contract row; the funding project stands in.
+        lines.append(f"| Project | `{enriched['project']}` |")
+    else:
+        lines.append(f"| Contract | `{enriched['contract_id']}` |")
     lines.append(f"| Period | `{period}` |")
 
     if submission_type == "timesheet":
@@ -67,6 +74,14 @@ def render_success_comment(enriched: dict) -> str:
     elif submission_type == "milestone_invoice":
         currency = totals["currency"]
         lines.append(f"| Milestones | {len(entries)} |")
+        lines.append(f"| **Total** | **{totals['amount']} {currency}** |")
+    elif submission_type == "reimbursement":
+        currency = totals["currency"]
+        receipts = enriched.get("receipts", [])
+        lines.append(f"| Line items | {len(entries)} |")
+        # Validate mode does no downloads — this is the count of attachment
+        # links found in the Receipts box, fetched + committed at /submit.
+        lines.append(f"| Receipts found | {len(receipts)} |")
         lines.append(f"| **Total** | **{totals['amount']} {currency}** |")
     else:
         # Defensive — unknown type. Surface what we have without computed totals.
@@ -196,6 +211,31 @@ def post_success(
         issue_number=issue,
         submitted_date="(dry-run)",
     )
+    _upsert_success_comment(repo, issue, enriched)
+
+
+def post_success_reimbursement(
+    repo: str,
+    issue: int,
+    submission: dict,
+    reimbursements_config: dict,
+    submitter: str,
+) -> None:
+    """Reimbursement variant: enrich against config/reimbursements.yml
+    (contractor-level — no contract). No receipt downloads in validate mode;
+    the comment reports the attachment links the parser found."""
+    enriched = enrich_reimbursement(
+        submission,
+        reimbursements_config,
+        submitter=submitter,
+        submission_id="(dry-run)",
+        issue_number=issue,
+        submitted_date="(dry-run)",
+    )
+    _upsert_success_comment(repo, issue, enriched)
+
+
+def _upsert_success_comment(repo: str, issue: int, enriched: dict) -> None:
     body = render_success_comment(enriched)
     existing = find_existing_comment_id(repo, issue)
     if existing is not None:
@@ -242,8 +282,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_success = sub.add_parser("success", help="Post or update the validate-result comment on parse success.")
     p_success.add_argument("--submission-file", required=True,
                            help="JSON output from parse_issue.py (--output-json).")
-    p_success.add_argument("--contract-file", required=True,
-                           help="Path to contracts/{contract_id}.yml in the contractor repo.")
+    p_success.add_argument("--contract-file",
+                           help="Path to contracts/{contract_id}.yml in the contractor "
+                                "repo. Required for timesheet / milestone submissions.")
+    p_success.add_argument("--reimbursements-file",
+                           help="Path to config/reimbursements.yml in the contractor "
+                                "repo. Required for reimbursement submissions.")
     p_success.add_argument("--submitter", required=True,
                            help="GitHub handle of the submitter (issue author).")
     p_success.add_argument("--issue", type=int, required=True)
@@ -268,9 +312,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.mode == "success":
         with open(args.submission_file, encoding="utf-8") as f:
             submission = json.load(f)
-        with open(args.contract_file, encoding="utf-8") as f:
-            contract = yaml.safe_load(f)
-        post_success(args.repo, args.issue, submission, contract, args.submitter)
+        if submission.get("type") == "reimbursement":
+            if not args.reimbursements_file:
+                print("ERROR: --reimbursements-file is required for "
+                      "reimbursement submissions.", file=sys.stderr)
+                return 2
+            with open(args.reimbursements_file, encoding="utf-8") as f:
+                reimbursements_config = yaml.safe_load(f) or {}
+            post_success_reimbursement(
+                args.repo, args.issue, submission, reimbursements_config,
+                args.submitter,
+            )
+        else:
+            if not args.contract_file:
+                print("ERROR: --contract-file is required for timesheet / "
+                      "milestone submissions.", file=sys.stderr)
+                return 2
+            with open(args.contract_file, encoding="utf-8") as f:
+                contract = yaml.safe_load(f)
+            post_success(args.repo, args.issue, submission, contract, args.submitter)
     elif args.mode == "error":
         with open(args.errors_file, encoding="utf-8") as f:
             data = json.load(f)

@@ -150,3 +150,43 @@ class TestRenderErrorComment:
     def test_includes_revalidate_instruction(self):
         out = render_error_comment([{"message": "x"}])
         assert "/validate" in out
+
+
+# ─── Reimbursement success renderer (§4.7, Phase 5) ─────────────────────────
+
+class TestRenderSuccessCommentReimbursement:
+    def _enriched_reimbursement(self) -> dict:
+        return {
+            "type": "reimbursement",
+            "project": "CHOW",
+            "period": "2026-06",
+            "entries": [
+                {"date": "2026-06-03", "amount": 12000, "category": "accommodation",
+                 "description": "Hotel"},
+                {"date": "2026-06-05", "amount": 300, "category": "meals",
+                 "description": "Dinner"},
+            ],
+            "receipts": [
+                {"filename": "taxi-receipt.png", "source_url": "https://github.com/user-attachments/assets/aaa"},
+                {"filename": "hotel-invoice.pdf", "source_url": "https://github.com/user-attachments/files/1/h.pdf"},
+            ],
+            "totals": {"amount": 12300, "currency": "JPY"},
+        }
+
+    def test_project_row_replaces_contract_row(self):
+        from scripts.post_validate_result import render_success_comment
+        out = render_success_comment(self._enriched_reimbursement())
+        assert "| Project | `CHOW` |" in out
+        assert "| Contract |" not in out
+
+    def test_line_items_receipts_and_total(self):
+        from scripts.post_validate_result import render_success_comment
+        out = render_success_comment(self._enriched_reimbursement())
+        assert "| Line items | 2 |" in out
+        assert "| Receipts found | 2 |" in out
+        assert "**12300 JPY**" in out
+
+    def test_sentinel_present(self):
+        from scripts.post_validate_result import render_success_comment, SENTINEL
+        out = render_success_comment(self._enriched_reimbursement())
+        assert SENTINEL in out
