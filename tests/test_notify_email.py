@@ -1,7 +1,7 @@
 """Tests for testing_mode resolution in scripts/notify_email.py.
 
 The SMTP / compose / send paths are integration territory (exercised against
-`contractor-engine-test` during Phase 2 E2E). These tests cover the per-repo
+`test-contractor-payments` during Phase 2 E2E). These tests cover the per-repo
 `testing_mode` precedence, which decides whether PSL is ever contacted — so
 the fail-safe direction (never email PSL unless explicitly told to) matters.
 """

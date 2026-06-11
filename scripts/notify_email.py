@@ -31,7 +31,7 @@ CLI:
       --submission submissions/2025-11/mmcky-invoice-2025-11.yml \\
       --settings   config/settings.yml \\
       --pdf        generated_pdfs/2025-11/mmcky-invoice-2025-11.pdf \\
-      --issue-url  https://github.com/QuantEcon/contractor-engine-test/issues/13 \\
+      --issue-url  https://github.com/QuantEcon/test-contractor-payments/issues/13 \\
       --output-summary /tmp/email_summary.json  # for notify_comment to read
 """
 from __future__ import annotations

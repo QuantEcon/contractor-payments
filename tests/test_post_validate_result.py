@@ -1,7 +1,7 @@
 """Tests for the renderers in scripts/post_validate_result.py.
 
 GitHub-API-touching functions (find/create/update/delete comment) are
-integration territory — exercised against `contractor-engine-test` during
+integration territory — exercised against `test-contractor-payments` during
 Phase 3c E2E. These tests cover the pure rendering paths only.
 """
 from __future__ import annotations

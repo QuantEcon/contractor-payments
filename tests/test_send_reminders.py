@@ -1,7 +1,7 @@
 """Tests for the pure helpers in scripts/send_reminders.py.
 
 GitHub-API-touching functions (list issues, comment exists, post comment)
-are integration territory — exercised against `contractor-engine-test`
+are integration territory — exercised against `test-contractor-payments`
 during Phase 3c E2E. These tests cover period extraction, period-closed
 arithmetic, and the rendered reminder body.
 """

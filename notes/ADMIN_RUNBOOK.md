@@ -183,7 +183,7 @@ PSL. Later, an error or omission is discovered.
 
 > **Engine status.** The two-mechanism model below is **implemented in
 > Phase 2.5** (see [PLAN.md §8](../PLAN.md#phase-25--revision--supplemental-handling))
-> and E2E-verified on `contractor-engine-test` on 2026-05-18. The
+> and E2E-verified on `test-contractor-payments` on 2026-05-18. The
 > "Workaround until Phase 2.5 lands" section at the bottom is kept
 > for historical reference and as the fallback recovery path if the
 > automated flow ever needs to be bypassed.
@@ -680,7 +680,7 @@ the modern GitHub-recommended pattern for any automation that needs to
 write to protected branches.
 
 **Prerequisite to verify before committing fully** — install a throwaway
-GitHub App on `contractor-engine-test` and open the bypass picker. If
+GitHub App on `test-contractor-payments` and open the bypass picker. If
 the App appears under the "Apps" / "Integrations" section, the migration
 will work as designed. If it does not, we need to fall back to either
 Option B (restructure to avoid the post-merge push entirely) or stay on
@@ -722,7 +722,7 @@ From the App settings page, click **Install App** in the left sidebar.
 2. Choose **All repositories** if you want the App to pick up future
    `contractor-*` repos automatically, OR **Only select repositories**
    and pick the existing `contractor-*` ones (and any test repos like
-   `contractor-engine-test`).
+   `test-contractor-payments`).
 3. Confirm install.
 
 #### Step 3 — Store credentials as org secrets
@@ -735,12 +735,12 @@ setup, matching the SMTP secret pattern from Phase 2):
 ```bash
 # App ID is non-sensitive but easier to keep with the key.
 gh secret set ENGINE_APP_ID --org QuantEcon --body "12345" \
-  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+  --visibility selected --repos "test-contractor-payments,contractor-mmcky,..."
 
 # Private key — paste the contents of the downloaded .pem.
 gh secret set ENGINE_APP_PRIVATE_KEY --org QuantEcon \
   --body "$(cat ~/Downloads/quantecon-contractor-engine.*.private-key.pem)" \
-  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+  --visibility selected --repos "test-contractor-payments,contractor-mmcky,..."
 ```
 
 Use `--visibility all` if/when the App is installed on all org repos.
@@ -794,9 +794,9 @@ needs no change; it just pins `@main` and inherits the new behaviour.
 
 #### Step 5 — Verify the App appears in the bypass picker
 
-This is the prerequisite check. On `contractor-engine-test`:
+This is the prerequisite check. On `test-contractor-payments`:
 
-1. Go to `https://github.com/QuantEcon/contractor-engine-test/settings/rules`
+1. Go to `https://github.com/QuantEcon/test-contractor-payments/settings/rules`
    (or org-level rules if testing org-level).
 2. Click **New ruleset** → **New branch ruleset**.
 3. In **Bypass list**, click **+ Add bypass**, filter for
@@ -824,7 +824,7 @@ auto-covers future `contractor-*` repos):
 
 Click **Create**.
 
-#### Step 7 — End-to-end verify on `contractor-engine-test`
+#### Step 7 — End-to-end verify on `test-contractor-payments`
 
 1. Open a test submission issue, `/validate`, `/submit`.
 2. Confirm a PR opens and `process-approved.yml` runs with the new
@@ -881,7 +881,7 @@ Capturing the development implications in one place for triage:
 
 1. ~~**Ledger double-count on revisions (Scenario 4).**~~ ✅ Resolved
    in Phase 2.5 — two-mechanism model implemented and E2E-verified on
-   `contractor-engine-test` (2026-05-18). Revisions supersede via
+   `test-contractor-payments` (2026-05-18). Revisions supersede via
    filesystem-based detection; independent second invoices in the
    same period get a `-{LETTER}` uniqueness suffix with no special
    semantics. See PLAN §8 Phase 2.5 for the verified flow.

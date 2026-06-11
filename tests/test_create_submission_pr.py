@@ -1,7 +1,7 @@
 """Tests for the pure data-transformation helpers in create_submission_pr.py.
 
 git/gh side effects are integration territory — exercised in the end-of-Phase-1
-test against contractor-engine-test.
+test against test-contractor-payments.
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 GitHub-API-touching functions (find/create/update/delete comment, add/remove
 label) are integration territory — they're exercised against a real disposable
-issue in `contractor-engine-test` during Phase 1 end-to-end testing.
+issue in `test-contractor-payments` during Phase 1 end-to-end testing.
 """
 from __future__ import annotations
 

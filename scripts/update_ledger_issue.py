@@ -422,7 +422,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     issue_number = contract.get("ledger_issue")
     if not issue_number:
         # Don't fail the workflow — Phase 3b onboarding may not have run for this
-        # contract yet (e.g. pre-Phase-3b contractor-engine-test), or the field
+        # contract yet (e.g. pre-Phase-3b test-contractor-payments), or the field
         # is intentionally absent. Log and exit 0 so the merge pipeline continues.
         print(
             f"WARN: contract `{ledger['contract_id']}` has no `ledger_issue` field. "

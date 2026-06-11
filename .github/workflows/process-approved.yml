@@ -16,7 +16,7 @@ name: Process approved submission (reusable)
 # Branch-protection note: this workflow pushes directly to main (step 3).
 # That requires either no branch protection on main OR `github-actions[bot]`
 # being on the "Allow specified actors to bypass required pull requests"
-# list. For Phase 2 testing on contractor-engine-test (no protection), works
+# list. For Phase 2 testing on test-contractor-payments (no protection), works
 # as-is. For Phase 4 onboarding of real contractor repos (which DO enable
 # branch protection per PLAN §11), the onboarding script will need to add
 # github-actions[bot] to the bypass list — track this as a Phase 4 task.

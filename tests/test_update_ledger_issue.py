@@ -2,7 +2,7 @@
 
 Focus: markdown body rendering. The `gh issue edit` side effect isn't
 unit-tested — it's exercised by the end-of-Phase-2 E2E on
-contractor-engine-test.
+test-contractor-payments.
 
 Phase 2.5 coverage: superseded entries should render with strikethrough,
 forward-link to the revision, and not surface in `_last_approval`.

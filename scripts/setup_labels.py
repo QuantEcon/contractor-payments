@@ -6,7 +6,7 @@ idempotently creates every label the contractor-payments workflows need.
 
 Phase 3's `onboarding/new-contractor.py` will call this as part of repo
 setup. Pre-Phase-3, the admin runs it manually against any new contractor
-repo (or against `contractor-engine-test` to keep labels in sync).
+repo (or against `test-contractor-payments` to keep labels in sync).
 
 Usage:
   python -m scripts.setup_labels                    # uses current dir's repo
