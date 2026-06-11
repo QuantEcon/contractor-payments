@@ -1,0 +1,161 @@
+name: 🧾 Reimbursement Claim
+description: Claim out-of-pocket expenses (travel, equipment, software, ...) with receipts attached.
+title: "Reimbursement claim"
+labels: ["reimbursement", "pending-review"]
+
+# NOTE: This file is a template. It contains `$REIMBURSEMENT_CATEGORIES_REMINDER`
+# substituted by onboarding/sync_templates.py when seeded into a contractor
+# repo. The form is only seeded when the repo has reimbursements enabled
+# (config/reimbursements.yml exists). See PLAN.md §4.7 and §5.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Reimbursement Claim Submission
+
+        Fill out the fields below to open a **draft claim** for this
+        period. After the issue is created you can edit the issue body
+        to add expense rows and drag in more receipts as they
+        accumulate — no need to file everything at once.
+
+        When you're ready to file the claim:
+
+        - Comment **`/validate`** to check that your entries parse
+          cleanly. You'll get a reply with parse results and computed
+          totals. No PR is opened.
+        - Comment **`/submit`** (or apply the `submit` label) to file
+          the claim. Your receipts are copied into the repo and a Pull
+          Request opens with the rendered PDF; an admin reviews and
+          merges. On approval the PDF **and your receipt files** are
+          emailed to the payment processor.
+
+        **One currency per claim** — for a trip with receipts in
+        several currencies, file one claim per currency (a second claim
+        in the same month is fine; the system numbers it separately).
+
+        **Corrections before submission:** edit the issue body.
+        **After submission:** the issue is locked; edit the PR branch
+        directly, or ask an admin to revise.
+
+        Need help? See the
+        [Submit a reimbursement claim](https://quantecon.github.io/contractor-payments/contractor-guide/submit-reimbursement/) guide.
+
+  - type: markdown
+    attributes:
+      value: |
+        **Allowed expense categories (reminder):**
+
+$REIMBURSEMENT_CATEGORIES_REMINDER
+
+  - type: dropdown
+    id: year
+    attributes:
+      label: Year
+      description: Calendar year this claim is filed against.
+      options:
+        - "2026"
+        - "2027"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: month
+    attributes:
+      label: Month
+      description: Calendar month this claim is filed against.
+      options:
+        - "01"
+        - "02"
+        - "03"
+        - "04"
+        - "05"
+        - "06"
+        - "07"
+        - "08"
+        - "09"
+        - "10"
+        - "11"
+        - "12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: entries
+    attributes:
+      label: Expense Entries
+      description: |
+        One row per receipt line, in the format:
+        `YYYY-MM-DD | amount | category | description`
+
+        Several rows may share a date (flight + hotel on the same day is
+        normal). Dates outside the claim month are allowed for trips that
+        span a month boundary — the admin sees a note and reviews.
+        Amounts are plain numbers (no currency symbols); the category
+        must be one of the allowed list above. The parser splits on the
+        first three `|`, so descriptions may contain `|`.
+
+        **Keep the `Date | Amount | Category | Description` header row
+        in place** — the parser uses it to recognise this as the
+        entries table.
+      value: |
+        Date | Amount | Category | Description
+        2026-06-03 | 184.50 | travel | Example entry — replace or extend with your own rows
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: currency
+    attributes:
+      label: Currency
+      description: Currency for every line item in this claim (one currency per claim).
+      options:
+        - AUD
+        - USD
+        - JPY
+    validations:
+      required: true
+
+  - type: input
+    id: total
+    attributes:
+      label: Total
+      description: Sum of all line-item amounts — the parser cross-checks this against your rows.
+      placeholder: "184.50"
+    validations:
+      required: true
+
+  - type: textarea
+    id: trip_context
+    attributes:
+      label: Trip / project context (optional)
+      description: |
+        Free text shown on the claim PDF. Useful when line items don't
+        individually justify their purpose (e.g. "PyCon JP — invited
+        talk on QuantEcon lectures").
+    validations:
+      required: false
+
+  - type: textarea
+    id: receipts
+    attributes:
+      label: Receipts
+      description: |
+        **Drag and drop your receipt files here** (PDF, PNG, or JPG —
+        one attachment per receipt). On `/submit` they are committed to
+        the repo under `receipts/` as the audit record, and on approval
+        they are attached to the payment-processor email alongside the
+        claim PDF. Keep individual files under ~10 MB and the bundle
+        under ~15 MB so the email goes through.
+      placeholder: Drag receipt files into this box — GitHub will insert links as they upload.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm these expenses were incurred by me for QuantEcon work, the amounts match the attached receipts, and the total is correct.
+          required: true

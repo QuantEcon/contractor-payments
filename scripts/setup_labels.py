@@ -28,7 +28,7 @@ from typing import Optional
 LABELS: list[tuple[str, str, str]] = [
     ("timesheet",        "Hourly timesheet submission",                "1d76db"),
     ("milestone-invoice", "Milestone invoice submission",              "1d76db"),
-    ("reimbursement",    "Reimbursement claim submission (Phase 5+)",  "1d76db"),
+    ("reimbursement",    "Reimbursement claim submission",             "1d76db"),
     ("pending-review",   "Awaiting admin review",                      "fbca04"),
     ("parse-error",      "Submission has parse errors; see comment",   "d73a4a"),
     ("submit",           "Apply to a draft issue to file the submission (auto-removed by the workflow)", "0e8a16"),
