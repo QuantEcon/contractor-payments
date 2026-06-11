@@ -1,12 +1,18 @@
 """Parse a GitHub Issue Form body into a structured submission.
 
-Handles both submission types built in Phases 1 and 1.5:
+Handles all three submission types:
 
 - **Hourly Timesheet** — `.github/ISSUE_TEMPLATE/hourly-timesheet.yml`,
   with a `Time Entries` section in `YYYY-MM-DD | hours | description` rows.
 - **Milestone Invoice** — `.github/ISSUE_TEMPLATE/milestone-invoice.yml`,
   with a `Milestone Entries` section in `ID | YYYY-MM-DD | amount | description`
   rows. Out-of-period dates are allowed for catch-up submissions.
+- **Reimbursement Claim** — `.github/ISSUE_TEMPLATE/reimbursement-claim.yml`
+  (Phase 5), with an `Expense Entries` section in
+  `YYYY-MM-DD | amount | category | description` rows plus `Currency`,
+  `Total` (cross-checked against the entry sum), and `Receipts` (attachment
+  links) sections. Contractor-level — no Contract field. Duplicate dates are
+  allowed; out-of-period dates warn rather than reject.
 
 GitHub renders each form into the issue body as `### Heading\\n\\nValue` blocks.
 This module turns that markdown back into a structured submission dict, or
@@ -14,10 +20,12 @@ returns a list of line-specific errors that the workflow surfaces back to the
 contractor as a comment.
 
 Submission type is auto-detected from which entries section is present
-(`Time Entries` → hourly, `Milestone Entries` → milestone_invoice).
+(`Time Entries` → hourly, `Milestone Entries` → milestone_invoice,
+`Expense Entries` → reimbursement).
 
-See PLAN.md §4.4 (hourly form), §4.6 (milestone form), §4.5 (validation
-strategy and failure handling), §4.8 (generic submission YAML shape).
+See PLAN.md §4.4 (hourly form), §4.6 (milestone form), §4.7 (reimbursement
+form), §4.5 (validation strategy and failure handling), §4.8 (generic
+submission YAML shape).
 """
 from __future__ import annotations
 
@@ -237,17 +245,30 @@ def _label(delim: str) -> str:
     return "tab" if delim == "\t" else delim
 
 
+# Column labels that appear in the seeded header rows:
+#   `Date | Hours | Description` (hourly)
+#   `ID | Date | Amount | Description` (milestone)
+#   `Date | Amount | Category | Description` (reimbursement)
+# plus a few plausible hand-typed variants. A row is a header only when
+# EVERY non-empty cell is one of these labels.
+_HEADER_COLUMN_LABELS = {
+    "date", "day", "hours", "description", "id", "amount", "category",
+}
+
+
 def _looks_like_header(line: str, delim: str) -> bool:
-    """First field looks like a label, not a data value — covers both hourly
-    (`Date | Hours | Description`) and milestone (`ID | Date | Amount | Description`)
-    header rows."""
-    parts = line.split(delim, 1)
-    if not parts:
+    """True only for the seeded header row (e.g. `Date | Hours | Description`):
+    every non-empty cell must be a known column label. Data rows never qualify
+    because their first cell is a date/ID/amount, not a label.
+
+    Replaces the earlier keyword-substring heuristic, which silently skipped
+    malformed data rows like `bad-date | 2 | oops` and produced false
+    `/validate` successes (PLAN §10, E2E finding 2026-05-19)."""
+    cells = [c.strip().lower() for c in line.split(delim)]
+    non_empty = [c for c in cells if c]
+    if len(non_empty) < 2:
         return False
-    first = parts[0].strip().lower()
-    if any(kw in first for kw in ("date", "day", "when", "id", "milestone")):
-        return _parse_date(first) is None
-    return False
+    return all(c in _HEADER_COLUMN_LABELS for c in non_empty)
 
 
 # ─── Hourly entries parsing (`Time Entries`) ────────────────────────────────
@@ -482,6 +503,198 @@ def _parse_milestone_entries(
     return entries, errors, warnings
 
 
+# ─── Expense entries parsing (`Expense Entries`, reimbursements) ────────────
+
+def _parse_expense_entries(
+    text: str,
+    period: Optional[str],
+) -> tuple[list[dict], list[ParseError], list[ParseWarning]]:
+    """Parse the reimbursement Expense Entries section. Returns (entries,
+    errors, warnings).
+
+    Format: `YYYY-MM-DD | amount | category | description` per row.
+    Duplicate dates are allowed — flight + hotel on the same day is the
+    normal case (contrast with `_parse_time_entries`, which rejects them).
+    Out-of-period dates produce a *warning*, not an error — trips legitimately
+    span month boundaries; the admin decides at PR review (§4.7).
+    Category membership is checked later in `parse_issue` against the repo's
+    `config/reimbursements.yml` allowed list.
+    """
+    errors: list[ParseError] = []
+    warnings: list[ParseWarning] = []
+
+    if not text or not text.strip():
+        errors.append(ParseError("Expense Entries section is empty — please add at least one row."))
+        return [], errors, warnings
+
+    delim, warning = _detect_delimiter(text, expected_segments=4)
+    if warning is not None:
+        warnings.append(warning)
+
+    period_year_month: Optional[tuple[int, int]] = None
+    if period and re.match(r"^\d{4}-\d{2}$", period):
+        y, m = period.split("-")
+        period_year_month = (int(y), int(m))
+
+    entries: list[dict] = []
+
+    for line_no, raw in enumerate(text.split("\n"), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        if _looks_like_header(line, delim):
+            continue
+
+        parts = line.split(delim, 3)
+        if len(parts) < 4:
+            errors.append(ParseError(
+                f"expected four fields separated by `{_label(delim)}` "
+                f"(`YYYY-MM-DD {_label(delim)} amount {_label(delim)} category {_label(delim)} description`) "
+                f"but found {len(parts)}.",
+                line=line_no,
+            ))
+            continue
+
+        date_str, amount_str, category_str, desc = (
+            parts[0].strip(),
+            parts[1].strip(),
+            parts[2].strip(),
+            parts[3].strip(),
+        )
+
+        parsed_date = _parse_date(date_str)
+        if parsed_date is None:
+            errors.append(ParseError(
+                f"couldn't read a date from `{date_str}` — please use `YYYY-MM-DD` "
+                f"(e.g. `2026-06-03`).",
+                line=line_no,
+            ))
+            continue
+
+        parsed_amount = _parse_amount(amount_str)
+        if parsed_amount is None:
+            errors.append(ParseError(
+                f"couldn't read an amount from `{amount_str}` — please use a number "
+                f"(e.g. `184.50` or `12,800`).",
+                line=line_no,
+            ))
+            continue
+
+        if parsed_amount <= 0:
+            errors.append(ParseError(
+                f"amount must be greater than 0 (got `{parsed_amount}`).",
+                line=line_no,
+            ))
+            continue
+
+        if not category_str:
+            errors.append(ParseError(
+                "category is empty — each row needs a category from your repo's allowed list.",
+                line=line_no,
+            ))
+            continue
+
+        if not desc:
+            errors.append(ParseError(
+                "description is empty — each row needs a brief description of the expense.",
+                line=line_no,
+            ))
+            continue
+
+        date_iso = parsed_date.isoformat()
+
+        if period_year_month is not None:
+            if (parsed_date.year, parsed_date.month) != period_year_month:
+                warnings.append(ParseWarning(
+                    f"line {line_no}: date `{date_iso}` is outside the claim period "
+                    f"`{period}` — allowed for trips spanning a month boundary; "
+                    f"the admin will review."
+                ))
+
+        entries.append({
+            "date": date_iso,
+            "amount": parsed_amount,
+            "category": category_str.lower(),
+            "description": desc,
+        })
+
+    if not entries and not errors:
+        errors.append(ParseError("No valid expense entries found in the Expense Entries section."))
+
+    entries.sort(key=lambda e: e["date"])
+    return entries, errors, warnings
+
+
+# ─── Receipt link extraction (`Receipts`, reimbursements) ───────────────────
+
+# Markdown image `![name](url)` or link `[name](url)` as GitHub leaves them
+# in the body after a drag-and-drop upload.
+_MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)\)")
+_URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
+
+# GitHub-hosted attachment URL shapes (current `user-attachments` and the
+# legacy per-repo `/files/` + image-CDN forms).
+_ATTACHMENT_URL_RE = re.compile(
+    r"^https://(?:"
+    r"github\.com/user-attachments/(?:assets|files)/"
+    r"|github\.com/[^/]+/[^/]+/files/\d+/"
+    r"|(?:private-)?user-images\.githubusercontent\.com/"
+    r")"
+)
+
+
+def _extract_receipt_links(
+    text: str,
+) -> tuple[list[dict], list[ParseError], list[ParseWarning]]:
+    """Extract receipt attachment links from the Receipts section.
+
+    Returns (receipts, errors, warnings) where each receipt is
+    `{"name": <link text or URL tail>, "url": <attachment URL>}`, deduplicated
+    by URL preserving order. GitHub-hosted attachment URLs only; anything else
+    is skipped with a warning. Zero attachments is an error — receipts are the
+    point of a reimbursement claim.
+    """
+    errors: list[ParseError] = []
+    warnings: list[ParseWarning] = []
+    receipts: list[dict] = []
+    seen_urls: set[str] = set()
+    named: dict[str, str] = {}
+
+    if text.strip() in ("", _NO_RESPONSE):
+        errors.append(ParseError(
+            "Receipts section has no attachments — drag and drop your receipt "
+            "files (PDF, PNG, JPG) into the Receipts box."
+        ))
+        return receipts, errors, warnings
+
+    for m in _MD_LINK_RE.finditer(text):
+        name, url = m.group(1).strip(), m.group(2).strip()
+        if name:
+            named.setdefault(url, name)  # first name wins, matching URL dedupe
+
+    for url in _URL_RE.findall(text):
+        url = url.rstrip(".,;")
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if _ATTACHMENT_URL_RE.match(url):
+            name = named.get(url) or url.rstrip("/").rsplit("/", 1)[-1]
+            receipts.append({"name": name, "url": url})
+        else:
+            warnings.append(ParseWarning(
+                f"Receipts: skipped `{url}` — not a GitHub attachment. Drag the "
+                f"file into the Receipts box rather than pasting an external link."
+            ))
+
+    if not receipts and not errors:
+        errors.append(ParseError(
+            "Receipts section has no attachments — drag and drop your receipt "
+            "files (PDF, PNG, JPG) into the Receipts box."
+        ))
+
+    return receipts, errors, warnings
+
+
 def cross_check_milestone_ids(
     submission: dict, contract: dict,
 ) -> list[ParseWarning]:
@@ -525,18 +738,41 @@ _LABEL_YEAR = "Year"
 _LABEL_MONTH = "Month"
 _LABEL_TIME_ENTRIES = "Time Entries"
 _LABEL_MILESTONE_ENTRIES = "Milestone Entries"
+_LABEL_EXPENSE_ENTRIES = "Expense Entries"
+_LABEL_CURRENCY = "Currency"
+_LABEL_TOTAL = "Total"
+_LABEL_TRIP_CONTEXT = "Trip / project context (optional)"
+_LABEL_RECEIPTS = "Receipts"
 _LABEL_NOTES = "Additional notes (optional)"
 _LABEL_CONFIRMATION = "Confirmation"
 
 _NO_RESPONSE = "_No response_"
 
+# Mirrors the v1 supported list in contracts and the form's Currency dropdown.
+# Re-validated here because the issue body is editable after creation.
+_SUPPORTED_CURRENCIES = {"AUD", "USD", "JPY"}
 
-def parse_issue(body: str) -> ParseResult:
+
+def _fmt_num(v: float) -> str:
+    """Render a float without a trailing `.0` for whole numbers (3300, 184.5)."""
+    return f"{v:g}"
+
+
+def parse_issue(
+    body: str,
+    *,
+    allowed_categories: Optional[list[str]] = None,
+) -> ParseResult:
     """Parse a rendered GitHub Issue Form body into a structured submission.
 
     Auto-detects submission type from which entries section is present:
     - `Time Entries` present → `type: timesheet` (hourly)
     - `Milestone Entries` present → `type: milestone_invoice`
+    - `Expense Entries` present → `type: reimbursement`
+
+    `allowed_categories` is the reimbursement category allowlist from the
+    repo's `config/reimbursements.yml`; None skips the membership check
+    (non-reimbursement repos, and callers that pre-date the option).
 
     Returns a ParseResult. On success, `result.submission` is a dict ready to
     be written as a submission YAML; `result.errors` is empty. On failure,
@@ -553,27 +789,38 @@ def parse_issue(body: str) -> ParseResult:
     confirmation = sections.get(_LABEL_CONFIRMATION, "")
 
     # Submission type — auto-detect from which entries section is present.
-    has_time = _LABEL_TIME_ENTRIES in sections
-    has_milestone = _LABEL_MILESTONE_ENTRIES in sections
+    present = [
+        label for label in
+        (_LABEL_TIME_ENTRIES, _LABEL_MILESTONE_ENTRIES, _LABEL_EXPENSE_ENTRIES)
+        if label in sections
+    ]
 
-    if has_time and has_milestone:
+    if len(present) > 1:
         result.errors.append(ParseError(
-            "Both Time Entries and Milestone Entries sections found in the issue body. "
-            "An issue must use exactly one submission template."
+            f"Multiple entries sections found in the issue body "
+            f"({', '.join(f'`{p}`' for p in present)}). "
+            f"An issue must use exactly one submission template."
         ))
         return result
-    if not has_time and not has_milestone:
+    if not present:
         result.errors.append(ParseError(
-            "No entries section found. Expected either `Time Entries` (Hourly Timesheet) "
-            "or `Milestone Entries` (Milestone Invoice)."
+            "No entries section found. Expected `Time Entries` (Hourly Timesheet), "
+            "`Milestone Entries` (Milestone Invoice), or `Expense Entries` "
+            "(Reimbursement Claim)."
         ))
         return result
 
-    submission_type = "timesheet" if has_time else "milestone_invoice"
+    submission_type = {
+        _LABEL_TIME_ENTRIES: "timesheet",
+        _LABEL_MILESTONE_ENTRIES: "milestone_invoice",
+        _LABEL_EXPENSE_ENTRIES: "reimbursement",
+    }[present[0]]
 
-    # Contract
-    if not contract or contract == _NO_RESPONSE:
-        result.errors.append(ParseError("Contract field is required."))
+    # Contract — required for contract-backed types only. Reimbursements are
+    # contractor-level (§4.7); their form has no Contract field.
+    if submission_type != "reimbursement":
+        if not contract or contract == _NO_RESPONSE:
+            result.errors.append(ParseError("Contract field is required."))
 
     # Year + Month → Period
     valid_period, period_errors = _combine_year_month(year, month)
@@ -589,11 +836,64 @@ def parse_issue(body: str) -> ParseResult:
     if submission_type == "timesheet":
         entries_text = sections.get(_LABEL_TIME_ENTRIES, "")
         entries, entry_errors, entry_warnings = _parse_time_entries(entries_text, valid_period)
-    else:
+    elif submission_type == "milestone_invoice":
         entries_text = sections.get(_LABEL_MILESTONE_ENTRIES, "")
         entries, entry_errors, entry_warnings = _parse_milestone_entries(entries_text)
+    else:
+        entries_text = sections.get(_LABEL_EXPENSE_ENTRIES, "")
+        entries, entry_errors, entry_warnings = _parse_expense_entries(entries_text, valid_period)
     result.errors.extend(entry_errors)
     result.warnings.extend(entry_warnings)
+
+    if submission_type == "reimbursement":
+        # Currency — dropdown-constrained in the form, but the body is editable.
+        currency = sections.get(_LABEL_CURRENCY, "").strip().upper()
+        if not currency or currency == _NO_RESPONSE.upper():
+            result.errors.append(ParseError("Currency field is required."))
+            currency = None
+        elif currency not in _SUPPORTED_CURRENCIES:
+            result.errors.append(ParseError(
+                f"Currency `{currency}` is not supported. "
+                f"Supported: {', '.join(sorted(_SUPPORTED_CURRENCIES))}."
+            ))
+            currency = None
+
+        # Stated total must match the sum of line items (sanity cross-check).
+        total_text = sections.get(_LABEL_TOTAL, "").strip()
+        if not total_text or total_text == _NO_RESPONSE:
+            result.errors.append(ParseError("Total field is required."))
+        else:
+            stated_total = _parse_amount(total_text)
+            if stated_total is None:
+                result.errors.append(ParseError(
+                    f"couldn't read an amount from Total `{total_text}` — "
+                    f"please use a number (e.g. `184.50` or `12,800`)."
+                ))
+            elif entries and not entry_errors:
+                computed = round(sum(e["amount"] for e in entries), 2)
+                if round(stated_total, 2) != computed:
+                    result.errors.append(ParseError(
+                        f"Total `{_fmt_num(stated_total)}` doesn't match the sum of "
+                        f"the expense entries `{_fmt_num(computed)}` — please "
+                        f"correct the Total or the line items."
+                    ))
+
+        # Category allowlist (config/reimbursements.yml), case-insensitive.
+        if allowed_categories:
+            allowed = {c.strip().lower() for c in allowed_categories}
+            for entry in entries:
+                if entry["category"] not in allowed:
+                    result.errors.append(ParseError(
+                        f"category `{entry['category']}` (entry dated {entry['date']}) "
+                        f"is not in this repo's allowed list: "
+                        f"{', '.join(sorted(allowed))}."
+                    ))
+
+        receipts, receipt_errors, receipt_warnings = _extract_receipt_links(
+            sections.get(_LABEL_RECEIPTS, "")
+        )
+        result.errors.extend(receipt_errors)
+        result.warnings.extend(receipt_warnings)
 
     if result.errors:
         return result
@@ -609,7 +909,7 @@ def parse_issue(body: str) -> ParseResult:
             "notes": "" if notes in ("", _NO_RESPONSE) else notes,
             "status": "pending",
         }
-    else:
+    elif submission_type == "milestone_invoice":
         total_amount = round(sum(e["amount"] for e in entries), 2)
         result.submission = {
             "type": "milestone_invoice",
@@ -617,6 +917,19 @@ def parse_issue(body: str) -> ParseResult:
             "period": valid_period,
             "entries": entries,
             "totals": {"amount": total_amount},
+            "notes": "" if notes in ("", _NO_RESPONSE) else notes,
+            "status": "pending",
+        }
+    else:
+        trip_context = sections.get(_LABEL_TRIP_CONTEXT, "").strip()
+        total_amount = round(sum(e["amount"] for e in entries), 2)
+        result.submission = {
+            "type": "reimbursement",
+            "period": valid_period,
+            "entries": entries,
+            "totals": {"amount": total_amount, "currency": currency},
+            "trip_context": "" if trip_context in ("", _NO_RESPONSE) else trip_context,
+            "receipts": receipts,
             "notes": "" if notes in ("", _NO_RESPONSE) else notes,
             "status": "pending",
         }
@@ -646,6 +959,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--output-errors-json",
         help="Write a JSON report of errors and warnings here regardless of outcome.",
     )
+    parser.add_argument(
+        "--reimbursements",
+        help="Path to the repo's config/reimbursements.yml. Optional; when the "
+        "file exists, its allowed_categories list is enforced for "
+        "reimbursement submissions. Missing file = check skipped (repos "
+        "without reimbursements enabled).",
+    )
     args = parser.parse_args(argv)
 
     if args.body_file:
@@ -656,7 +976,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         body = sys.stdin.read()
 
-    result = parse_issue(body)
+    allowed_categories: Optional[list[str]] = None
+    if args.reimbursements and os.path.exists(args.reimbursements):
+        import yaml  # deferred: only the CLI path needs it
+
+        with open(args.reimbursements, encoding="utf-8") as f:
+            reimbursements_config = yaml.safe_load(f) or {}
+        allowed_categories = reimbursements_config.get("allowed_categories")
+
+    result = parse_issue(body, allowed_categories=allowed_categories)
 
     if args.output_errors_json:
         with open(args.output_errors_json, "w", encoding="utf-8") as f:
