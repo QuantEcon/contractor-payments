@@ -17,10 +17,18 @@ For milestone contracts:
   contract_id, type=milestone, currency,
   claims[], totals.{amount_to_date, claims_count}
 
+Reimbursements (Phase 5) are contractor-level — one per-repo ledger
+rather than one per contract:
+  ledger/reimbursements.yml
+  type=reimbursement, claims[],
+  totals keyed PER CURRENCY (claims are single-currency, but a contractor
+  may claim across currencies over time — cross-currency sums would be
+  meaningless): totals.{<CCY>: {amount_to_date, claims_count}}
+
 Errors out if the same submission_id is already in the ledger (treated
 as a workflow bug to surface, not silently dedup).
 
-See PLAN.md §8 Phase 2.
+See PLAN.md §8 Phase 2 (+ Phase 5 for reimbursements).
 """
 from __future__ import annotations
 
@@ -38,10 +46,16 @@ import yaml
 _SUBMISSION_TO_LEDGER_TYPE = {
     "timesheet": "hourly",
     "milestone_invoice": "milestone",
+    "reimbursement": "reimbursement",
 }
 
 
-def empty_ledger(*, ledger_type: str, contract_id: str, currency: str) -> dict:
+def empty_ledger(
+    *,
+    ledger_type: str,
+    contract_id: Optional[str] = None,
+    currency: Optional[str] = None,
+) -> dict:
     """Construct an empty ledger shell from its parts.
 
     Used in two places: by `_empty_ledger` when the first approved submission
@@ -51,7 +65,19 @@ def empty_ledger(*, ledger_type: str, contract_id: str, currency: str) -> dict:
 
     The shape branches on `ledger_type` to give hourly its `submissions` list
     + `hours_to_date` total, milestone its `claims` list + per-claim count.
+    Reimbursement ledgers are contractor-level: no `contract_id`, no single
+    top-level `currency` (totals are keyed per currency instead).
     """
+    if ledger_type == "reimbursement":
+        return {
+            "type": "reimbursement",
+            "claims": [],
+            "totals": {},  # {<CCY>: {amount_to_date, claims_count}}
+        }
+    if contract_id is None or currency is None:
+        raise ValueError(
+            f"`{ledger_type}` ledgers require contract_id and currency."
+        )
     base = {
         "contract_id": contract_id,
         "type": ledger_type,
@@ -85,6 +111,8 @@ def _empty_ledger(submission: dict) -> dict:
     ledger_type = _SUBMISSION_TO_LEDGER_TYPE.get(submission_type)
     if ledger_type is None:
         raise ValueError(f"Unknown submission type `{submission_type}`.")
+    if ledger_type == "reimbursement":
+        return empty_ledger(ledger_type="reimbursement")
     return empty_ledger(
         ledger_type=ledger_type,
         contract_id=submission["contract_id"],
@@ -123,6 +151,16 @@ def _build_entry(submission: dict) -> dict:
             "entries": submission["entries"],
             "amount": totals["amount"],
         }
+    if submission_type == "reimbursement":
+        # Rolled-up like hourly (the per-line breakdown stays in the
+        # submission YAML), plus the claim's currency — the per-repo
+        # reimbursement ledger spans currencies — and its funding project.
+        return {
+            **base,
+            "amount": totals["amount"],
+            "currency": totals["currency"],
+            "project": submission.get("project"),
+        }
     raise ValueError(f"Unknown submission type `{submission_type}`.")
 
 
@@ -144,13 +182,9 @@ def append_submission(submission: dict, ledger: dict) -> dict:
       counts toward `amount_to_date` or `hours_to_date`, and it doesn't
       count toward the `*_count` totals either.
     """
-    # Cross-checks
-    if ledger.get("contract_id") != submission["contract_id"]:
-        raise ValueError(
-            f"Contract ID mismatch: ledger says `{ledger.get('contract_id')}`, "
-            f"submission says `{submission['contract_id']}`."
-        )
-
+    # Cross-checks. Reimbursement ledgers are contractor-level — no
+    # contract_id to agree on, and no single ledger currency (claims are
+    # single-currency; the ledger buckets totals per currency).
     expected_ledger_type = _SUBMISSION_TO_LEDGER_TYPE.get(submission["type"])
     if ledger.get("type") != expected_ledger_type:
         raise ValueError(
@@ -159,13 +193,20 @@ def append_submission(submission: dict, ledger: dict) -> dict:
             f"(expected ledger type `{expected_ledger_type}`)."
         )
 
-    ledger_currency = ledger.get("currency")
-    submission_currency = submission["totals"]["currency"]
-    if ledger_currency != submission_currency:
-        raise ValueError(
-            f"Currency mismatch: ledger says `{ledger_currency}`, "
-            f"submission says `{submission_currency}`."
-        )
+    if expected_ledger_type != "reimbursement":
+        if ledger.get("contract_id") != submission["contract_id"]:
+            raise ValueError(
+                f"Contract ID mismatch: ledger says `{ledger.get('contract_id')}`, "
+                f"submission says `{submission['contract_id']}`."
+            )
+
+        ledger_currency = ledger.get("currency")
+        submission_currency = submission["totals"]["currency"]
+        if ledger_currency != submission_currency:
+            raise ValueError(
+                f"Currency mismatch: ledger says `{ledger_currency}`, "
+                f"submission says `{submission_currency}`."
+            )
 
     list_key = "submissions" if ledger["type"] == "hourly" else "claims"
     items = list(ledger.get(list_key, []))
@@ -236,6 +277,16 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
             "amount_to_date": total_amount,
             "submissions_count": len(active_items),
         }
+    elif ledger["type"] == "reimbursement":
+        # Per-currency buckets, sorted by currency code for stable YAML.
+        totals: dict[str, dict] = {}
+        for item in active_items:
+            bucket = totals.setdefault(
+                item["currency"], {"amount_to_date": 0, "claims_count": 0}
+            )
+            bucket["amount_to_date"] += item["amount"]
+            bucket["claims_count"] += 1
+        ledger["totals"] = dict(sorted(totals.items()))
     else:
         total_amount = sum(item["amount"] for item in active_items)
         ledger["totals"] = {
@@ -245,7 +296,11 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
 
 
 def ledger_path_for_submission(submission: dict, repo_root: Path) -> Path:
-    """Canonical ledger path: `ledger/<contract-id>.yml` relative to repo root."""
+    """Canonical ledger path: `ledger/<contract-id>.yml` relative to repo
+    root — except contractor-level reimbursements, which share one per-repo
+    `ledger/reimbursements.yml`."""
+    if submission.get("type") == "reimbursement":
+        return repo_root / "ledger" / "reimbursements.yml"
     return repo_root / "ledger" / f"{submission['contract_id']}.yml"
 
 

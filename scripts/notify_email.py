@@ -118,6 +118,15 @@ def _require_env(name: str) -> str:
     return value
 
 
+# Receipt attachment MIME types by extension (fetch_receipts.py allowlist).
+_RECEIPT_MIME = {
+    ".pdf": ("application", "pdf"),
+    ".png": ("image", "png"),
+    ".jpg": ("image", "jpeg"),
+    ".jpeg": ("image", "jpeg"),
+}
+
+
 def compose_message(
     *,
     submission: dict,
@@ -128,9 +137,14 @@ def compose_message(
     to: str,
     cc: Optional[str],
     reply_to: Optional[str],
+    receipt_paths: Optional[list[Path]] = None,
 ) -> EmailMessage:
     """Build the email message. Pure function — takes the already-resolved
-    recipients (testing_mode logic happens in main() before calling us)."""
+    recipients (testing_mode logic happens in main() before calling us).
+
+    `receipt_paths` (reimbursement claims) are attached after the claim PDF
+    so PSL receives the evidence alongside the paperwork."""
+    receipt_paths = receipt_paths or []
     submission_type = submission.get("type", "timesheet")
     type_label = _TYPE_LABEL.get(submission_type, "Submission")
     period = submission["period"]
@@ -155,15 +169,28 @@ def compose_message(
         f"Approved by QuantEcon @{approver_handle} for processing.",
         "",
         f"Contractor:    {real_name} (@{github_handle})",
-        f"Contract:      {submission['contract_id']}",
+    ]
+    if submission_type == "reimbursement":
+        # Contractor-level claim: the PSL funding code replaces the contract
+        # reference so PSL knows the cost centre to bill.
+        body_lines.append(f"Project:       {submission.get('project', '—')}")
+    else:
+        body_lines.append(f"Contract:      {submission['contract_id']}")
+    body_lines.extend([
         f"Type:          {type_label}",
         f"Period:        {period}",
         f"Amount:        {amount_display}",
         f"Approved:      {submission.get('approved_date', '—')} "
         f"by @{submission.get('approved_by', '—')}",
         "",
-        "Attached: the approved invoice PDF.",
-    ]
+    ])
+    if submission_type == "reimbursement":
+        count = len(receipt_paths)
+        body_lines.append(
+            f"Attached: the approved claim PDF and {count} receipt file(s)."
+        )
+    else:
+        body_lines.append("Attached: the approved invoice PDF.")
     if issue_url:
         body_lines.extend(["", f"Issue: {issue_url}"])
     body = "\n".join(body_lines) + "\n"
@@ -186,6 +213,18 @@ def compose_message(
         maintype="application", subtype="pdf",
         filename=pdf_path.name,
     )
+
+    # Receipt attachments (reimbursement claims).
+    for receipt_path in receipt_paths:
+        maintype, subtype = _RECEIPT_MIME.get(
+            receipt_path.suffix.lower(), ("application", "octet-stream")
+        )
+        with open(receipt_path, "rb") as f:
+            msg.add_attachment(
+                f.read(),
+                maintype=maintype, subtype=subtype,
+                filename=receipt_path.name,
+            )
     return msg
 
 
@@ -220,6 +259,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "matching the reusable-workflow layout).")
     p.add_argument("--issue-url", default=None,
                    help="URL to the original submission issue (for the email body).")
+    p.add_argument("--receipts-dir", type=Path, default=None,
+                   help="Directory of committed receipt files to attach "
+                        "(reimbursement claims: receipts/{period}/{submission_id}). "
+                        "Missing or empty directory is tolerated (no receipts "
+                        "attached).")
     p.add_argument("--output-summary", type=Path, default=None,
                    help="If set, write a JSON summary of the send to this path "
                         "(used by notify_comment.py to confirm the send in-band).")
@@ -259,6 +303,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"testing_mode=false ({testing_mode_source}) — sending to "
               f"{psl_email} (Cc {reviewer_email}).", file=sys.stderr)
 
+    receipt_paths: list[Path] = []
+    if args.receipts_dir and args.receipts_dir.is_dir():
+        receipt_paths = sorted(
+            p for p in args.receipts_dir.iterdir() if p.is_file()
+        )
+
     sender = _require_env("SMTP_FROM") if not args.dry_run else os.environ.get("SMTP_FROM", "<SMTP_FROM>")
     msg = compose_message(
         submission=submission,
@@ -269,6 +319,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         to=to_addr,
         cc=cc_addr,
         reply_to=sender,
+        receipt_paths=receipt_paths,
     )
 
     if args.dry_run:
@@ -280,7 +331,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"{header}: {val}")
         print()
         print(msg.get_body(preferencelist=("plain",)).get_content())
-        print(f"--- (with attachment: {args.pdf.name}) ---")
+        attachment_names = [args.pdf.name, *(p.name for p in receipt_paths)]
+        print(f"--- (with attachments: {', '.join(attachment_names)}) ---")
     else:
         send_message(
             msg,
@@ -299,6 +351,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "testing_mode": testing_mode,
         "testing_mode_source": testing_mode_source,
         "dry_run": args.dry_run,
+        "attachments": 1 + len(receipt_paths),  # claim/invoice PDF + receipts
     }
 
     if args.output_summary:

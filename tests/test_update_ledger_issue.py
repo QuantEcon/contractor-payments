@@ -275,3 +275,84 @@ class TestRenderMilestoneBody:
         assert "12,000 JPY" in body
         # Summary counts both as active.
         assert "| 2 | 89,000 JPY |" in body
+
+
+# ─── Reimbursement body (Phase 5) ───────────────────────────────────────────
+
+def _reimbursement_ledger_with(*claims):
+    totals = {}
+    for c in claims:
+        if c.get("status") == "superseded":
+            continue
+        bucket = totals.setdefault(c["currency"], {"amount_to_date": 0, "claims_count": 0})
+        bucket["amount_to_date"] += c["amount"]
+        bucket["claims_count"] += 1
+    return {
+        "type": "reimbursement",
+        "claims": list(claims),
+        "totals": dict(sorted(totals.items())),
+    }
+
+
+def _claim(submission_id="janedoe-reimbursement-2026-06", period="2026-06",
+           amount=12300, currency="JPY", project="CHOW", **extra):
+    return {
+        "submission_id": submission_id,
+        "period": period,
+        "approved_date": "2026-06-12",
+        "approved_by": "mmcky",
+        "amount": amount,
+        "currency": currency,
+        "project": project,
+        **extra,
+    }
+
+
+class TestRenderReimbursementBody:
+    def test_per_currency_summary_rows(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        ledger = _reimbursement_ledger_with(
+            _claim(),
+            _claim(submission_id="janedoe-reimbursement-2026-06-B",
+                   amount=800.25, currency="AUD"),
+        )
+        body = render_reimbursement_body(ledger, {})
+        assert "# 📒 Running ledger — Reimbursements" in body
+        assert "| JPY | 1 | 12,300 JPY |" in body
+        assert "| AUD | 1 | 800.25 AUD |" in body
+
+    def test_claims_table_has_project_column(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        body = render_reimbursement_body(_reimbursement_ledger_with(_claim()), {})
+        assert "| Period | Submission | Project | Amount | Approved |" in body
+        assert "`CHOW`" in body
+
+    def test_superseded_row_struck_through(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        ledger = _reimbursement_ledger_with(
+            _claim(status="superseded",
+                   superseded_by="janedoe-reimbursement-2026-06-v2"),
+            _claim(submission_id="janedoe-reimbursement-2026-06-v2", amount=11800),
+        )
+        body = render_reimbursement_body(ledger, {})
+        assert "~~" in body
+        assert "→" in body
+        # Only the active claim counts.
+        assert "| JPY | 1 | 11,800 JPY |" in body
+
+    def test_empty_state(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        body = render_reimbursement_body(
+            {"type": "reimbursement", "claims": [], "totals": {}}, {},
+        )
+        assert "_No claims approved yet._" in body
+
+    def test_marker_present(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        body = render_reimbursement_body(_reimbursement_ledger_with(_claim()), {})
+        assert "<!-- ledger-issue-marker:reimbursements -->" in body
+
+    def test_render_body_dispatches(self):
+        from scripts.update_ledger_issue import render_body
+        body = render_body(_reimbursement_ledger_with(_claim()), {})
+        assert "Reimbursements" in body

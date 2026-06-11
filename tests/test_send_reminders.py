@@ -151,3 +151,19 @@ class TestSubmissionTypeFromLabels:
     def test_both_prefers_timesheet(self):
         # Defensive — shouldn't happen, but be deterministic.
         assert submission_type_from_labels(["timesheet", "milestone-invoice"]) == "timesheet"
+
+
+class TestReimbursementReminders:
+    def test_reimbursement_label_routes(self):
+        from scripts.send_reminders import submission_type_from_labels
+        assert submission_type_from_labels(["reimbursement", "pending-review"]) == "reimbursement"
+
+    def test_reimbursement_in_submission_labels(self):
+        from scripts.send_reminders import SUBMISSION_LABELS
+        assert "reimbursement" in SUBMISSION_LABELS
+
+    def test_reminder_comment_names_claim(self):
+        from scripts.send_reminders import render_reminder_comment, sentinel_for
+        out = render_reminder_comment("2026-06", "reimbursement")
+        assert "reimbursement claim" in out
+        assert sentinel_for("2026-06") in out
