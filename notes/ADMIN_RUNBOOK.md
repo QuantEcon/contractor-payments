@@ -26,6 +26,7 @@ companion contractor-facing guide will live at
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — no date enforcement |
 | [8. Wrong currency / contract mismatch](#8-wrong-currency--contract-mismatch) | ✅ | — |
 | [9. Concurrent submissions](#9-concurrent-submissions) | ⚠️ Rare race | Low priority |
+| [10. Reimbursement claims](#10-reimbursement-claims-phase-5) | ✅ | Enable via sync_templates; receipts spot-check + email-size recovery documented |
 
 ---
 
@@ -466,38 +467,33 @@ A new contract is being set up.
   submission `period` against `contract.start_date` / `end_date`.
   Submissions outside the contract window will still parse and create
   a PR. **Admin catches this in PR review.**
-- **Renewals**: a new `contracts/<new-id>.yml` is added. The
-  contractor's issue-form contract dropdown is **statically defined**
-  in `.github/ISSUE_TEMPLATE/{hourly-timesheet,milestone-invoice}.yml`
-  — adding a new contract requires editing those forms to include the
-  new contract ID in the dropdown.
+- **Renewals**: a new `contracts/<new-id>.yml` is added, then the
+  issue forms are **regenerated from repo state** (Phase 5):
+
+      python onboarding/sync_templates.py \
+          --repo-dir contractors/contractor-<handle> [--dry-run]
+
+  sync_templates rebuilds the contract dropdowns + reminder blocks
+  from every `status: active` contract, and applies the presence rule
+  (a form exists iff the repo has ≥1 active contract of that type /
+  `config/reimbursements.yml` for claims). Setting the old contract's
+  `status: ended` and re-running removes it from the dropdown — and
+  removes the whole form if it was the last contract of its type.
 - **Ledger continuity**: the new contract gets its own ledger file
   and its own pinned ledger issue. The old contract's ledger issue
-  stays open (or gets closed by Phase 3b's rollover helper when
-  built).
+  stays open.
 
-> **Dev note — minor gap.**
-> Adding a new contract is a multi-step manual process today:
->   1. Write `contracts/<new-id>.yml`.
->   2. Edit both issue-form dropdowns to include the new ID.
->   3. Open the initial ledger issue manually
->      (`scripts/update_ledger_issue.py` against an empty ledger).
->   4. Write the issue number into `<new-id>.yml` as `ledger_issue:`.
->   5. Optionally close the predecessor's ledger issue with a "this
->      contract has ended, see ledger for `<new-id>`" comment.
->
-> Phase 3b's contract-renewal helper is supposed to automate steps
-> 2–5. **Adjustment recommended when first real renewal happens:**
-> generate the issue-form dropdowns from the `contracts/` directory
-> at workflow time, instead of committing the dropdown statically.
-> Eliminates step 2 entirely.
+**Admin actions (renewal).**
 
-**Admin actions.**
-
-- Run through the 5-step process above when a new contract starts.
-- When the old contract ends, lock its pinned ledger issue (it's
-  already locked from comments via `update_ledger_issue.py`) and
-  optionally update its body with a note linking to the new contract.
+1. Write `contracts/<new-id>.yml` (and set the predecessor's
+   `status: ended` if applicable).
+2. Run `sync_templates.py --repo-dir ... --dry-run`, review, re-run
+   without `--dry-run` (commits + pushes the regenerated forms).
+3. Open the initial ledger issue
+   (`scripts/update_ledger_issue.py` against an empty ledger) and
+   write the issue number into `<new-id>.yml` as `ledger_issue:`.
+4. Optionally close the predecessor's ledger issue with a "this
+   contract has ended, see ledger for `<new-id>`" comment.
 
 ---
 
@@ -559,6 +555,57 @@ when the workflow tries to add a file that conflicts.
 - If it happens: close one of the two PRs (Scenario 5) and tell the
   contractor to consolidate into the surviving one (via issue edit,
   Scenario 2).
+
+---
+
+## 10. Reimbursement claims (Phase 5)
+
+**Enabling reimbursements on a repo.**
+
+1. Add `config/reimbursements.yml` to the contractor repo:
+
+   ```yaml
+   project: CHOW          # PSL funding code on claim PDFs + emails
+   allowed_categories: [travel, accommodation, meals, equipment, software, conference, other]
+   ledger_issue: null     # wired by the next step
+   ```
+
+2. Run the sync (seeds the claim form per the presence rule, updates
+   the caller workflows' label gate, ensures labels) and create the
+   pinned reimbursements ledger issue:
+
+       python onboarding/sync_templates.py \
+           --repo-dir contractors/contractor-<handle> \
+           --labels --init-reimbursement-ledger [--dry-run]
+
+   Deleting `config/reimbursements.yml` and re-running the sync
+   disables claims (the form disappears from the chooser).
+
+   New payees get all of this from `onboarding/new-contractor.py`
+   (answer the reimbursements prompt, or `--reimbursement-project`);
+   contract type `none` onboards a reimbursement-only payee (one-off
+   speakers, honoraria).
+
+**Review duties on a claim PR.** Beyond the usual checks:
+
+- Open each committed receipt under `receipts/<period>/<claim-id>/`
+  and spot-check: amounts match the rows, dates plausible, categories
+  sane. The receipts are the evidence PSL receives.
+- Out-of-period rows surface as non-blocking notes (trips legitimately
+  span month boundaries) — confirm the story makes sense.
+- Size warnings (>10 MB file / >15 MB bundle): consider asking the
+  contractor to re-export or split before merging — see below.
+
+**Email size failure.** The approval email attaches the claim PDF plus
+every receipt. Gmail rejects sends over ~25 MB; an oversized claim
+fails at SMTP *after* merge and shows up as "Email: ⚠️ not sent" in the
+audit comment (everything else — ledger, PDFs, receipts in git —
+completed). Recovery: download the approved PDF + receipts from the
+repo and forward them to PSL manually; no re-merge needed.
+
+**Receipts are immutable evidence.** Revisions re-fetch and re-commit
+receipts under the `-vN` claim's own directory; the original claim's
+receipts stay put as the audit record, same as superseded PDFs.
 
 ---
 
