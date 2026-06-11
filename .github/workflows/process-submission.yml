@@ -115,18 +115,21 @@ jobs:
             --body-file /tmp/issue_body.md \
             --output-json /tmp/submission.json \
             --output-errors-json /tmp/errors.json \
+            --reimbursements config/reimbursements.yml \
             || true
           if [ -f /tmp/submission.json ]; then
             echo "parse_ok=true" >> "$GITHUB_OUTPUT"
+            echo "type=$(python -c "import json; print(json.load(open('/tmp/submission.json')).get('type', ''))")" >> "$GITHUB_OUTPUT"
           else
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
+            echo "type=" >> "$GITHUB_OUTPUT"
           fi
 
       # ─── /validate path ───────────────────────────────────────────────────
       # Dry-run parser pass; post a sentinel-marked result comment, no PR.
 
       - name: Post validate-success comment
-        if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true' && steps.parse.outputs.type != 'reimbursement'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -135,6 +138,18 @@ jobs:
           python -m scripts.post_validate_result success \
             --submission-file /tmp/submission.json \
             --contract-file "contracts/${CONTRACT_ID}.yml" \
+            --submitter "${{ inputs.issue_author }}" \
+            --issue "${{ inputs.issue_number }}"
+
+      - name: Post validate-success comment (reimbursement)
+        if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true' && steps.parse.outputs.type == 'reimbursement'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          python -m scripts.post_validate_result success \
+            --submission-file /tmp/submission.json \
+            --reimbursements-file config/reimbursements.yml \
             --submitter "${{ inputs.issue_author }}" \
             --issue "${{ inputs.issue_number }}"
 
@@ -169,8 +184,29 @@ jobs:
             echo "No previously approved submission for this issue; treating as fresh submission."
           fi
 
+      - name: Fetch receipt attachments (reimbursement only)
+        id: fetch_receipts
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.parse.outputs.type == 'reimbursement'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONPATH: engine
+        run: |
+          # Token-authenticated download of the issue attachments (no
+          # official API exists). On failure, fetch_receipts writes
+          # parse_issue-shaped errors to /tmp/errors.json so the standard
+          # submit-error comment below reports it; the PR is not created.
+          if python -m scripts.fetch_receipts \
+            --submission-file /tmp/submission.json \
+            --staging-dir /tmp/receipts \
+            --output-manifest /tmp/receipts_manifest.json \
+            --output-errors-json /tmp/errors.json; then
+            echo "fetch_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fetch_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create submission PR
-        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -186,10 +222,12 @@ jobs:
             --issue-author "${{ inputs.issue_author }}" \
             --issue-title "${{ inputs.issue_title }}" \
             --templates-dir engine/templates \
+            --receipts-manifest /tmp/receipts_manifest.json \
+            --receipts-staging-dir /tmp/receipts \
             $SUPERSEDES_ARG
 
       - name: Clear prior submit-error comment
-        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -198,7 +236,7 @@ jobs:
             --issue "${{ inputs.issue_number }}"
 
       - name: Clear prior validate-result comment
-        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
@@ -207,7 +245,7 @@ jobs:
             --issue "${{ inputs.issue_number }}"
 
       - name: Close and lock the issue
-        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
+        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -232,8 +270,8 @@ jobs:
           gh issue lock "${{ inputs.issue_number }}" --reason resolved \
             || echo "Issue lock failed (may already be locked); continuing."
 
-      - name: Post submit-error comment (on parse failure)
-        if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'false'
+      - name: Post submit-error comment (on parse or receipt-fetch failure)
+        if: inputs.mode == 'submit' && (steps.parse.outputs.parse_ok == 'false' || steps.fetch_receipts.outputs.fetch_ok == 'false')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
