@@ -1,6 +1,6 @@
 # QuantEcon Contractor Payments — Implementation Plan
 
-**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim deferred to Phase 5.
+**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim in build (Phase 5 — gating decisions resolved 2026-06-11, see §9).
 **Source issue:** [QuantEcon/admin#3 — PRJ: QuantEcon Timesheet Management System](https://github.com/QuantEcon/admin/issues/3)
 **Related (broader vision, separate track):** [QuantEcon/admin#5 — PRJ: QuantEcon admin infrastructure](https://github.com/QuantEcon/admin/issues/5)
 
@@ -19,8 +19,8 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
 - [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
 - [x] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate` + period-close reminders (full E2E verified on `contractor-engine-test` 2026-05-19: six scenarios passed including the parse-fail → fix → re-submit arc and reminder idempotency)
-- [ ] **Phase 4** — Docs + first real contractors (per-repo `testing_mode` opt-in to production; see §9 "Email recipients & testing")  ← **current target**
-- [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
+- [ ] **Phase 4** — Docs + first real contractors (per-repo `testing_mode` opt-in to production; see §9 "Email recipients & testing")
+- [ ] **Phase 5** — Reimbursement Claim engine (gating decisions resolved 2026-06-11; build on branch `phase-5-reimbursement`)  ← **current target**
 
 ## Contents
 
@@ -524,24 +524,27 @@ A single reimbursement claim covers one **period** (calendar month) and may bund
 **Form fields:**
 
 1. **Year** + **Month** (dropdowns, both required) — same two-dropdown pattern as §4.4. Parser combines them to `YYYY-MM`. The period is the month the claim is *filed against*, not necessarily when the expense was incurred (though usually the same month).
-2. **Line items** (textarea, required) — one row per receipt, pipe-delimited: `YYYY-MM-DD | amount | category | description`. Currency is fixed for the submission (see field 3); per-line currency mixing is out of scope in v1. Categories must match the contractor repo's `config/settings.yml` allowed list.
-3. **Currency** (dropdown, required) — ISO 4217 code; same supported list as contracts (`AUD | USD | JPY` in v1, extensible). One currency per submission.
-4. **Total amount** (number, required) — contractor enters the total; parser verifies it matches the sum of line-item amounts (rejects on mismatch as a sanity check).
+2. **Expense Entries** (textarea, required) — one row per receipt line, pipe-delimited: `YYYY-MM-DD | amount | category | description` (parser splits on the first three pipes; description may contain `|`). Currency is fixed for the submission (see field 3); per-line currency mixing resolved out of scope (see §9 "Reimbursement currency"). Categories must match the contractor repo's `config/reimbursements.yml` allowed list. **Duplicate dates are allowed** — flight + hotel on the same day is the normal case (contrast with timesheets, which reject duplicate dates).
+3. **Currency** (dropdown, required) — ISO 4217 code; same supported list as contracts (`AUD | USD | JPY` in v1, extensible). One currency per submission; a multi-currency trip is filed as one claim per currency (same-month claims take the `-B` supplemental suffix, §v1.1).
+4. **Total** (input, required) — contractor enters the total; parser verifies it matches the sum of line-item amounts (rejects on mismatch as a sanity check).
 5. **Trip / project context** (textarea, optional) — free text. Useful for trips where line items don't individually justify their purpose.
-6. **Receipts** — see "Receipt storage" below.
+6. **Receipts** (textarea, required) — the contractor drags receipt files (PDF / PNG / JPG) into this field; GitHub stores them as issue attachments and leaves markdown links in the body. At `/submit` the engine downloads each attachment (token-authenticated fetch) and **commits them to `receipts/{period}/{submission_id}/`** on the submission branch; on approval they are attached to the PSL email alongside the claim PDF. Receipts are **claim-level** (a bundle for the whole claim), not per-line-item. Resolved 2026-06-11 — see §9 "Receipt storage".
 7. **Confirmation** (checkbox, required) — single ack.
-
-**Receipt storage — DEFERRED.** Where receipts physically live (GitHub issue attachments? Committed PDFs in `receipts/<period>/`? External store?) is an open decision (see §10). The Reimbursement engine ships in **Phase 5** (post-launch — see §8) *after* this decision is made and the multi-currency design is settled; the form schema above will pick up a `receipts:` field and a per-line-item `currency` column then.
 
 **Parser must reject:**
 
-- Any line-item date outside the selected `Period` (warn rather than reject if a trip legitimately spans a month boundary — exact policy decided during build).
+- Unparseable line-item date; amount ≤ 0; fewer than four pipe-separated segments; empty category or description.
 - Sum of line items ≠ stated total.
-- Empty line items.
+- Zero line items.
 - Currency not in supported list.
-- Category not in the contractor repo's allowed list.
+- Category not in the contractor repo's `config/reimbursements.yml` allowed list.
+- No receipt attachments found in the Receipts field.
 
-**Submission ID:** `{handle}-reimbursement-{period}` (e.g. `mmcky-reimbursement-2025-09`). Collision suffix `-vN` applies if a second reimbursement is filed for the same month — a legitimate case (multiple trips in one month), distinct from revisions.
+**Parser warns (non-blocking, admin decides):**
+
+- Line-item date outside the selected `Period` — trips legitimately span month boundaries (same posture as milestone catch-up submissions).
+
+**Submission ID:** `{handle}-reimbursement-{period}` (e.g. `mmcky-reimbursement-2025-09`). Standard suffix semantics (§v1.1): `-B`, `-C` for additional independent claims in the same month (multiple trips), `-vN` for revisions that supersede a prior claim.
 
 ### 4.8 Generic submission YAML shape
 
@@ -581,14 +584,19 @@ totals:
 
 # --- reimbursement ---
 # contract_id intentionally absent — reimbursements are contractor-level
-line_items:
-  - {date: ..., amount: ..., category: ..., description: ..., receipt: <path>}
+project: ...        # PSL funding code, from config/reimbursements.yml (§9)
+entries:
+  - {date: ..., amount: ..., category: ..., description: ...}
 trip_context: |
   ...
+receipts:
+  - {filename: <committed path under receipts/{period}/{submission_id}/>, source_url: <original attachment URL, audit only>}
 totals:
-  amount: ...       # sum of line_items[].amount
+  amount: ...       # sum of entries[].amount
   currency: ...     # one currency per submission
 ```
+
+> **Amended at Phase 5 build (2026-06-11)** from the original sketch: the reimbursement block uses `entries:` (not `line_items:`) so the generic engine machinery — entry sorting, display-string formatting, ledger passthrough — runs unmodified across all three types; and receipts are a **claim-level `receipts:` list** (not a per-line `receipt:` field) because mapping N dragged attachments onto individual rows is unreliable — the bundle is reviewed as a whole.
 
 This shared shape means Phase 2 merge processing — ledger update, approval re-render, payments-manager notify — runs the same pipeline for all three types, branching only at the render-template selection and the per-type ledger writer.
 
@@ -978,21 +986,26 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 - [ ] **Per-repo production cutover.** When a contractor's flow is verified, set `notifications.testing_mode: false` in *their* `config/settings.yml` and commit. That repo starts sending real approval emails to PSL; all other repos are unaffected. The engine default in [templates/fiscal-host.yml](../templates/fiscal-host.yml) stays `true` as the fail-safe.
 - [ ] Onboard a small number of additional real contractors; iterate on friction.
 
-### Phase 5 — Reimbursement Claim engine + multi-select onboarding (post-launch)
+### Phase 5 — Reimbursement Claim engine + conditional form availability (post-launch)
 
-Deferred to a standalone phase because reimbursements are materially more complex than timesheets and invoices: they involve **multi-currency** receipts (a single trip may produce receipts in 2-3 currencies), **receipt storage** (an unresolved open question — see §10), ad-hoc authorisation (no pre-existing contract to check against), and tax-category handling that varies by jurisdiction. Bundling these into Phase 1.5 / 2 would have slowed the launch; running them as a post-launch addition lets real Phase 4 contractors stress-test the simpler types first.
+Deferred to a standalone phase because reimbursements are materially more complex than timesheets and invoices: they involve **multi-currency** receipts (a single trip may produce receipts in 2-3 currencies), **receipt storage** (resolved 2026-06-11 — see §9), ad-hoc authorisation (no pre-existing contract to check against), and tax-category handling that varies by jurisdiction. Bundling these into Phase 1.5 / 2 would have slowed the launch; running them as a post-launch addition lets real Phase 4 contractors stress-test the simpler types first.
 
-**Phase 5 build:**
+**Gating decisions resolved 2026-06-11** (see §9 for the full rows): receipts are committed to the contractor repo and emailed to PSL; one currency per claim; the reimbursement arrangement lives in a new `config/reimbursements.yml` (funding `project` code, `allowed_categories`, `ledger_issue`) with `config/settings.yml` unchanged as the identity file; issue forms are gated on repo state (file presence). The original "multi-select onboarding" idea became **presence-by-config**: a form is seeded iff its config exists.
 
-- [ ] **Receipt-storage policy resolved** (where receipts live, PII handling, size limits, multi-page) — see §10.
-- [ ] **Multi-currency design** — does a single reimbursement carry multiple currencies (per-line-item currency), or is each currency a separate submission? Decision drives both the form shape and the PDF render.
-- [ ] **`scripts/parse_reimbursement_issue.py`** (or branch in `parse_issue.py`) — handles line items with date/amount/category/currency/description; validates totals (per-currency if multi-currency); validates category against `config/settings.yml` allowed list.
-- [ ] **`config/settings.yml` extension** — add `reimbursement.allowed_categories: [...]` per contractor.
-- [ ] **`contractor-template/.github/ISSUE_TEMPLATE/reimbursement-claim.yml`** — the new form (§4.7), updated for multi-currency.
-- [ ] **`templates/reimbursement.typ`** — Typst template (title `QUANTECON REIMBURSEMENT`; line-item table; trip-context block; receipts appendix per policy).
-- [ ] **`scripts/create_submission_pr.py`** — extend for the third type.
-- [ ] **`onboarding/new-contractor.py`** — add the multi-select for issue templates. From this phase forward, an admin can configure a payee as reimbursement-only (e.g. one-off speakers, honorarium recipients) or as a full contractor with all three types. Also adds the `reimbursement.allowed_categories` prompt.
-- [ ] End-to-end test against `contractor-engine-test` (or a new `contractor-reimbursement-test`): submit a reimbursement claim with multiple line items (and multi-currency if that design wins), verify the merge flow.
+**Build plan (engine work on branch `phase-5-reimbursement`; merges to `main` only after E2E; live repos unaffected until retrofit):**
+
+- [ ] **Stage 0a — test repo rename + sanitize.** `contractor-engine-test` → `test-contractor-payments` (QuantEcon `test-*` convention); sanitize its `config/settings.yml` PII (Phase 4 carry-over) so new screenshots ship unredacted.
+- [ ] **Stage 0b — receipts-download spike.** Verify token-authenticated fetch of GitHub issue-attachment URLs from a private repo inside Actions (no official API exists). Gates the whole receipts policy; fallback = links-only mode + manual forward to PSL. Record result here.
+- [ ] **Stage 1 — parser.** Fix the greedy `_looks_like_header` heuristic first (§10 carry-over), then `Expense Entries` / `Currency` / `Total` / `Receipts` section parsing per §4.7 (duplicate dates allowed; out-of-period warns; category list from `config/reimbursements.yml`).
+- [ ] **Stage 2 — submission pipeline.** New `scripts/fetch_receipts.py` (download + sanitize + allowlist pdf/png/jpg + manifest); `create_submission_pr.py` reimbursement enrichment (no contract), receipts placement under `receipts/{period}/{submission_id}/`, PR-body receipts list + size warnings (>10 MB/file, >15 MB total vs Gmail's ~25 MB cap); `/validate` totals for the new type.
+- [ ] **Stage 3 — `templates/reimbursement.typ`** (title `QUANTECON REIMBURSEMENT CLAIM`; Date | Category | Description | Amount table; trip-context block; receipts filename list; single-page worst-case verified) + `generate_pdf.py` dispatch.
+- [ ] **Stage 4 — approval side.** `ledger/reimbursements.yml` (per-repo, per-currency totals buckets); pinned-issue render; PSL email attaches claim PDF + receipts, Project line replaces Contract line; audit comment parity (fixes latent `contract_id` KeyError in `notify_comment.py`).
+- [ ] **Stage 5 — engine workflows.** `process-submission.yml` + `process-approved.yml`: type-gated receipts fetch, reimbursement-aware validate-success and ledger-path steps (fixes two latent `['contract_id']` KeyErrors); existing-type paths kept byte-identical.
+- [ ] **Stage 6 — contractor template.** `reimbursement-claim.yml` form (§4.7), templated `config/reimbursements.yml`, `issue-to-pr.yml` label gate gains `reimbursement` (per-repo file — retrofit required; engine merge alone does not enable routing).
+- [ ] **Stage 7 — onboarding + sync.** New `onboarding/sync_templates.py`: regenerates issue forms + caller workflows + labels for an existing repo from its `contracts/` + `config/reimbursements.yml` (presence rule; deletes dead forms — replaces the `"(no contracts yet)"` placeholder behaviour); `--init-reimbursement-ledger` creates the pinned ledger issue. `new-contractor.py`: contract type `none` (reimbursement-only payees), reimbursement prompts, seeding delegated to sync_templates.
+- [ ] **Stage 8 — E2E on `test-contractor-payments`** (callers pinned to the engine branch): claim with same-day + out-of-period rows, 2 receipts (PDF+PNG); `/validate` error paths (total mismatch, bad category); `/submit` → receipts committed; merge → ledger buckets + pinned issue + email (testing_mode=true) with attachments; `-B` second claim in a second currency; `-v2` revision supersede.
+- [ ] **Stage 9 — merge → `main`; retrofit live repos** via sync_templates (adds claim form + label gate; removes dead placeholder forms) + real `config/reimbursements.yml` + ledger issue.
+- [ ] **Stage 10 — docs** (`docs/contractor-guide/submit-reimbursement.md` + nav + admin runbook) and PLAN.md closing pass.
 
 ### v2+ (future, in scope of this PLAN if needed)
 - SMTP email delivery (currently @-mention only)
@@ -1038,6 +1051,11 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Document-date timezone | Payer's locale (`psl_foundation.timezone` in `fiscal-host.yml`, default `America/New_York`) | Paperwork lines up with payer's books; contractor locale irrelevant. UTC fallback if unset. |
 | Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Recommended for tax-invoice compliance; renders only when populated. No bank/tax-ID data ever — that policy carries through from earlier. |
 | External Actions | None on the financial-data path | Inherited from source issue. |
+| Receipt storage (reimbursements) | Contractor drags receipt files (PDF/PNG/JPG) into the issue form; at `/submit` the engine downloads the attachments (token-authenticated fetch — no official API) and **commits them to `receipts/{period}/{submission_id}/`** on the submission branch; on approval-merge they are **attached to the PSL email** alongside the claim PDF. Receipts are claim-level (a bundle), not per-line-item. Size posture: warn in the PR body at >10 MB/file or >15 MB total (Gmail ~25 MB cap); warn-don't-block. | Decided 2026-06-11. Full audit trail in git (receipts survive issue deletion and travel with the financial record); PSL receives the evidence without GitHub access; contractor UX stays "drag into the form". PII-on-receipts accepted — same posture as settings/contract data in private repos (§11). Trade-off accepted: binary growth in contractor repo history at this volume. |
+| Reimbursement currency | **One currency per claim** (form dropdown, AUD/USD/JPY). A multi-currency trip is filed as one claim per currency; same-month claims take the standard `-B` supplemental suffix. | Decided 2026-06-11. Keeps form, parser, totals cross-check, PDF, ledger, and email subject single-currency-simple; each PSL payout is single-currency anyway. Per-line-item currency reconsidered and rejected — it touches every layer for marginal contractor convenience. |
+| Reimbursement arrangement config | New per-repo file **`config/reimbursements.yml`** holding `project` (PSL funding code, rendered as "Project" on PDF + email like contracts), `allowed_categories`, and `ledger_issue`. `config/settings.yml` stays pure identity (name/github/email/address + admin + notifications) — unchanged. | Decided 2026-06-11 after discussion. Engagement-shaped data stays out of the identity file, mirroring how contracts are separate files; pairs with `ledger/reimbursements.yml` the way `contracts/QE-X.yml` pairs with `ledger/QE-X.yml`. Rejected: a `reimbursement:` block in settings.yml (overloads the identity SSOT); a `type: reimbursement` contract file (contradicts the contractor-level decision above; gives PSL contract IDs for non-agreements). |
+| Conditional issue-form availability | **A form is present iff its config exists**: `hourly-timesheet.yml` iff ≥1 active hourly contract, `milestone-invoice.yml` iff ≥1 active milestone contract, `reimbursement-claim.yml` iff `config/reimbursements.yml` exists. `onboarding/sync_templates.py` regenerates forms from repo state (idempotent; deletes dead forms) for onboarding, retrofit, and contract changes. | Decided 2026-06-11. Replaces both the Phase 5 "multi-select" idea (presence-by-config beats an explicit picker) and the `"(no contracts yet)"` placeholder seeding, which left dead forms visible in the chooser (the §5 "empty dropdowns hide forms" description was aspirational — placeholder options are valid YAML). Reimbursement-only payees get exactly one form; adding a contract later + re-running sync surfaces the others. |
+| Reimbursement ledger | One per-repo **`ledger/reimbursements.yml`** (not per-contract): `claims[]` entries `{submission_id, period, approved_date, approved_by, amount, currency, project}` with **per-currency totals buckets** `{<CCY>: {amount_to_date, claims_count}}`; pinned ledger issue number lives in `config/reimbursements.yml` → `ledger_issue`. | Decided 2026-06-11. Claims are single-currency but a contractor may claim across currencies over time — per-currency buckets avoid meaningless cross-currency sums. Supersede semantics identical to contract ledgers. |
 
 ---
 
@@ -1050,8 +1068,8 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - ~~**Org-level recipient variables.**~~ ✅ Resolved: `vars.PSL_EMAIL` (PSL Foundation contact) and `vars.QUANTECON_EMAIL_REVIEWER` (QuantEcon human reviewer/approver, Cc) are set as org-level Variables on `QuantEcon`. Visibility: Private repositories.
 - **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
 - **Broken doc URLs in `contractor-template/`.** `contractor-template/.github/ISSUE_TEMPLATE/config.yml` and the "Need help?" link inside both `hourly-timesheet.yml` and `milestone-invoice.yml` point at `blob/main/docs/CONTRACTOR_GUIDE.md` — a path that never existed and won't, since the guide is now a published MkDocs site. Repoint at `https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/` (and the invoice equivalent) once those pages land in Phase 4. Tracked in the Phase 4 task list.
-- **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
-- **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
+- ~~**Receipt storage for Reimbursement Claims.**~~ ✅ Resolved 2026-06-11: issue attachments fetched + committed to `receipts/{period}/{submission_id}/`, attached to the PSL email; claim-level bundle; warn-don't-block size posture; receipts surface in the claim PDF as a filename list (no thumbnails/appendix — single-page constraint). See §9 "Receipt storage (reimbursements)".
+- ~~**Multi-currency for Reimbursement Claims.**~~ ✅ Resolved 2026-06-11: one currency per claim; multi-currency trips file one claim per currency (`-B` suffix for same-month). See §9 "Reimbursement currency".
 - **Parser header-row heuristic is too greedy** (Phase 3c E2E finding, 2026-05-19). `_looks_like_header` in `scripts/parse_issue.py` skips any row whose first field contains the substring `date`, `day`, `when`, `id`, or `milestone` — caught us when a contractor typed `bad-date | 2 | oops` as a data row and the parser silently skipped it, producing a false `/validate` success. Fix: tighten the heuristic to recognise the actual seeded header row (`Date | Hours | Description` / `ID | Date | Amount | Description`) rather than matching on keyword substrings. Small change + new test; non-blocking because the contractor would notice that the bad row's hours/amount didn't appear in the `/validate` totals.
 
 ---
