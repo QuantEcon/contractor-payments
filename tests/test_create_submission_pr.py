@@ -801,3 +801,17 @@ class TestRenderPrBodyReimbursement:
     def test_no_manifest_no_receipts_section(self):
         body = self._body(manifest=None)
         assert "### Receipts" not in body
+
+
+class TestEnrichReimbursementConfigGuard:
+    def test_missing_project_raises_pointed_error(self):
+        # The /validate path loads the config file directly (not via
+        # load_reimbursements_config), so the chokepoint guard is what
+        # turns an empty/incomplete config into a pointed message
+        # instead of a KeyError.
+        with pytest.raises(ValueError, match="PSL funding code"):
+            _enrich_reimbursement(config={})
+
+    def test_null_project_raises_too(self):
+        with pytest.raises(ValueError, match="config/reimbursements.yml"):
+            _enrich_reimbursement(config={"project": None, "allowed_categories": []})

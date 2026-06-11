@@ -812,7 +812,12 @@ def write_reimbursements_config(clone_dir: Path, inputs: Inputs, *,
         print(f"  [dry-run] write {rel} (project {inputs.reimbursement_project})")
         return
     source = (TEMPLATE_DIR / rel).read_text(encoding="utf-8")
-    categories_yaml = "[" + ", ".join(inputs.reimbursement_categories) + "]"
+    # safe_dump handles quoting/escaping for category names that need it
+    # (spaces, `:`, `#`, ...); flow style keeps the single-line shape the
+    # template expects. Wide width so the list never wraps.
+    categories_yaml = yaml.safe_dump(
+        inputs.reimbursement_categories, default_flow_style=True, width=10 ** 6,
+    ).strip()
     text = Template(source).safe_substitute({
         "REIMBURSEMENT_PROJECT": inputs.reimbursement_project,
         "REIMBURSEMENT_CATEGORIES": categories_yaml,

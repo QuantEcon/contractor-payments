@@ -327,6 +327,15 @@ def enrich_reimbursement(
             f"enrich_reimbursement called with type "
             f"`{submission.get('type')}` — expected `reimbursement`."
         )
+    if not reimbursements_config.get("project"):
+        # Guard at the shared chokepoint so every caller (the /validate
+        # dry-run included) fails with a pointed repo-misconfiguration
+        # message rather than a KeyError deep in the dict build.
+        raise ValueError(
+            "`project` (PSL funding code) is missing from the reimbursements "
+            "config — required so PSL can bill the claim against the right "
+            "cost centre. Fix config/reimbursements.yml."
+        )
 
     currency = submission["totals"]["currency"]
     entries = sorted(submission["entries"], key=lambda e: e["date"])
