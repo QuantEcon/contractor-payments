@@ -3,11 +3,13 @@ description: Submit an invoice for a milestone delivered on a milestone contract
 title: "Milestone invoice submission"
 labels: ["milestone-invoice", "pending-review"]
 
-# NOTE: This file is a template. It contains the `$MILESTONE_CONTRACT_OPTIONS`
-# placeholder substituted by onboarding/new-contractor.py into a real options
-# list (filtered to milestone-type contracts only) when seeded into a new
-# contractor repo. As-is, this file will NOT load as valid YAML — that is
-# intentional. See PLAN.md §4.6 and §5.
+# NOTE: This file is a template. It contains the `$$MILESTONE_CONTRACT_OPTIONS`
+# placeholder substituted by onboarding/sync_templates.py into a real options
+# list (filtered to active milestone-type contracts only) when seeded into a
+# contractor repo. The doubled $ here is a Template escape — multi-contract
+# substitutions are multi-line and must never fire inside this comment.
+# As-is, this file will NOT load as valid YAML — that is intentional.
+# See PLAN.md §4.6 and §5.
 
 body:
   - type: markdown

@@ -3,10 +3,12 @@ description: Submit a monthly timesheet for hours worked on an hourly contract.
 title: "Timesheet submission"
 labels: ["timesheet", "pending-review"]
 
-# NOTE: This file is a template. It contains `$CONTRACT_OPTIONS` placeholder
-# substituted by onboarding/new-contractor.py into a real options list when
-# seeded into a new contractor repo. As-is, this file will NOT load as valid
-# YAML — that is intentional. See PLAN.md §4.3 and §5.
+# NOTE: This file is a template. It contains a `$$CONTRACT_OPTIONS` placeholder
+# substituted by onboarding/sync_templates.py into a real options list
+# (filtered to active hourly contracts) when seeded into a contractor repo.
+# The doubled $ here is a Template escape — multi-contract substitutions are
+# multi-line and must never fire inside this comment. As-is, this file will
+# NOT load as valid YAML — that is intentional. See PLAN.md §4.3 and §5.
 
 body:
   - type: markdown

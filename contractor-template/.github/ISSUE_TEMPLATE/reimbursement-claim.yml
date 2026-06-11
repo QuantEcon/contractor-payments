@@ -3,10 +3,11 @@ description: Claim out-of-pocket expenses (travel, equipment, software, ...) wit
 title: "Reimbursement claim"
 labels: ["reimbursement", "pending-review"]
 
-# NOTE: This file is a template. It contains `$REIMBURSEMENT_CATEGORIES_REMINDER`
-# substituted by onboarding/sync_templates.py when seeded into a contractor
-# repo. The form is only seeded when the repo has reimbursements enabled
-# (config/reimbursements.yml exists). See PLAN.md §4.7 and §5.
+# NOTE: This file is a template. It contains a `$$REIMBURSEMENT_CATEGORIES_REMINDER`
+# placeholder substituted by onboarding/sync_templates.py when seeded into a
+# contractor repo (the doubled $ here is a Template escape so the substitution
+# never fires inside this comment). The form is only seeded when the repo has
+# reimbursements enabled (config/reimbursements.yml exists). See PLAN.md §4.7 and §5.
 
 body:
   - type: markdown
