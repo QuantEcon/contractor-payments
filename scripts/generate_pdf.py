@@ -105,6 +105,7 @@ def _add_display_strings(data: dict) -> dict:
 _TEMPLATE_FOR_TYPE = {
     "timesheet": "timesheet.typ",
     "milestone_invoice": "invoice.typ",
+    "reimbursement": "reimbursement.typ",
 }
 
 
