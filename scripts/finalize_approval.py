@@ -7,10 +7,11 @@ and `approved_date` both null. This script updates those three fields and
 re-renders the PDF + PNG so the approval block flips from the amber
 "PENDING REVIEW" state to the green "APPROVED BY @... ON ..." state.
 
-The template at templates/timesheet.typ + templates/invoice.typ already
-handles the rendering branch based on whether `approved_by` is null — see
-the approval block at the bottom of each template. No template change is
-needed.
+The templates (templates/timesheet.typ, templates/invoice.typ,
+templates/reimbursement.typ) already handle the rendering branch based on
+whether `approved_by` is null — see the approval block at the bottom of
+each template. This script is type-agnostic; generate_pdf dispatches on
+`type`.
 
 CLI:
   python -m scripts.finalize_approval \\

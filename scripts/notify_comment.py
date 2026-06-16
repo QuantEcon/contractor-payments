@@ -76,7 +76,10 @@ def compose_comment(
     """
     submission_type = submission.get("type", "timesheet")
     type_label = _TYPE_LABEL.get(submission_type, "Submission")
-    contract_id = submission["contract_id"]
+    # Contractor-level reimbursements carry no contract_id — the PSL funding
+    # project stands in wherever the contract reference would render.
+    contract_id = submission.get("contract_id")
+    project = submission.get("project")
     period = submission["period"]
     approver = submission.get("approved_by", "—")
     approved_date = submission.get("approved_date", "—")
@@ -92,6 +95,15 @@ def compose_comment(
             f"(running total: {_fmt_amount(totals.get('amount_to_date', 0), currency)} {currency} "
             f"across {totals.get('submissions_count', 0)} submission(s); "
             f"{totals.get('hours_to_date', 0)} hours)."
+        )
+    elif ledger.get("type") == "reimbursement":
+        # Per-currency buckets: report the running total for this claim's
+        # currency only — cross-currency sums would be meaningless.
+        bucket = (ledger.get("totals") or {}).get(currency, {})
+        ledger_line = (
+            f"📒 **Ledger:** `reimbursements` — added {amount_display} "
+            f"(running total: {_fmt_amount(bucket.get('amount_to_date', 0), currency)} {currency} "
+            f"across {bucket.get('claims_count', 0)} {currency} claim(s))."
         )
     else:  # milestone
         totals = ledger.get("totals", {})
@@ -125,10 +137,15 @@ def compose_comment(
                 f"📧 **Email:** sent to {recipients} at {sent_at}{mode_note}."
             )
 
+    reference_line = (
+        f"**Project:** `{project or '—'}`  "
+        if submission_type == "reimbursement"
+        else f"**Contract:** `{contract_id}`  "
+    )
     lines = [
         f"✅ **{type_label} approved** by @{approver} on {approved_date}.",
         "",
-        f"**Contract:** `{contract_id}`  ",
+        reference_line,
         f"**Period:** `{period}`  ",
         f"**Amount:** {amount_display}",
         "",

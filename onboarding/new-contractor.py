@@ -39,6 +39,11 @@ if str(ENGINE_ROOT) not in sys.path:
 from scripts.setup_labels import LABELS as WORKFLOW_LABELS, create_label  # noqa: E402
 from scripts.update_ledger import empty_ledger  # noqa: E402
 from scripts.update_ledger_issue import render_body  # noqa: E402
+from onboarding.sync_templates import (  # noqa: E402
+    init_reimbursement_ledger,
+    open_pinned_issue,
+    sync_issue_templates,
+)
 
 
 # ─── Constants ──────────────────────────────────────────────────────────────
@@ -49,7 +54,14 @@ TEMPLATE_DIR = ENGINE_ROOT / "contractor-template"
 CLONES_DIR = ENGINE_ROOT / "contractors"
 
 SUPPORTED_CURRENCIES = {"AUD", "USD", "JPY"}
-CONTRACT_TYPES = {"hourly", "milestone"}
+# `none` = reimbursement-only payee (Phase 5): no contract; the repo offers
+# just the Reimbursement Claim form. Useful for one-off speakers/honoraria.
+CONTRACT_TYPES = {"hourly", "milestone", "none"}
+
+DEFAULT_REIMBURSEMENT_CATEGORIES = [
+    "travel", "accommodation", "meals", "equipment", "software",
+    "conference", "other",
+]
 
 # Default contract ID pattern (see PLAN §4.2). System accepts any string;
 # this is a prompt suggestion, not a validation rule.
@@ -67,15 +79,21 @@ class Inputs:
     admin: str
     project: str  # PSL funding/billing code (e.g. CHOW); shown as "Project" on PDFs
     role: str     # descriptive role (e.g. Research Assistant); contract metadata only
-    contract_id: str
-    contract_type: str
-    start_date: str
-    end_date: str
-    currency: str
+    contract_type: str  # hourly | milestone | none (reimbursement-only payee)
+    # Contract fields are None for `none` payees.
+    contract_id: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    currency: Optional[str] = None
     hourly_rate: Optional[float] = None
     max_hours_per_month: Optional[float] = None
     testing_mode: bool = True
     milestones: list[dict] = field(default_factory=list)
+    # Reimbursements (Phase 5): enabled ⇒ config/reimbursements.yml is seeded
+    # and the Reimbursement Claim form appears. Required for `none` payees.
+    reimbursement_enabled: bool = False
+    reimbursement_project: str = ""
+    reimbursement_categories: list[str] = field(default_factory=list)
 
 
 # ─── Subprocess helper ──────────────────────────────────────────────────────
@@ -122,7 +140,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="Contract ID, e.g. QE-PSL-2026-001. Suggested format "
                         "QE-{PAYER}-YYYY-NNN; system accepts any string.")
     p.add_argument("--contract-type", choices=sorted(CONTRACT_TYPES),
-                   help="hourly or milestone.")
+                   help="hourly, milestone, or none (reimbursement-only payee "
+                        "— requires --reimbursement-project).")
+    p.add_argument("--reimbursement-project",
+                   help="Enable reimbursement claims with this PSL funding "
+                        "code (e.g. CHOW). Seeds config/reimbursements.yml + "
+                        "the Reimbursement Claim form.")
+    p.add_argument("--reimbursement-categories",
+                   help="Comma-separated allowed expense categories. Default: "
+                        + ", ".join(DEFAULT_REIMBURSEMENT_CATEGORIES) + ".")
+    p.add_argument("--no-reimbursement", action="store_true",
+                   help="Explicitly disable reimbursements (skips the "
+                        "interactive prompt).")
     p.add_argument("--start-date", help="Contract start date (YYYY-MM-DD).")
     p.add_argument("--end-date", help="Contract end date (YYYY-MM-DD).")
     p.add_argument("--currency", choices=sorted(SUPPORTED_CURRENCIES),
@@ -267,6 +296,7 @@ def load_config(path: str) -> dict:
             return v.isoformat()
         return v
 
+    reimbursement = raw.get("reimbursement") or {}
     flat = {
         "handle": raw.get("handle"),
         "name": raw.get("name"),
@@ -284,6 +314,10 @@ def load_config(path: str) -> dict:
         "max_hours_per_month": contract.get("max_hours_per_month"),
         "milestones": contract.get("milestones"),
         "testing_mode": raw.get("testing_mode"),
+        # Optional `reimbursement:` block — presence of a project code
+        # enables claims for this payee.
+        "reimbursement_project": reimbursement.get("project"),
+        "reimbursement_categories": reimbursement.get("categories"),
     }
     cleaned = {k: v for k, v in flat.items() if v is not None}
     # Preserve explicit `max_hours_per_month: null` (uncapped) — distinct
@@ -343,28 +377,33 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
         ).strip()
     role = role or ""
 
-    default_contract = f"QE-{DEFAULT_PAYER}-{date.today().year}-001"
-    contract_id = pick(args.contract_id, "contract_id") or _prompt(
-        "Contract ID", default=default_contract,
-    )
     contract_type = pick(args.contract_type, "contract_type") or _prompt_choice(
-        "Contract type", CONTRACT_TYPES,
+        "Contract type (`none` = reimbursement-only payee)", CONTRACT_TYPES,
     )
 
-    start_date = pick(args.start_date, "start_date") or _prompt(
-        "Start date (YYYY-MM-DD)", default=str(date.today().replace(day=1)),
-    )
-    end_date = pick(args.end_date, "end_date") or _prompt(
-        "End date (YYYY-MM-DD)",
-        default=str(date(date.today().year, 12, 31)),
-    )
-    currency = pick(args.currency, "currency") or _prompt_choice(
-        "Currency", SUPPORTED_CURRENCIES,
-    )
-
+    contract_id: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    currency: Optional[str] = None
     hourly_rate = None
     max_hours = None
     milestones: list[dict] = []
+
+    if contract_type != "none":
+        default_contract = f"QE-{DEFAULT_PAYER}-{date.today().year}-001"
+        contract_id = pick(args.contract_id, "contract_id") or _prompt(
+            "Contract ID", default=default_contract,
+        )
+        start_date = pick(args.start_date, "start_date") or _prompt(
+            "Start date (YYYY-MM-DD)", default=str(date.today().replace(day=1)),
+        )
+        end_date = pick(args.end_date, "end_date") or _prompt(
+            "End date (YYYY-MM-DD)",
+            default=str(date(date.today().year, 12, 31)),
+        )
+        currency = pick(args.currency, "currency") or _prompt_choice(
+            "Currency", SUPPORTED_CURRENCIES,
+        )
 
     if contract_type == "hourly":
         hourly_rate = pick(args.hourly_rate, "hourly_rate")
@@ -395,7 +434,7 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
                 "--no-max-hours-per-month (or `max_hours_per_month: <N>|null` "
                 "in the config file)."
             )
-    else:
+    elif contract_type == "milestone":
         if args.milestone_notes_file:
             data = yaml.safe_load(
                 Path(args.milestone_notes_file).read_text(encoding="utf-8"),
@@ -405,6 +444,66 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
             milestones = config["milestones"] or []
         else:
             milestones = _open_editor_for_milestones()
+
+    # Reimbursements (Phase 5). Enabled when a funding project code is
+    # supplied (flag or config `reimbursement.project`), or interactively.
+    # Required for `none` payees — the repo would otherwise offer no forms.
+    reimbursement_project = pick(args.reimbursement_project,
+                                 "reimbursement_project")
+    raw_categories = pick(args.reimbursement_categories,
+                          "reimbursement_categories")
+    if isinstance(raw_categories, str):
+        reimbursement_categories = [
+            c.strip() for c in raw_categories.split(",") if c.strip()
+        ]
+    else:
+        reimbursement_categories = list(raw_categories or [])
+
+    if args.no_reimbursement:
+        if contract_type == "none":
+            raise SystemExit(
+                "ERROR: --no-reimbursement is incompatible with contract "
+                "type `none` — a reimbursement-only payee needs claims enabled."
+            )
+        reimbursement_enabled = False
+    elif reimbursement_project:
+        reimbursement_enabled = True
+    elif contract_type == "none":
+        if interactive:
+            reimbursement_project = _prompt(
+                "Reimbursement funding/billing code (e.g. CHOW)",
+                default=project or None,
+            )
+            reimbursement_enabled = True
+        else:
+            raise SystemExit(
+                "ERROR: contract type `none` requires --reimbursement-project "
+                "(or `reimbursement.project` in the config file)."
+            )
+    elif interactive:
+        answer = input("Enable reimbursement claims for this payee? [y/N]: ")
+        reimbursement_enabled = answer.strip().lower() in {"y", "yes"}
+        if reimbursement_enabled:
+            reimbursement_project = _prompt(
+                "Reimbursement funding/billing code (e.g. CHOW)",
+                default=project or None,
+            )
+    else:
+        reimbursement_enabled = False
+
+    if reimbursement_enabled and not reimbursement_categories:
+        if interactive:
+            default_categories = ", ".join(DEFAULT_REIMBURSEMENT_CATEGORIES)
+            raw = input(
+                f"Allowed expense categories (comma-separated) "
+                f"[{default_categories}]: "
+            ).strip()
+            reimbursement_categories = (
+                [c.strip() for c in raw.split(",") if c.strip()]
+                if raw else list(DEFAULT_REIMBURSEMENT_CATEGORIES)
+            )
+        else:
+            reimbursement_categories = list(DEFAULT_REIMBURSEMENT_CATEGORIES)
 
     # Email mode: production (testing_mode=false) is an explicit opt-in, so both
     # the default and the silence-fallback are "testing" (never email PSL).
@@ -424,6 +523,9 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
         start_date=start_date, end_date=end_date, currency=currency,
         hourly_rate=hourly_rate, max_hours_per_month=max_hours,
         testing_mode=testing_mode, milestones=milestones,
+        reimbursement_enabled=reimbursement_enabled,
+        reimbursement_project=reimbursement_project or "",
+        reimbursement_categories=reimbursement_categories,
     )
 
 
@@ -438,14 +540,27 @@ def validate(inputs: Inputs) -> list[str]:
     errors: list[str] = []
     if not _HANDLE_RE.match(inputs.handle):
         errors.append(f"GitHub handle `{inputs.handle}` looks malformed.")
-    if not _DATE_RE.match(inputs.start_date):
-        errors.append(f"start_date `{inputs.start_date}` must be YYYY-MM-DD.")
-    if not _DATE_RE.match(inputs.end_date):
-        errors.append(f"end_date `{inputs.end_date}` must be YYYY-MM-DD.")
-    if inputs.currency not in SUPPORTED_CURRENCIES:
-        errors.append(f"currency `{inputs.currency}` not in {sorted(SUPPORTED_CURRENCIES)}.")
     if inputs.contract_type not in CONTRACT_TYPES:
         errors.append(f"contract_type `{inputs.contract_type}` invalid.")
+
+    if inputs.contract_type == "none":
+        # Reimbursement-only payee: no contract fields; claims must be on or
+        # the repo would offer no submission forms at all.
+        if not inputs.reimbursement_enabled:
+            errors.append(
+                "contract type `none` (reimbursement-only payee) requires "
+                "reimbursements enabled (--reimbursement-project)."
+            )
+    else:
+        if not inputs.contract_id:
+            errors.append("contract_id is required for contract-backed payees.")
+        if not inputs.start_date or not _DATE_RE.match(inputs.start_date):
+            errors.append(f"start_date `{inputs.start_date}` must be YYYY-MM-DD.")
+        if not inputs.end_date or not _DATE_RE.match(inputs.end_date):
+            errors.append(f"end_date `{inputs.end_date}` must be YYYY-MM-DD.")
+        if inputs.currency not in SUPPORTED_CURRENCIES:
+            errors.append(f"currency `{inputs.currency}` not in {sorted(SUPPORTED_CURRENCIES)}.")
+
     if inputs.contract_type == "hourly" and inputs.hourly_rate is None:
         errors.append("hourly contracts require --hourly-rate.")
     if (inputs.contract_type == "hourly"
@@ -462,6 +577,12 @@ def validate(inputs: Inputs) -> list[str]:
                     f"milestones[{i}]: each entry needs id, date, amount "
                     f"(got keys: {sorted(m.keys())})"
                 )
+
+    if inputs.reimbursement_enabled and not inputs.reimbursement_project:
+        errors.append(
+            "reimbursements enabled but no funding project code given "
+            "(--reimbursement-project)."
+        )
     return errors
 
 
@@ -548,37 +669,57 @@ def render_plan(inputs: Inputs) -> str:
         f"  Admin         : @{inputs.admin}",
         f"  Project (code): {inputs.project or '(none)'}",
         f"  Role          : {inputs.role or '(none)'}",
-        f"  Contract      : {inputs.contract_id} ({inputs.contract_type}, "
-        f"{inputs.currency})",
-        f"  Period        : {inputs.start_date} → {inputs.end_date}",
     ]
+    if inputs.contract_type == "none":
+        lines.append("  Contract      : (none — reimbursement-only payee)")
+    else:
+        lines.append(
+            f"  Contract      : {inputs.contract_id} ({inputs.contract_type}, "
+            f"{inputs.currency})"
+        )
+        lines.append(f"  Period        : {inputs.start_date} → {inputs.end_date}")
     if inputs.contract_type == "hourly":
         lines.append(f"  Hourly rate   : {inputs.hourly_rate} {inputs.currency}")
         cap = inputs.max_hours_per_month
         lines.append(f"  Max hrs/month : {cap if cap is not None else 'uncapped'}")
-    else:
+    elif inputs.contract_type == "milestone":
         lines.append(f"  Milestones    : {len(inputs.milestones)} entries")
         for m in inputs.milestones:
             lines.append(
                 f"    #{m['id']:>2} {m['date']}  "
                 f"{m['amount']} {inputs.currency}  {m.get('description', '')}"
             )
+    if inputs.reimbursement_enabled:
+        lines.append(
+            f"  Reimbursements: ENABLED — project {inputs.reimbursement_project}; "
+            f"categories: {', '.join(inputs.reimbursement_categories)}"
+        )
+    else:
+        lines.append("  Reimbursements: disabled")
     mode_str = ("TESTING — emails go to the QuantEcon reviewer only (PSL NOT contacted)"
                 if inputs.testing_mode
                 else "PRODUCTION — approved submissions email PSL Foundation")
     lines.append(f"  Email mode    : {mode_str}")
+    contract_step = (
+        f"  4. Generate contracts/{inputs.contract_id}.yml"
+        if inputs.contract_type != "none"
+        else "  4. (no contract — reimbursement-only payee)"
+    )
+    if inputs.reimbursement_enabled:
+        contract_step += " + config/reimbursements.yml"
     lines += [
         "",
         "Steps:",
         f"  1. Create private repo {repo_full_name(inputs.handle)}",
         f"  2. Clone into {CLONES_DIR}/contractor-{inputs.handle}",
-        f"  3. Seed from {TEMPLATE_DIR.relative_to(ENGINE_ROOT)}/",
-        f"  4. Generate contracts/{inputs.contract_id}.yml",
+        f"  3. Seed from {TEMPLATE_DIR.relative_to(ENGINE_ROOT)}/ "
+        f"(issue forms via sync_templates presence rule)",
+        contract_step,
         f"  5. Initial commit + push",
         f"  6. Create {len(WORKFLOW_LABELS)} workflow labels",
         f"  7. Set delete_branch_on_merge=true",
         f"  8. Add collaborators (contractor=Write, admin=Admin)",
-        f"  9. Open pinned ledger issue + write its number back to the contract",
+        f"  9. Open pinned ledger issue(s) + wire the number(s) back",
         "═" * 60,
         "",
     ]
@@ -600,41 +741,20 @@ def _format_address_yaml(address: str) -> str:
     return "|\n" + body
 
 
-def _contract_options_yaml(contract_ids: list[str]) -> str:
-    """Render contract IDs as the indented options block that substitutes
-    into the Issue Form `$CONTRACT_OPTIONS` placeholder."""
-    if not contract_ids:
-        return '        - "(no contracts yet)"'
-    return "\n".join(f'        - "{cid}"' for cid in contract_ids)
-
-
-def _hourly_contract_reminder(inputs: "Inputs") -> str:
-    """Render the active-hourly-contracts reminder block (substitutes into
-    `$HOURLY_CONTRACT_REMINDER`). Each line is indented to match the
-    enclosing `value: |` markdown block.
-
-    Onboarding seeds the first contract; admins extend this list by hand
-    when contracts are renewed (same pattern as the Contract dropdown)."""
-    if inputs.contract_type != "hourly":
-        return "        - _(no hourly contracts yet)_"
-    return f"        - `{inputs.contract_id}` — {inputs.currency}, {inputs.hourly_rate}/hour"
-
-
-def _milestone_contract_reminder(inputs: "Inputs") -> str:
-    """Render the active-milestone-contracts reminder block (substitutes
-    into `$MILESTONE_CONTRACT_REMINDER`). Each line indented to match the
-    enclosing `value: |` markdown block."""
-    if inputs.contract_type != "milestone":
-        return "        - _(no milestone contracts yet)_"
-    return f"        - `{inputs.contract_id}` — {inputs.currency} (milestone)"
-
-
 def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
-    """Copy contractor-template/ into clone_dir, then substitute placeholders.
+    """Copy contractor-template/ into clone_dir, then substitute the
+    identity placeholders.
 
-    Idempotent within a single run: removes the target if it already exists
-    (caller guarantees this is a fresh dir under contractors/, which is
-    gitignored and untracked)."""
+    Issue forms are NOT substituted here — once the contract YAML and
+    config/reimbursements.yml are written, `execute()` calls
+    sync_templates.sync_issue_templates(), which regenerates the forms from
+    repo state (the same code path used for retrofits, so seeding and
+    retrofit can never drift). The raw form templates copied here are
+    placeholder-bearing intermediates that sync immediately rewrites or
+    deletes per the presence rule.
+
+    Idempotent within a single run: the caller guarantees clone_dir is a
+    fresh checkout under contractors/ (gitignored)."""
     if dry_run:
         print(f"  [dry-run] copy {TEMPLATE_DIR} → {clone_dir} (preserving git history)")
     else:
@@ -649,26 +769,22 @@ def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+        # The reimbursements config template only belongs in repos that
+        # enable claims; write_reimbursements_config() re-creates it with
+        # real values when enabled.
+        (clone_dir / "config" / "reimbursements.yml").unlink(missing_ok=True)
 
-    # Substitute placeholders in the templated files.
-    hourly_ids = [inputs.contract_id] if inputs.contract_type == "hourly" else []
-    milestone_ids = [inputs.contract_id] if inputs.contract_type == "milestone" else []
+    # Substitute the identity placeholders.
     substitutions = {
         "ADMIN": inputs.admin,
         "CONTRACTOR_NAME": inputs.name,
         "CONTRACTOR_HANDLE": inputs.handle,
         "CONTRACTOR_EMAIL": inputs.email,
         "CONTRACTOR_ADDRESS_BLOCK": _format_address_yaml(inputs.address),
-        "CONTRACT_OPTIONS": _contract_options_yaml(hourly_ids),
-        "MILESTONE_CONTRACT_OPTIONS": _contract_options_yaml(milestone_ids),
-        "HOURLY_CONTRACT_REMINDER": _hourly_contract_reminder(inputs),
-        "MILESTONE_CONTRACT_REMINDER": _milestone_contract_reminder(inputs),
         "TESTING_MODE": "true" if inputs.testing_mode else "false",
     }
     templated_files = [
         ".github/CODEOWNERS",
-        ".github/ISSUE_TEMPLATE/hourly-timesheet.yml",
-        ".github/ISSUE_TEMPLATE/milestone-invoice.yml",
         "config/settings.yml",
         "README.md",
     ]
@@ -680,6 +796,37 @@ def seed_repo(clone_dir: Path, inputs: Inputs, *, dry_run: bool) -> None:
         text = path.read_text(encoding="utf-8")
         path.write_text(Template(text).safe_substitute(substitutions),
                         encoding="utf-8")
+
+
+def write_reimbursements_config(clone_dir: Path, inputs: Inputs, *,
+                                dry_run: bool) -> None:
+    """Write config/reimbursements.yml from the template (or ensure its
+    absence when reimbursements are disabled). File presence is what gates
+    the Reimbursement Claim form (PLAN §9)."""
+    rel = "config/reimbursements.yml"
+    if not inputs.reimbursement_enabled:
+        if dry_run:
+            print(f"  [dry-run] {rel} not seeded (reimbursements disabled)")
+        return
+    if dry_run:
+        print(f"  [dry-run] write {rel} (project {inputs.reimbursement_project})")
+        return
+    source = (TEMPLATE_DIR / rel).read_text(encoding="utf-8")
+    # safe_dump handles quoting/escaping for category names that need it
+    # (spaces, `:`, `#`, ...); flow style keeps the single-line shape the
+    # template expects. Wide width so the list never wraps.
+    categories_yaml = yaml.safe_dump(
+        inputs.reimbursement_categories, default_flow_style=True, width=10 ** 6,
+    ).strip()
+    text = Template(source).safe_substitute({
+        "REIMBURSEMENT_PROJECT": inputs.reimbursement_project,
+        "REIMBURSEMENT_CATEGORIES": categories_yaml,
+        # Wired by the reimbursement-ledger step once the issue exists.
+        "REIMBURSEMENT_LEDGER_ISSUE": "null",
+    })
+    path = clone_dir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def build_contract_yaml(inputs: Inputs) -> dict:
@@ -759,14 +906,27 @@ def execute(inputs: Inputs, *, dry_run: bool) -> Optional[str]:
             sys.exit(1)
     run(["gh", "repo", "clone", full, str(clone_dir)], dry_run=dry_run)
 
-    # 3. Seed from template + substitute placeholders.
+    # 3. Seed from template + substitute identity placeholders.
     print("→ Seeding from contractor-template/")
     seed_repo(clone_dir, inputs, dry_run=dry_run)
 
-    # 4. Generate contracts/{id}.yml.
-    print("→ Writing contract")
-    contract = build_contract_yaml(inputs)
-    write_contract(clone_dir, contract, dry_run=dry_run)
+    # 4. Generate contracts/{id}.yml + config/reimbursements.yml, then
+    # regenerate the issue forms from that repo state (presence rule —
+    # same code path as retrofit, see sync_templates.py).
+    contract: Optional[dict] = None
+    if inputs.contract_type != "none":
+        print("→ Writing contract")
+        contract = build_contract_yaml(inputs)
+        write_contract(clone_dir, contract, dry_run=dry_run)
+    else:
+        print("→ No contract (reimbursement-only payee)")
+    write_reimbursements_config(clone_dir, inputs, dry_run=dry_run)
+    if dry_run:
+        print("  [dry-run] sync issue templates (presence rule) from repo state")
+    else:
+        changed = sync_issue_templates(clone_dir)
+        for rel in changed:
+            print(f"  synced {rel}")
 
     # 5. Initial commit + push. Force the branch name to `main` so the
     # script doesn't depend on the local git `init.defaultBranch` config —
@@ -805,71 +965,53 @@ def execute(inputs: Inputs, *, dry_run: bool) -> Optional[str]:
              f"repos/{full}/collaborators/{inputs.admin}",
              "-f", "permission=admin"], dry_run=dry_run)
 
-    # 9. Open the pinned ledger issue and write its number back to the contract.
-    print("→ Opening pinned ledger issue")
-    ledger_type = "hourly" if inputs.contract_type == "hourly" else "milestone"
-    ledger = empty_ledger(
-        ledger_type=ledger_type,
-        contract_id=inputs.contract_id,
-        currency=inputs.currency,
-    )
-    body = render_body(ledger, contract)
-    issue_number = open_ledger_issue(full, contract, body, dry_run=dry_run)
+    # 9. Open the pinned ledger issue(s) and wire the number(s) back.
+    if contract is not None:
+        print("→ Opening pinned ledger issue (contract)")
+        ledger_type = "hourly" if inputs.contract_type == "hourly" else "milestone"
+        ledger = empty_ledger(
+            ledger_type=ledger_type,
+            contract_id=inputs.contract_id,
+            currency=inputs.currency,
+        )
+        body = render_body(ledger, contract)
+        issue_number = open_pinned_issue(
+            full, f"📒 Running ledger — {contract['contract_id']}", body,
+            dry_run=dry_run,
+        )
 
-    if issue_number is not None:
-        print(f"→ Writing ledger_issue: {issue_number} back to contract")
-        contract["ledger_issue"] = issue_number
-        write_contract(clone_dir, contract, dry_run=dry_run)
-        run(["git", "add", f"contracts/{inputs.contract_id}.yml"],
-            dry_run=dry_run, cwd=clone_dir)
-        run(["git", "commit", "-m",
-             f"Wire up ledger issue #{issue_number} for {inputs.contract_id}"],
-            dry_run=dry_run, cwd=clone_dir)
-        run(["git", "push"], dry_run=dry_run, cwd=clone_dir)
+        if issue_number is not None:
+            print(f"→ Writing ledger_issue: {issue_number} back to contract")
+            contract["ledger_issue"] = issue_number
+            write_contract(clone_dir, contract, dry_run=dry_run)
+            run(["git", "add", f"contracts/{inputs.contract_id}.yml"],
+                dry_run=dry_run, cwd=clone_dir)
+            run(["git", "commit", "-m",
+                 f"Wire up ledger issue #{issue_number} for {inputs.contract_id}"],
+                dry_run=dry_run, cwd=clone_dir)
+            run(["git", "push"], dry_run=dry_run, cwd=clone_dir)
+
+    if inputs.reimbursement_enabled:
+        print("→ Opening pinned ledger issue (reimbursements)")
+        if dry_run:
+            print("  [dry-run] gh issue create \"📒 Running ledger — Reimbursements\" "
+                  "+ wire ledger_issue into config/reimbursements.yml")
+            reimbursement_issue = None
+        else:
+            reimbursement_issue = init_reimbursement_ledger(
+                clone_dir, full, dry_run=False,
+            )
+        if reimbursement_issue is not None:
+            run(["git", "add", "config/reimbursements.yml"],
+                dry_run=dry_run, cwd=clone_dir)
+            run(["git", "commit", "-m",
+                 f"Wire up reimbursements ledger issue #{reimbursement_issue}"],
+                dry_run=dry_run, cwd=clone_dir)
+            run(["git", "push"], dry_run=dry_run, cwd=clone_dir)
 
     if dry_run:
         return None
     return f"https://github.com/{full}"
-
-
-def open_ledger_issue(repo: str, contract: dict, body: str, *,
-                      dry_run: bool) -> Optional[int]:
-    """Create the pinned + locked ledger issue. Returns the issue number,
-    or None under dry-run."""
-    title = f"📒 Running ledger — {contract['contract_id']}"
-    if dry_run:
-        print(f"  [dry-run] gh issue create --title \"{title}\" --label ledger --body <body>")
-        print(f"  [dry-run] gh issue pin <N>")
-        print(f"  [dry-run] gh issue lock <N>")
-        return None
-
-    # Ensure the `ledger` label exists before applying it (it's not part of
-    # WORKFLOW_LABELS, which covers submission-flow labels only).
-    create_label("ledger", "Pinned running-totals issue", "5319e7", repo)
-
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
-        f.write(body)
-        body_path = Path(f.name)
-    try:
-        r = subprocess.run(
-            ["gh", "issue", "create", "--repo", repo, "--title", title,
-             "--label", "ledger", "--body-file", str(body_path)],
-            capture_output=True, text=True, check=True,
-        )
-    finally:
-        body_path.unlink(missing_ok=True)
-
-    # `gh issue create` prints the issue URL on stdout; pull the number.
-    url = r.stdout.strip().splitlines()[-1]
-    match = re.search(r"/issues/(\d+)$", url)
-    if not match:
-        print(f"WARNING: couldn't parse issue number from `{url}`.",
-              file=sys.stderr)
-        return None
-    n = int(match.group(1))
-    subprocess.run(["gh", "issue", "pin", str(n), "--repo", repo], check=True)
-    subprocess.run(["gh", "issue", "lock", str(n), "--repo", repo], check=True)
-    return n
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 """Tests for testing_mode resolution in scripts/notify_email.py.
 
 The SMTP / compose / send paths are integration territory (exercised against
-`contractor-engine-test` during Phase 2 E2E). These tests cover the per-repo
+`test-contractor-payments` during Phase 2 E2E). These tests cover the per-repo
 `testing_mode` precedence, which decides whether PSL is ever contacted — so
 the fail-safe direction (never email PSL unless explicitly told to) matters.
 """
@@ -90,3 +90,92 @@ class TestEffectiveTestingMode:
         fh = _write_fiscal_host(tmp_path, True)
         settings = {"notifications": {"testing_mode": None}}
         assert _effective_testing_mode(settings, fh) == (True, _ENGINE_DEFAULT)
+
+
+# ─── Message composition (Phase 5 adds the reimbursement branch) ────────────
+
+class TestComposeMessage:
+    def _submission(self, **overrides):
+        sub = {
+            "submission_id": "janedoe-reimbursement-2026-06",
+            "type": "reimbursement",
+            "project": "CHOW",
+            "period": "2026-06",
+            "approved_by": "mmcky",
+            "approved_date": "2026-06-12",
+            "totals": {"amount": 12300, "currency": "JPY"},
+        }
+        sub.update(overrides)
+        return sub
+
+    def _compose(self, tmp_path, submission=None, receipts=()):
+        from scripts.notify_email import compose_message
+        pdf = tmp_path / "claim.pdf"
+        pdf.write_bytes(b"%PDF fake")
+        receipt_paths = []
+        for name in receipts:
+            rp = tmp_path / name
+            rp.write_bytes(b"\x89PNG fake" if name.endswith(".png") else b"%PDF fake")
+            receipt_paths.append(rp)
+        return compose_message(
+            submission=submission or self._submission(),
+            contractor={"name": "Jane Doe", "github": "janedoe"},
+            pdf_path=pdf,
+            issue_url="https://github.com/QuantEcon/x/issues/42",
+            sender="payments@example.org",
+            to="psl@example.org",
+            cc=None,
+            reply_to="payments@example.org",
+            receipt_paths=receipt_paths,
+        )
+
+    def test_reimbursement_subject_uses_type_label(self, tmp_path):
+        msg = self._compose(tmp_path)
+        assert "Reimbursement Claim approved" in msg["Subject"]
+        assert "12,300 JPY" in msg["Subject"]
+
+    def test_project_line_replaces_contract_line(self, tmp_path):
+        msg = self._compose(tmp_path)
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "Project:       CHOW" in body
+        assert "Contract:" not in body
+
+    def test_receipts_attached_with_mime_types(self, tmp_path):
+        msg = self._compose(
+            tmp_path, receipts=("01-taxi.png", "02-hotel.pdf"),
+        )
+        attachments = list(msg.iter_attachments())
+        names = [a.get_filename() for a in attachments]
+        assert names == ["claim.pdf", "01-taxi.png", "02-hotel.pdf"]
+        types = [a.get_content_type() for a in attachments]
+        assert types == ["application/pdf", "image/png", "application/pdf"]
+
+    def test_body_counts_receipts(self, tmp_path):
+        msg = self._compose(tmp_path, receipts=("01-taxi.png",))
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "1 receipt file(s)" in body
+
+    def test_timesheet_body_unchanged(self, tmp_path):
+        submission = {
+            "submission_id": "janedoe-timesheet-2026-04",
+            "type": "timesheet",
+            "contract_id": "QE-PSL-2026-001",
+            "period": "2026-04",
+            "approved_by": "mmcky",
+            "approved_date": "2026-05-13",
+            "totals": {"amount": 725.0, "currency": "AUD"},
+        }
+        msg = self._compose(tmp_path, submission=submission)
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "Contract:      QE-PSL-2026-001" in body
+        assert "Project:" not in body
+        assert "Attached: the approved invoice PDF." in body
+
+    def test_revision_marker_in_subject(self, tmp_path):
+        msg = self._compose(
+            tmp_path,
+            submission=self._submission(
+                supersedes="janedoe-reimbursement-2026-06",
+            ),
+        )
+        assert "REVISION approved" in msg["Subject"]

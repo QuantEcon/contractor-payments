@@ -79,7 +79,7 @@ class TestEmptyLedger:
         assert "hours_to_date" not in ledger["totals"]
 
     def test_unknown_type_raises(self):
-        bad = {**HOURLY_SUBMISSION, "type": "reimbursement"}  # Phase 5; not yet
+        bad = {**HOURLY_SUBMISSION, "type": "stipend"}  # no such type
         with pytest.raises(ValueError, match="Unknown submission type"):
             _empty_ledger(bad)
 
@@ -379,3 +379,131 @@ class TestRounding:
         out = append_submission(sub2, ledger)
         # 4.1 + 4.2 = 8.299999... in float — should round cleanly
         assert out["totals"]["hours_to_date"] == 8.3
+
+
+# ─── Reimbursement ledger (Phase 5) ─────────────────────────────────────────
+
+REIMBURSEMENT_SUBMISSION = {
+    "submission_id": "janedoe-reimbursement-2026-06",
+    "type": "reimbursement",
+    "project": "CHOW",
+    "period": "2026-06",
+    "approved_date": "2026-06-12",
+    "approved_by": "mmcky",
+    "entries": [
+        {"date": "2026-06-03", "amount": 12000, "category": "accommodation",
+         "description": "Hotel"},
+        {"date": "2026-06-05", "amount": 300, "category": "meals",
+         "description": "Dinner"},
+    ],
+    "receipts": [
+        {"filename": "01-taxi.png", "source_url": "https://github.com/user-attachments/assets/aaa"},
+    ],
+    "totals": {"amount": 12300, "currency": "JPY"},
+    "status": "approved",
+}
+
+
+class TestEmptyReimbursementLedger:
+    def test_shape_is_contractor_level(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        assert ledger["type"] == "reimbursement"
+        assert ledger["claims"] == []
+        assert ledger["totals"] == {}
+        # Contractor-level: no contract reference, no single currency.
+        assert "contract_id" not in ledger
+        assert "currency" not in ledger
+
+
+class TestBuildReimbursementEntry:
+    def test_entry_fields(self):
+        entry = _build_entry(REIMBURSEMENT_SUBMISSION)
+        assert entry == {
+            "submission_id": "janedoe-reimbursement-2026-06",
+            "period": "2026-06",
+            "approved_date": "2026-06-12",
+            "approved_by": "mmcky",
+            "amount": 12300,
+            "currency": "JPY",
+            "project": "CHOW",
+        }
+
+
+class TestAppendReimbursement:
+    def test_first_claim_creates_currency_bucket(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        updated = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        assert len(updated["claims"]) == 1
+        assert updated["totals"] == {
+            "JPY": {"amount_to_date": 12300, "claims_count": 1},
+        }
+
+    def test_second_claim_same_currency_sums(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        ledger = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        second = {
+            **REIMBURSEMENT_SUBMISSION,
+            "submission_id": "janedoe-reimbursement-2026-07",
+            "period": "2026-07",
+            "totals": {"amount": 700, "currency": "JPY"},
+        }
+        updated = append_submission(second, ledger)
+        assert updated["totals"]["JPY"] == {
+            "amount_to_date": 13000, "claims_count": 2,
+        }
+
+    def test_claim_in_second_currency_adds_parallel_bucket(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        ledger = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        aud = {
+            **REIMBURSEMENT_SUBMISSION,
+            "submission_id": "janedoe-reimbursement-2026-06-B",
+            "totals": {"amount": 800.25, "currency": "AUD"},
+        }
+        updated = append_submission(aud, ledger)
+        assert updated["totals"] == {
+            "AUD": {"amount_to_date": 800.25, "claims_count": 1},
+            "JPY": {"amount_to_date": 12300, "claims_count": 1},
+        }
+
+    def test_duplicate_submission_id_raises(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        ledger = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        with pytest.raises(ValueError, match="already in the ledger"):
+            append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+
+    def test_type_mismatch_against_hourly_ledger_raises(self):
+        hourly_ledger = _empty_ledger(HOURLY_SUBMISSION)
+        with pytest.raises(ValueError, match="Type mismatch"):
+            append_submission(REIMBURSEMENT_SUBMISSION, hourly_ledger)
+
+    def test_supersede_replaces_within_currency_bucket(self):
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        ledger = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        revision = {
+            **REIMBURSEMENT_SUBMISSION,
+            "submission_id": "janedoe-reimbursement-2026-06-v2",
+            "supersedes": "janedoe-reimbursement-2026-06",
+            "totals": {"amount": 11800, "currency": "JPY"},
+        }
+        updated = append_submission(revision, ledger)
+        assert len(updated["claims"]) == 2
+        superseded = updated["claims"][0]
+        assert superseded["status"] == "superseded"
+        assert superseded["superseded_by"] == "janedoe-reimbursement-2026-06-v2"
+        # Totals replaced, not double-counted; count stays at 1.
+        assert updated["totals"] == {
+            "JPY": {"amount_to_date": 11800, "claims_count": 1},
+        }
+
+
+class TestReimbursementLedgerPath:
+    def test_per_repo_path(self, tmp_path):
+        from scripts.update_ledger import ledger_path_for_submission
+        path = ledger_path_for_submission(REIMBURSEMENT_SUBMISSION, tmp_path)
+        assert path == tmp_path / "ledger" / "reimbursements.yml"
+
+    def test_contract_types_unchanged(self, tmp_path):
+        from scripts.update_ledger import ledger_path_for_submission
+        path = ledger_path_for_submission(HOURLY_SUBMISSION, tmp_path)
+        assert path == tmp_path / "ledger" / "QE-PSL-2026-001.yml"

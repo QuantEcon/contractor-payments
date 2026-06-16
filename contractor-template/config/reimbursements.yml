@@ -1,0 +1,21 @@
+# Reimbursement arrangement for this contractor (engine Phase 5).
+#
+# The presence of this file enables the Reimbursement Claim issue form for
+# this repo (seeded by onboarding / onboarding/sync_templates.py); delete the
+# file and re-run sync_templates to disable reimbursements.
+#
+# NOTE: This file is a template. `$REIMBURSEMENT_PROJECT` and
+# `$REIMBURSEMENT_CATEGORIES` are substituted at seeding time; `ledger_issue`
+# is written by `sync_templates.py --init-reimbursement-ledger` once the
+# pinned ledger issue exists.
+
+# PSL funding/billing code — rendered as "Project" on claim PDFs + emails so
+# PSL knows which cost centre to bill.
+project: $REIMBURSEMENT_PROJECT
+
+# The parser rejects line-item categories not in this list.
+allowed_categories: $REIMBURSEMENT_CATEGORIES
+
+# Pinned "Running ledger — Reimbursements" issue number (auto-updated on
+# each approval). Written by onboarding / sync_templates.
+ledger_issue: $REIMBURSEMENT_LEDGER_ISSUE

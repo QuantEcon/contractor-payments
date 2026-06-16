@@ -3,7 +3,8 @@ name: Process approved submission (reusable)
 # Reusable workflow that runs after a submission PR merges:
 #   1. Stamp the submission YAML with approval metadata (status, approved_by,
 #      approved_date) and re-render PDF + PNG (amber → green block).
-#   2. Append the submission to ledger/<contract-id>.yml.
+#   2. Append the submission to ledger/<contract-id>.yml (or the per-repo
+#      ledger/reimbursements.yml for contractor-level reimbursement claims).
 #   3. Commit the re-rendered files + ledger update back to main.
 #   4. Edit the pinned ledger issue with the updated running totals.
 #   5. Send the approval email to PSL (or admin only, if testing_mode=true)
@@ -15,7 +16,7 @@ name: Process approved submission (reusable)
 # Branch-protection note: this workflow pushes directly to main (step 3).
 # That requires either no branch protection on main OR `github-actions[bot]`
 # being on the "Allow specified actors to bypass required pull requests"
-# list. For Phase 2 testing on contractor-engine-test (no protection), works
+# list. For Phase 2 testing on test-contractor-payments (no protection), works
 # as-is. For Phase 4 onboarding of real contractor repos (which DO enable
 # branch protection per PLAN §11), the onboarding script will need to add
 # github-actions[bot] to the bypass list — track this as a Phase 4 task.
@@ -100,10 +101,20 @@ jobs:
           echo "submission_file=$SUBMISSION_FILE" >> "$GITHUB_OUTPUT"
           echo "Submission file: $SUBMISSION_FILE"
 
-          CONTRACT_ID=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['contract_id'])" "$SUBMISSION_FILE")
+          # contract_id is absent on contractor-level reimbursement claims;
+          # those use the per-repo ledger/reimbursements.yml instead.
+          CONTRACT_ID=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1])).get('contract_id') or '')" "$SUBMISSION_FILE")
+          TYPE=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1])).get('type') or '')" "$SUBMISSION_FILE")
           PERIOD=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['period'])" "$SUBMISSION_FILE")
           SUBMISSION_ID=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['submission_id'])" "$SUBMISSION_FILE")
+          if [ "$TYPE" = "reimbursement" ]; then
+            LEDGER_FILE="ledger/reimbursements.yml"
+          else
+            LEDGER_FILE="ledger/${CONTRACT_ID}.yml"
+          fi
           echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+          echo "type=$TYPE" >> "$GITHUB_OUTPUT"
+          echo "ledger_file=$LEDGER_FILE" >> "$GITHUB_OUTPUT"
           echo "period=$PERIOD" >> "$GITHUB_OUTPUT"
           echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
 
@@ -143,6 +154,8 @@ jobs:
       - name: Commit re-rendered PDF/PNG + ledger to main
         id: commit_back
         run: |
+          # receipts/ arrived on main via the merge itself; only the
+          # re-rendered artifacts + ledger need committing back.
           git add submissions/ generated_pdfs/ ledger/
           if git diff --cached --quiet; then
             echo "Nothing to commit (idempotent re-run on already-processed PR?)"
@@ -159,7 +172,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python -m scripts.update_ledger_issue \
-            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
+            --ledger "${{ steps.find_submission.outputs.ledger_file }}" \
             --repo "${{ github.repository }}"
 
       - name: Send approval email
@@ -173,11 +186,15 @@ jobs:
           PSL_EMAIL: ${{ vars.PSL_EMAIL }}
           QUANTECON_EMAIL_REVIEWER: ${{ vars.QUANTECON_EMAIL_REVIEWER }}
         run: |
+          # --receipts-dir only matters for reimbursement claims; for other
+          # types the directory doesn't exist and is tolerated (no receipts
+          # attached).
           python -m scripts.notify_email \
             --submission "${{ steps.find_submission.outputs.submission_file }}" \
             --settings config/settings.yml \
             --pdf "generated_pdfs/${{ steps.find_submission.outputs.period }}/${{ steps.find_submission.outputs.submission_id }}.pdf" \
             --fiscal-host engine/templates/fiscal-host.yml \
+            --receipts-dir "receipts/${{ steps.find_submission.outputs.period }}/${{ steps.find_submission.outputs.submission_id }}" \
             --issue-url "https://github.com/${{ github.repository }}/issues/${{ steps.find_issue.outputs.issue_number }}" \
             --output-summary /tmp/email_summary.json
 
@@ -188,7 +205,7 @@ jobs:
         run: |
           python -m scripts.notify_comment \
             --submission "${{ steps.find_submission.outputs.submission_file }}" \
-            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
+            --ledger "${{ steps.find_submission.outputs.ledger_file }}" \
             --email-summary /tmp/email_summary.json \
             --issue ${{ steps.find_issue.outputs.issue_number }} \
             --pr ${{ inputs.pr_number }} \
