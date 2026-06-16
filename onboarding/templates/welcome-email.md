@@ -16,7 +16,8 @@ plain text. Placeholder reference:
 
 Hourly variant shown below. For a milestone contract: swap "timesheets" →
 "invoices", "Hourly Timesheet" → "Milestone Invoice", drop the rate/hours
-clause, and point the step-by-step link at .../contractor-guide/submit-invoice/.
+clause, and point the step-by-step link at
+https://quantecon.github.io/contractor-payments/contractor-guide/submit-invoice/.
 
 The "Sandbox Testing" bullet — and the matching "two GitHub invitations" line —
 are for contractors granted access to QuantEcon/test-contractor-payments. If you
@@ -29,7 +30,7 @@ Subject: Welcome to QuantEcon — your contractor repository
 
 Hi {{first_name}},
 
-Welcome aboard! I've set up your private repository for submitting timesheets under your QuantEcon RA contract ({{contract_id}} — {{rate}}/hour, up to {{max_hours}} hours/month, {{period}}):
+Welcome aboard! I've set up your private repository for submitting timesheets under your QuantEcon contract ({{contract_id}} — {{rate}}/hour, up to {{max_hours}} hours/month, {{period}}):
 
 {{repo_url}}
 
@@ -40,13 +41,13 @@ How it works:
   - Open a new Issue in that repo.
   - Choose the Hourly Timesheet template.
   - Add a row for each day you work through the month.
-  - Comment /validate when you're ready to submit to check formatting
+  - Comment /validate when you're ready to submit to check formatting.
   - Comment /submit when you're ready—I'll review and approve, and the rest (PDF, records, payment paperwork to PSL) is handled automatically.
 
 Resources:
 
   - Manual (Tutorials & Screenshots): https://quantecon.github.io/contractor-payments/
   - Step-by-Step Guide: https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/
-  - Sandbox Testing: You also have access to `QuantEcon/test-contractor-payments` if you'd like to try the flow in a sandbox first.
+  - Sandbox Testing: You also have access to the sandbox repo (https://github.com/QuantEcon/test-contractor-payments) if you'd like to try the flow in a sandbox first.
 
 Any questions, just reply to this email.
