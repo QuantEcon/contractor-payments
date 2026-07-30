@@ -10,6 +10,7 @@ from __future__ import annotations
 import email.message
 import hashlib
 import json
+import pathlib
 import urllib.error
 import urllib.request
 
@@ -438,3 +439,66 @@ class TestWarningsReachThePrBodyOnSuccess:
         fr._append_warnings_json(str(path), ["still reported"])
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["warnings"] == [{"message": "still reported"}]
+
+
+# ─── Real files, not crafted headers ────────────────────────────────────────
+
+_FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "receipts"
+_REAL_RECEIPTS = [
+    ("receipt-hotel.pdf", ".pdf"),
+    ("receipt-taxi.png", ".png"),
+    ("receipt-meal.jpg", ".jpg"),
+]
+
+
+class TestRealEncoderOutput:
+    """The magic-byte tests above assert against hand-written byte prefixes,
+    which cannot catch a detector that works on a synthetic 8-byte header but
+    not on what a real encoder emits. These read actual files — see
+    tests/fixtures/receipts/README.md, which also documents their second job as
+    the drag-into-an-issue assets for the manual E2E.
+    """
+
+    def test_fixtures_are_present(self):
+        """A glob that quietly matched nothing would make the rest pass."""
+        missing = [n for n, _ in _REAL_RECEIPTS if not (_FIXTURES / n).is_file()]
+        assert not missing, f"missing receipt fixtures: {missing}"
+
+    @pytest.mark.parametrize("name,expected", _REAL_RECEIPTS)
+    def test_detected_from_real_bytes(self, name, expected):
+        assert detect_extension((_FIXTURES / name).read_bytes()) == expected
+
+    @pytest.mark.parametrize("name,expected", _REAL_RECEIPTS)
+    def test_agreeing_name_is_not_duplicated(self, name, expected):
+        """`hotel.pdf` carrying PDF bytes stages as `01-hotel.pdf`, not
+        `01-hotel.pdf.pdf`."""
+        detected = detect_extension((_FIXTURES / name).read_bytes())
+        filename, warning = staged_filename(1, name, detected)
+        assert filename == f"01-{name}"
+        assert warning is None
+
+    @pytest.mark.parametrize("name,_expected", _REAL_RECEIPTS)
+    def test_content_beats_a_lying_filename(self, name, _expected):
+        """The rule that keeps a PNG from reaching the fiscal host labelled
+        `application/pdf`. Exercised here with real bytes: whatever the file
+        actually is, a contradicting name must not decide the stored type."""
+        data = (_FIXTURES / name).read_bytes()
+        detected = detect_extension(data)
+        liar = ".png" if detected != ".png" else ".pdf"
+        filename, warning = staged_filename(1, f"scan{liar}", detected)
+
+        assert filename.endswith(detected), (
+            f"stored as {filename!r}; the {detected} content must decide the "
+            f"extension, not the {liar} in the name"
+        )
+        assert warning is not None and "bytes decide" in warning
+
+    def test_every_allowed_type_has_a_fixture(self):
+        """If a type is added to the allowlist without a sample file, the
+        detector's behaviour on real bytes of that type goes untested."""
+        covered = {ext for _, ext in _REAL_RECEIPTS}
+        canonical = set(_CANONICAL_EXT.values())
+        assert canonical <= covered, (
+            f"allowlist covers {sorted(canonical)} but fixtures only cover "
+            f"{sorted(covered)} — add a sample file for the difference"
+        )
