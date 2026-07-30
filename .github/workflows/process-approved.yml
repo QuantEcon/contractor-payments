@@ -138,6 +138,7 @@ jobs:
           echo "Original issue: #$ISSUE_NUMBER"
 
       - name: Stamp approval + re-render PDF/PNG
+        id: stamp
         env:
           PYTHONPATH: engine
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -149,6 +150,7 @@ jobs:
             --approver "${{ inputs.merged_by }}"
 
       - name: Append to ledger YAML
+        id: update_ledger
         env:
           PYTHONPATH: engine
         run: |
@@ -169,6 +171,7 @@ jobs:
           fi
 
       - name: Update pinned ledger issue
+        id: ledger_issue
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -178,6 +181,7 @@ jobs:
             --repo "${{ github.repository }}"
 
       - name: Send approval email
+        id: email
         env:
           PYTHONPATH: engine
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -197,6 +201,17 @@ jobs:
             --output-summary /tmp/email_summary.json
 
       - name: Post audit comment on the original issue
+        id: audit_comment
+        # Not implicit-success(): this comment asserts the submission was
+        # located, stamped, ledgered and pushed. When those hold it should
+        # post even if a LATER step failed — an SMTP failure then yields
+        # the comment reading "Email: not sent" instead of silence.
+        if: >-
+          ${{ !cancelled()
+          && steps.find_submission.outcome == 'success'
+          && steps.stamp.outcome == 'success'
+          && steps.update_ledger.outcome == 'success'
+          && steps.commit_back.outcome == 'success' }}
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -246,8 +261,79 @@ jobs:
             "**Superseded by #${{ inputs.pr_number }}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
 
       - name: Apply `processed` label to the merged PR
+        id: label
+        # Explicit rather than implicit so a future `continue-on-error`
+        # cannot quietly make a failed run look processed. The runbook
+        # treats this label as "done"; a failed run must not wear it.
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr edit "${{ inputs.pr_number }}" --add-label "processed" \
             --repo "${{ github.repository }}"
+
+      # ─── Failure reporting ───────────────────────────────────────────────
+      # Every step above carries GitHub's implicit success(), so before this
+      # existed a mid-pipeline failure silently skipped the ledger, the email,
+      # the audit comment and the label, and the only signal was a red run
+      # nobody was watching. This says what did and did not happen, and is
+      # explicit that the `processed` label was withheld on purpose.
+      - name: Report pipeline failure on the PR and issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          O_FIND: ${{ steps.find_submission.outcome }}
+          O_STAMP: ${{ steps.stamp.outcome }}
+          O_LEDGER: ${{ steps.update_ledger.outcome }}
+          O_COMMIT: ${{ steps.commit_back.outcome }}
+          O_ISSUE: ${{ steps.ledger_issue.outcome }}
+          O_EMAIL: ${{ steps.email.outcome }}
+          O_AUDIT: ${{ steps.audit_comment.outcome }}
+        run: |
+          row() {
+            case "$2" in
+              success) MARK="✅ completed" ;;
+              failure) MARK="❌ **FAILED**" ;;
+              skipped|"") MARK="⏭️ did not run" ;;
+              *) MARK="$2" ;;
+            esac
+            printf '| %s | %s |\n' "$1" "$MARK"
+          }
+
+          # The email is the outward-facing consequence, so state it plainly:
+          # recovery differs entirely depending on whether the fiscal host has
+          # already been contacted.
+          if [ "$O_EMAIL" = "success" ]; then
+            EMAIL_LINE='The approval email **was sent** — do not re-send it during recovery.'
+          else
+            EMAIL_LINE='**No approval email was sent.** The fiscal host has not been contacted for this submission.'
+          fi
+
+          {
+            printf '> [!CAUTION]\n'
+            printf '> **The approval pipeline failed part-way through.**\n\n'
+            printf '| Step | Outcome |\n|---|---|\n'
+            row "1. Find submission"      "$O_FIND"
+            row "2. Stamp approval"       "$O_STAMP"
+            row "3. Append to ledger"     "$O_LEDGER"
+            row "4. Commit back to main"  "$O_COMMIT"
+            row "5. Pinned ledger issue"  "$O_ISSUE"
+            row "6. Approval email"       "$O_EMAIL"
+            row "7. Audit comment"        "$O_AUDIT"
+            printf '\n%s\n\n' "$EMAIL_LINE"
+            printf 'Run log: %s\n\n' "$RUN_URL"
+            printf 'The `processed` label was deliberately not applied, so this PR stays visible as unfinished.\n'
+          } > /tmp/failure_comment.md
+
+          # Post to both surfaces; a comment failure must not hide the original
+          # failure, so each is tolerated individually (the job is already red).
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/failure_comment.md \
+            || echo "WARN: could not post failure comment on PR #${PR_NUMBER}."
+          if [ -n "$ISSUE_NUMBER" ] && [ "$ISSUE_NUMBER" != "$PR_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file /tmp/failure_comment.md \
+              || echo "WARN: could not post failure comment on issue #${ISSUE_NUMBER} (locked?)."
+          fi
