@@ -3,10 +3,12 @@ description: Submit a monthly timesheet for hours worked on an hourly contract.
 title: "Timesheet submission"
 labels: ["timesheet", "pending-review"]
 
-# NOTE: This file is a template. It contains `$CONTRACT_OPTIONS` placeholder
-# substituted by onboarding/new-contractor.py into a real options list when
-# seeded into a new contractor repo. As-is, this file will NOT load as valid
-# YAML — that is intentional. See PLAN.md §4.3 and §5.
+# NOTE: This file is a template. It contains a `$$CONTRACT_OPTIONS` placeholder
+# substituted by onboarding/sync_templates.py into a real options list
+# (filtered to active hourly contracts) when seeded into a contractor repo.
+# The doubled $ here is a Template escape — multi-contract substitutions are
+# multi-line and must never fire inside this comment. As-is, this file will
+# NOT load as valid YAML — that is intentional. See PLAN.md §4.3 and §5.
 
 body:
   - type: markdown
@@ -97,8 +99,14 @@ $CONTRACT_OPTIONS
         Hours may be fractional (e.g. 4.5). Descriptions may contain
         any text — the parser splits on the first two `|` only.
 
-        **Keep the `Date | Hours | Description` header row in place** —
-        the parser uses it to recognise this as the entries table.
+        **The header row is optional but recommended.** This section's
+        **Time Entries** heading is what marks it as the entries table,
+        not the header row — a header row is simply skipped when its
+        columns read as labels (`Date | Hours | Description`, and common
+        renames like `Day | Hours | Notes`, are all recognised). Keeping
+        the seeded one is still the safest choice: it's a format
+        reminder, and a header the parser doesn't recognise is read as a
+        data row and reported as malformed.
       value: |
         Date | Hours | Description
         2026-04-06 | 3.5 | Example entry — replace or extend with your own rows

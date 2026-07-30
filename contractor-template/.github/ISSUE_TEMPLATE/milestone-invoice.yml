@@ -3,11 +3,13 @@ description: Submit an invoice for a milestone delivered on a milestone contract
 title: "Milestone invoice submission"
 labels: ["milestone-invoice", "pending-review"]
 
-# NOTE: This file is a template. It contains the `$MILESTONE_CONTRACT_OPTIONS`
-# placeholder substituted by onboarding/new-contractor.py into a real options
-# list (filtered to milestone-type contracts only) when seeded into a new
-# contractor repo. As-is, this file will NOT load as valid YAML — that is
-# intentional. See PLAN.md §4.6 and §5.
+# NOTE: This file is a template. It contains the `$$MILESTONE_CONTRACT_OPTIONS`
+# placeholder substituted by onboarding/sync_templates.py into a real options
+# list (filtered to active milestone-type contracts only) when seeded into a
+# contractor repo. The doubled $ here is a Template escape — multi-contract
+# substitutions are multi-line and must never fire inside this comment.
+# As-is, this file will NOT load as valid YAML — that is intentional.
+# See PLAN.md §4.6 and §5.
 
 body:
   - type: markdown
@@ -106,9 +108,14 @@ $MILESTONE_CONTRACT_OPTIONS
         submissions covering missed prior months. Descriptions may
         contain any text — the parser splits on the first three `|` only.
 
-        **Keep the `ID | Date | Amount | Description` header row in
-        place** — the parser uses it to recognise this as the entries
-        table.
+        **The header row is optional but recommended.** This section's
+        **Milestone Entries** heading is what marks it as the entries
+        table, not the header row — a header row is simply skipped when
+        its columns read as labels (`ID | Date | Amount | Description`,
+        and common renames, are all recognised). Keeping the seeded one
+        is still the safest choice: it's a format reminder, and a header
+        the parser doesn't recognise is read as a data row and reported
+        as malformed.
       value: |
         ID | Date | Amount | Description
         3 | 2026-07-15 | 77000 | Example entry — replace with your milestone row

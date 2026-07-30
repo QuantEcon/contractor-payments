@@ -10,6 +10,7 @@ import pytest
 from scripts.parse_issue import (
     ParseError,
     ParseResult,
+    _ATTACHMENT_URL_RE,
     _detect_delimiter,
     _parse_date,
     _parse_hours,
@@ -550,7 +551,10 @@ class TestMilestoneTypeDetection:
         )
         result = parse_issue(body)
         assert not result.ok
-        assert any("Both" in m and "Milestone" in m for m in error_messages(result))
+        assert any(
+            "Multiple entries sections" in m and "Milestone Entries" in m
+            for m in error_messages(result)
+        )
 
     def test_no_entries_section_is_rejected(self):
         body = (
@@ -641,3 +645,475 @@ class TestCrossCheckMilestoneIds:
         }
         contract = self._contract(milestones=[{"id": 1}])
         assert cross_check_milestone_ids(submission, contract) == []
+
+
+# ─── Header heuristic tightened (PLAN §10 fix, 2026-06-11) ──────────────────
+
+class TestHeaderHeuristicTightened:
+    """The old heuristic skipped any row whose first cell contained a keyword
+    substring (`date`, `id`, ...), silently dropping malformed data rows and
+    producing false `/validate` successes. A header row is now only one where
+    EVERY non-empty cell is a known column label.
+    """
+
+    def test_bad_date_row_now_errors_instead_of_silent_skip(self):
+        # The E2E finding from 2026-05-19: previously skipped as a "header".
+        body = build_body(entries=(
+            "bad-date | 2 | oops\n"
+            "2025-01-06 | 3.5 | Real work"
+        ))
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("bad-date" in m for m in error_messages(result))
+
+    def test_id_like_first_cell_no_longer_silently_dropped(self):
+        # "identify" contains "id" — the old heuristic dropped this row as a
+        # "header". Milestone IDs are free-form strings, so the correct
+        # behaviour is to keep it as a data row (the milestone-ID cross-check
+        # warns later if it isn't in the contract schedule).
+        body = build_milestone_body(entries=(
+            "identify | 2025-11-15 | 77000 | work\n"
+            "3 | 2025-11-15 | 77000 | Monthly Payment — November"
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert [e["id"] for e in result.submission["entries"]] == ["identify", "3"]
+
+    def test_seeded_headers_still_skipped(self):
+        hourly = build_body(entries=(
+            "Date | Hours | Description\n"
+            "2025-01-06 | 3.5 | NumPy review"
+        ))
+        milestone = build_milestone_body(entries=(
+            "ID | Date | Amount | Description\n"
+            "3 | 2025-11-15 | 77000 | Monthly Payment — November"
+        ))
+        for body in (hourly, milestone):
+            result = parse_issue(body)
+            assert result.ok, error_messages(result)
+            assert len(result.submission["entries"]) == 1
+
+
+class TestHandTypedHeaderVariants:
+    """Contractor repos call the engine at `@main`, so a change to the header
+    heuristic reaches every live timesheet repo the moment it merges. Requiring
+    EVERY cell to be a known label meant a header whose trailing column had
+    been renamed (`Day | Hours | Notes`) or emphasised was parsed as a data row
+    and reported as `couldn't read a date from ...` — a submission that had
+    been accepted the month before. The rule is now "first cell is exactly a
+    label, and at least one other is too", which recognises these while
+    keeping the §10 silent-skip bug closed (see the class above).
+    """
+
+    @pytest.mark.parametrize("header", [
+        "Date | Hours | Description",           # seeded
+        "Day | Hours | Notes",
+        "Date | Hours | Notes",
+        "Date | Hours | Task",
+        "Date | Hours | Comment",
+        "Date | Hrs | Description",
+        "Date | Time | Description",
+        "Day | Hours | Description",
+        "date | hours | description",
+        "**Date** | **Hours** | **Description**",
+        "`Date` | `Hours` | `Description`",
+        "Date|Hours|Description",
+    ])
+    def test_variant_is_recognised_as_a_header(self, header):
+        result = parse_issue(build_body(entries=(
+            f"{header}\n2025-01-06 | 3.5 | NumPy review"
+        )))
+        assert result.ok, error_messages(result)
+        assert len(result.submission["entries"]) == 1
+        assert result.submission["entries"][0]["date"] == "2025-01-06"
+
+    @pytest.mark.parametrize("row", [
+        "bad-date | 2 | oops",                  # the §10 regression case
+        "date-of-birth | 2 | oops",
+        "2025-01-06 | 3.5 | notes",             # 'notes' as a description
+        "2025-01-06 | 3.5 | date",
+    ])
+    def test_data_rows_are_never_mistaken_for_headers(self, row):
+        """A data row cannot pass: its first cell is a date, ID or amount, so
+        the exact-match test on cell one fails. Broadening the label list is
+        therefore safe."""
+        result = parse_issue(build_body(entries=(
+            f"{row}\n2025-01-06 | 3.5 | Real work"
+        )))
+        entries = (result.submission or {}).get("entries", [])
+        # Either it errored (malformed) or it was kept as data — never skipped.
+        assert not result.ok or len(entries) == 2
+
+    def test_header_only_section_still_reports_no_entries(self):
+        result = parse_issue(build_body(entries="Day | Hours | Notes"))
+        assert not result.ok
+        assert any("entr" in m.lower() for m in error_messages(result))
+
+    def test_reimbursement_header_variant_recognised(self):
+        from scripts.parse_issue import _looks_like_header
+        assert _looks_like_header("Date | Amount | Category | Notes", "|")
+        assert not _looks_like_header("2026-06-03 | 184.50 | travel | Flight", "|")
+
+
+# ─── Reimbursement Claim parser (§4.7, Phase 5) ─────────────────────────────
+
+_RECEIPT_PNG = "https://github.com/user-attachments/assets/0f1e2d3c-4b5a-6789-abcd-ef0123456789"
+_RECEIPT_PDF = "https://github.com/user-attachments/files/12345678/hotel-invoice.pdf"
+_DEFAULT_RECEIPTS = (
+    f"![taxi-receipt.png]({_RECEIPT_PNG})\n"
+    f"[hotel-invoice.pdf]({_RECEIPT_PDF})"
+)
+
+
+def build_reimbursement_body(
+    *,
+    year: str = "2026",
+    month: str = "06 — June",
+    entries: str = "2026-06-03 | 184.50 | travel | Taxi airport to hotel",
+    currency: str = "JPY",
+    total: str = "184.50",
+    trip_context: str = "_No response_",
+    receipts: str = _DEFAULT_RECEIPTS,
+    confirmation_checked: bool = True,
+) -> str:
+    """Build a body that mimics GitHub's Issue Form rendering for the
+    Reimbursement Claim template. No Contract field (contractor-level);
+    the Receipts textarea is unfenced (no `render: text`) so drag-and-drop
+    attachments preview in the issue."""
+    checkbox = "- [X]" if confirmation_checked else "- [ ]"
+    return (
+        f"### Year\n\n{year}\n\n"
+        f"### Month\n\n{month}\n\n"
+        f"### Expense Entries\n\n```\n{entries}\n```\n\n"
+        f"### Currency\n\n{currency}\n\n"
+        f"### Total\n\n{total}\n\n"
+        f"### Trip / project context (optional)\n\n{trip_context}\n\n"
+        f"### Receipts\n\n{receipts}\n\n"
+        f"### Confirmation\n\n{checkbox} I confirm these expenses were incurred by me for QuantEcon work.\n"
+    )
+
+
+class TestReimbursementHappyPath:
+    def test_basic_claim_parses(self):
+        result = parse_issue(build_reimbursement_body())
+        assert result.ok, error_messages(result)
+        sub = result.submission
+        assert sub["type"] == "reimbursement"
+        assert "contract_id" not in sub
+        assert sub["period"] == "2026-06"
+        assert sub["status"] == "pending"
+        assert sub["totals"] == {"amount": 184.50, "currency": "JPY"}
+        assert sub["entries"] == [{
+            "date": "2026-06-03",
+            "amount": 184.50,
+            "category": "travel",
+            "description": "Taxi airport to hotel",
+        }]
+        assert sub["trip_context"] == ""
+        assert sub["receipts"] == [
+            {"name": "taxi-receipt.png", "url": _RECEIPT_PNG},
+            {"name": "hotel-invoice.pdf", "url": _RECEIPT_PDF},
+        ]
+
+    def test_multiple_entries_summed_and_sorted(self):
+        body = build_reimbursement_body(
+            entries=(
+                "2026-06-05 | 300 | meals | Team dinner\n"
+                "2026-06-03 | 184.5 | travel | Taxi\n"
+                "2026-06-04 | 12,000 | accommodation | Hotel one night"
+            ),
+            total="12,484.50",
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        dates = [e["date"] for e in result.submission["entries"]]
+        assert dates == ["2026-06-03", "2026-06-04", "2026-06-05"]
+        assert result.submission["totals"]["amount"] == 12484.50
+
+    def test_duplicate_dates_allowed(self):
+        # Flight + hotel on the same day is the normal case — contrast with
+        # timesheets, which reject duplicate dates.
+        body = build_reimbursement_body(
+            entries=(
+                "2026-06-03 | 500 | travel | Flight\n"
+                "2026-06-03 | 200 | accommodation | Hotel"
+            ),
+            total="700",
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert len(result.submission["entries"]) == 2
+
+    def test_seeded_header_row_skipped(self):
+        body = build_reimbursement_body(
+            entries=(
+                "Date | Amount | Category | Description\n"
+                "2026-06-03 | 184.50 | travel | Taxi"
+            ),
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert len(result.submission["entries"]) == 1
+
+    def test_receipt_url_shapes_and_dedupe(self):
+        legacy = "https://github.com/QuantEcon/contractor-x/files/999/old.pdf"
+        bare = "https://github.com/user-attachments/assets/aaaabbbb-cccc-dddd-eeee-ffff00001111"
+        body = build_reimbursement_body(receipts=(
+            f"![a.png]({_RECEIPT_PNG})\n"
+            f"[old.pdf]({legacy})\n"
+            f"{bare}\n"
+            f"![a-again.png]({_RECEIPT_PNG})"  # duplicate URL — dropped
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        receipts = result.submission["receipts"]
+        assert [r["url"] for r in receipts] == [_RECEIPT_PNG, legacy, bare]
+        # Names: link text where present, URL tail for bare URLs.
+        assert receipts[0]["name"] == "a.png"
+        assert receipts[1]["name"] == "old.pdf"
+        assert receipts[2]["name"] == bare.rsplit("/", 1)[-1]
+
+    def test_trip_context_captured(self):
+        body = build_reimbursement_body(
+            trip_context="PyCon JP — invited talk on QuantEcon lectures."
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert result.submission["trip_context"].startswith("PyCon JP")
+
+    def test_categories_match_case_insensitively(self):
+        body = build_reimbursement_body(
+            entries="2026-06-03 | 184.50 | TRAVEL | Taxi",
+        )
+        result = parse_issue(body, allowed_categories=["Travel", "Meals"])
+        assert result.ok, error_messages(result)
+        assert result.submission["entries"][0]["category"] == "travel"
+
+    def test_allowed_categories_none_skips_check(self):
+        body = build_reimbursement_body(
+            entries="2026-06-03 | 184.50 | anything-goes | Taxi",
+        )
+        result = parse_issue(body)  # no allowlist passed
+        assert result.ok, error_messages(result)
+
+
+class TestReimbursementRejects:
+    def test_unparseable_date(self):
+        body = build_reimbursement_body(entries="not-a-date | 184.50 | travel | Taxi")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("date" in m.lower() for m in error_messages(result))
+
+    def test_amount_zero_or_negative(self):
+        body = build_reimbursement_body(
+            entries="2026-06-03 | 0 | travel | Taxi", total="0",
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("greater than 0" in m for m in error_messages(result))
+
+    def test_too_few_fields(self):
+        body = build_reimbursement_body(entries="2026-06-03 | 184.50 | Taxi")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("four fields" in m for m in error_messages(result))
+
+    def test_empty_category(self):
+        body = build_reimbursement_body(entries="2026-06-03 | 184.50 |  | Taxi")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("category is empty" in m for m in error_messages(result))
+
+    def test_total_mismatch_shows_both_numbers(self):
+        body = build_reimbursement_body(
+            entries="2026-06-03 | 184.50 | travel | Taxi", total="200",
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        msg = " | ".join(error_messages(result))
+        assert "200" in msg and "184.5" in msg
+
+    def test_total_unparseable(self):
+        body = build_reimbursement_body(total="about 200")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Total" in m for m in error_messages(result))
+
+    def test_total_missing(self):
+        body = build_reimbursement_body(total="_No response_")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Total field is required" in m for m in error_messages(result))
+
+    def test_unsupported_currency(self):
+        body = build_reimbursement_body(currency="EUR")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("EUR" in m and "not supported" in m for m in error_messages(result))
+
+    def test_category_not_in_allowed_list(self):
+        body = build_reimbursement_body(
+            entries="2026-06-03 | 184.50 | bribes | Taxi",
+        )
+        result = parse_issue(body, allowed_categories=["travel", "meals"])
+        assert not result.ok
+        msg = " | ".join(error_messages(result))
+        assert "bribes" in msg and "travel" in msg
+
+    def test_zero_entries(self):
+        body = build_reimbursement_body(entries="", total="0")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Expense Entries section is empty" in m for m in error_messages(result))
+
+    def test_no_receipts(self):
+        body = build_reimbursement_body(receipts="_No response_")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Receipts" in m for m in error_messages(result))
+
+    def test_external_links_only_is_rejected_with_warning(self):
+        body = build_reimbursement_body(
+            receipts="[receipt](https://www.dropbox.com/s/abc/receipt.pdf)"
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Receipts" in m for m in error_messages(result))
+        assert any("dropbox" in w.message for w in result.warnings)
+
+    def test_confirmation_unchecked(self):
+        body = build_reimbursement_body(confirmation_checked=False)
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Confirmation" in m for m in error_messages(result))
+
+
+class TestReimbursementWarnings:
+    def test_out_of_period_date_warns_not_rejects(self):
+        # Trips legitimately span month boundaries (§4.7) — contrast with
+        # timesheets, which hard-reject out-of-period dates.
+        body = build_reimbursement_body(
+            entries=(
+                "2026-05-31 | 500 | travel | Flight (departed prior month)\n"
+                "2026-06-01 | 200 | accommodation | Hotel"
+            ),
+            total="700",
+        )
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert len(result.submission["entries"]) == 2
+        assert any("2026-05-31" in w.message and "outside" in w.message
+                   for w in result.warnings)
+
+    def test_external_url_alongside_attachments_warns_but_passes(self):
+        body = build_reimbursement_body(receipts=(
+            f"![a.png]({_RECEIPT_PNG})\n"
+            f"[extra](https://example.com/x.pdf)"
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert len(result.submission["receipts"]) == 1
+        assert any("example.com" in w.message for w in result.warnings)
+
+
+class TestReimbursementTypeDetection:
+    def test_expense_section_routes_to_reimbursement(self):
+        result = parse_issue(build_reimbursement_body())
+        assert result.submission["type"] == "reimbursement"
+
+    def test_expense_plus_time_sections_rejected(self):
+        body = (
+            "### Year\n\n2026\n\n"
+            "### Month\n\n06 — June\n\n"
+            "### Time Entries\n\n```\n2026-06-01 | 3 | work\n```\n\n"
+            "### Expense Entries\n\n```\n2026-06-03 | 184.50 | travel | Taxi\n```\n\n"
+            "### Confirmation\n\n- [X] confirm\n"
+        )
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("Multiple entries sections" in m for m in error_messages(result))
+
+    def test_no_contract_field_required(self):
+        # The reimbursement form has no Contract field; its absence must not
+        # produce a "Contract field is required" error.
+        result = parse_issue(build_reimbursement_body())
+        assert result.ok, error_messages(result)
+        assert not any("Contract" in m for m in error_messages(result))
+
+
+# ─── Attachment-URL allowlist (M2 hardening) ────────────────────────────────
+
+# Receipt URLs are fetched with the repo token, so the pattern is an anchored
+# allowlist: a prefix-only match let a crafted `assets/../../<path>` URL point
+# that authenticated fetch anywhere on github.com.
+class TestAttachmentUrlAllowlist:
+    # Every attachment URL shape that appears anywhere in this repo (fixtures,
+    # sibling tests, docs) plus the query-string forms GitHub emits.
+    LEGITIMATE = [
+        _RECEIPT_PNG,
+        _RECEIPT_PDF,
+        "https://github.com/user-attachments/assets/aaaabbbb-cccc-dddd-eeee-ffff00001111",
+        "https://github.com/user-attachments/assets/aaa",
+        "https://github.com/user-attachments/files/1/h.pdf",
+        "https://github.com/user-attachments/files/2/receipt.docx",
+        # GitHub turns spaces in uploaded filenames into dots.
+        "https://github.com/user-attachments/files/16062340/Screenshot.2024-06-27.at.11.00.00.AM.png",
+        # …and percent-escapes anything it cannot fold, so escapes must pass.
+        "https://github.com/user-attachments/files/12345/receipt%20scan.pdf",
+        "https://github.com/user-attachments/files/12345/facture_n%C2%B012.pdf",
+        # Legacy per-repo `/files/` form.
+        "https://github.com/QuantEcon/contractor-x/files/999/old.pdf",
+        # Image-CDN forms; the private one carries a signed `?jwt=`.
+        "https://user-images.githubusercontent.com/1234567/89012345-abcdef00-1234.png",
+        "https://private-user-images.githubusercontent.com/1234567/3012345-aa11bb22.png"
+        "?jwt=eyJhbGciOiJIUzI1NiJ9.abc-_123",
+    ]
+
+    # Dot segments, their percent-encoded twins (a `'/../' in url` check misses
+    # these — GitHub resolves them all the same), and host lookalikes.
+    TRAVERSALS = [
+        "https://github.com/user-attachments/assets/../../QuantEcon/private/raw/main/secret",
+        "https://github.com/user-attachments/assets/%2e%2e/%2e%2e/QuantEcon/private",
+        "https://github.com/user-attachments/assets/..%2f..%2fQuantEcon/private",
+        "https://github.com/user-attachments/files/1/../../../QuantEcon/private",
+        "https://github.com/user-attachments/files/1/..%2F..%2Fsecret",
+        "https://github.com/QuantEcon/x/files/1/%2E%2E/%2E%2E/secret",
+        "https://user-images.githubusercontent.com/1/../../QuantEcon/private",
+        "https://private-user-images.githubusercontent.com/1/%2e%2e/x.png?jwt=a",
+        "https://github.com/user-attachments/assets/a%5c..%5cb",
+        "https://evil.example.com/github.com/user-attachments/assets/x",
+        "https://github.com.evil.example.com/user-attachments/assets/x",
+        "https://github.com/user-attachments/other/1/x.pdf",
+        "https://github.com/user-attachments/assets/",
+    ]
+
+    def test_legitimate_urls_all_accepted(self):
+        for url in self.LEGITIMATE:
+            assert _ATTACHMENT_URL_RE.match(url), url
+
+    def test_traversals_and_lookalikes_all_rejected(self):
+        for url in self.TRAVERSALS:
+            assert not _ATTACHMENT_URL_RE.match(url), url
+
+    def test_legitimate_urls_survive_the_parser(self):
+        # Not just the regex: the whole claim must parse with these attached.
+        body = build_reimbursement_body(receipts="\n".join(
+            f"[r{i}.pdf]({url})" for i, url in enumerate(self.LEGITIMATE)
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert [r["url"] for r in result.submission["receipts"]] == self.LEGITIMATE
+        assert not result.warnings
+
+    def test_encoded_traversal_is_skipped_with_a_warning(self):
+        # A percent-encoded traversal must land in the "not a GitHub
+        # attachment" branch, not in the receipt list.
+        attack = "https://github.com/user-attachments/assets/%2e%2e/%2e%2e/QuantEcon/private"
+        body = build_reimbursement_body(receipts=(
+            f"![a.png]({_RECEIPT_PNG})\n"
+            f"[receipt.pdf]({attack})"
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert [r["url"] for r in result.submission["receipts"]] == [_RECEIPT_PNG]
+        assert any("not a GitHub attachment" in w.message for w in result.warnings)

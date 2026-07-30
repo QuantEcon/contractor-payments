@@ -17,6 +17,15 @@ on:
         required: false
         type: boolean
         default: false
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line. Optional,
+          defaulting to 'main': a caller that pins `@main` and omits this gets
+          exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
 
 jobs:
   remind:
@@ -29,10 +38,13 @@ jobs:
       - name: Check out the contractor repo
         uses: actions/checkout@v4
 
+      # Run the scripts from the same engine commit as this workflow file —
+      # the ref comes from the caller; see process-submission.yml.
       - name: Check out the engine repo
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Set up Python

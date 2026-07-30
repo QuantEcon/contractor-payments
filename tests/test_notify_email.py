@@ -1,7 +1,7 @@
 """Tests for testing_mode resolution in scripts/notify_email.py.
 
 The SMTP / compose / send paths are integration territory (exercised against
-`contractor-engine-test` during Phase 2 E2E). These tests cover the per-repo
+`test-contractor-payments` during Phase 2 E2E). These tests cover the per-repo
 `testing_mode` precedence, which decides whether PSL is ever contacted — so
 the fail-safe direction (never email PSL unless explicitly told to) matters.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.notify_email import _effective_testing_mode
+from scripts.notify_email import _effective_testing_mode, select_receipt_paths
 
 # Sentinel: leave testing_mode out of the engine fiscal-host.yml entirely.
 _OMIT = object()
@@ -90,3 +90,176 @@ class TestEffectiveTestingMode:
         fh = _write_fiscal_host(tmp_path, True)
         settings = {"notifications": {"testing_mode": None}}
         assert _effective_testing_mode(settings, fh) == (True, _ENGINE_DEFAULT)
+
+
+# ─── Message composition (Phase 5 adds the reimbursement branch) ────────────
+
+class TestComposeMessage:
+    def _submission(self, **overrides):
+        sub = {
+            "submission_id": "janedoe-reimbursement-2026-06",
+            "type": "reimbursement",
+            "project": "CHOW",
+            "period": "2026-06",
+            "approved_by": "mmcky",
+            "approved_date": "2026-06-12",
+            "totals": {"amount": 12300, "currency": "JPY"},
+        }
+        sub.update(overrides)
+        return sub
+
+    def _compose(self, tmp_path, submission=None, receipts=()):
+        from scripts.notify_email import compose_message
+        pdf = tmp_path / "claim.pdf"
+        pdf.write_bytes(b"%PDF fake")
+        receipt_paths = []
+        for name in receipts:
+            rp = tmp_path / name
+            rp.write_bytes(b"\x89PNG fake" if name.endswith(".png") else b"%PDF fake")
+            receipt_paths.append(rp)
+        return compose_message(
+            submission=submission or self._submission(),
+            contractor={"name": "Jane Doe", "github": "janedoe"},
+            pdf_path=pdf,
+            issue_url="https://github.com/QuantEcon/x/issues/42",
+            sender="payments@example.org",
+            to="psl@example.org",
+            cc=None,
+            reply_to="payments@example.org",
+            receipt_paths=receipt_paths,
+        )
+
+    def test_reimbursement_subject_uses_type_label(self, tmp_path):
+        msg = self._compose(tmp_path)
+        assert "Reimbursement Claim approved" in msg["Subject"]
+        assert "12,300 JPY" in msg["Subject"]
+
+    def test_project_line_replaces_contract_line(self, tmp_path):
+        msg = self._compose(tmp_path)
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "Project:       CHOW" in body
+        assert "Contract:" not in body
+
+    def test_receipts_attached_with_mime_types(self, tmp_path):
+        msg = self._compose(
+            tmp_path, receipts=("01-taxi.png", "02-hotel.pdf"),
+        )
+        attachments = list(msg.iter_attachments())
+        names = [a.get_filename() for a in attachments]
+        assert names == ["claim.pdf", "01-taxi.png", "02-hotel.pdf"]
+        types = [a.get_content_type() for a in attachments]
+        assert types == ["application/pdf", "image/png", "application/pdf"]
+
+    def test_body_counts_receipts(self, tmp_path):
+        msg = self._compose(tmp_path, receipts=("01-taxi.png",))
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "1 receipt file(s)" in body
+
+    def test_timesheet_body_unchanged(self, tmp_path):
+        submission = {
+            "submission_id": "janedoe-timesheet-2026-04",
+            "type": "timesheet",
+            "contract_id": "QE-PSL-2026-001",
+            "period": "2026-04",
+            "approved_by": "mmcky",
+            "approved_date": "2026-05-13",
+            "totals": {"amount": 725.0, "currency": "AUD"},
+        }
+        msg = self._compose(tmp_path, submission=submission)
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "Contract:      QE-PSL-2026-001" in body
+        assert "Project:" not in body
+        assert "Attached: the approved invoice PDF." in body
+
+    def test_unexpected_suffix_is_generic_and_reported(self, tmp_path, capsys):
+        # fetch_receipts stages receipts under the extension implied by their
+        # magic bytes, so an unrecognised suffix means something upstream
+        # changed. Attach it as generic binary and say so — never guess a type
+        # for a file the fiscal host is about to receive.
+        msg = self._compose(tmp_path, receipts=("01-scan.tiff",))
+        attachment = list(msg.iter_attachments())[-1]
+        assert attachment.get_content_type() == "application/octet-stream"
+        assert "unexpected extension" in capsys.readouterr().err
+
+    def test_jpg_and_jpeg_both_map_to_image_jpeg(self, tmp_path):
+        msg = self._compose(tmp_path, receipts=("01-a.jpg", "02-b.jpeg"))
+        types = [a.get_content_type() for a in msg.iter_attachments()][1:]
+        assert types == ["image/jpeg", "image/jpeg"]
+
+    def test_revision_marker_in_subject(self, tmp_path):
+        msg = self._compose(
+            tmp_path,
+            submission=self._submission(
+                supersedes="janedoe-reimbursement-2026-06",
+            ),
+        )
+        assert "REVISION approved" in msg["Subject"]
+
+
+class TestSelectReceiptPaths:
+    """The approval email is the outward-facing artifact — it goes to the
+    fiscal host. It used to attach by globbing the receipts directory, which
+    is keyed by submission id and therefore reused across a resubmit: anything
+    an earlier run left behind was attached and sent, without appearing in the
+    claim PDF. Attachments now come from the submission's own `receipts` list,
+    which is what the admin approved and what the PDF renders from.
+    """
+
+    def _dir(self, tmp_path, *names):
+        d = tmp_path / "receipts" / "2026-06" / "janedoe-reimbursement-2026-06"
+        d.mkdir(parents=True)
+        for name in names:
+            (d / name).write_bytes(b"%PDF-1.4\n")
+        return d
+
+    def test_attaches_only_what_the_submission_lists(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf", "01-taxi.png", "02-hotel.pdf")
+        submission = {"receipts": [{"filename": "01-hotel.pdf"}]}
+
+        paths, warnings = select_receipt_paths(submission, d)
+
+        assert [p.name for p in paths] == ["01-hotel.pdf"]
+        # the two files left over from the earlier submit are reported, not sent
+        assert len(warnings) == 2
+        assert all("not listed in the submission" in w for w in warnings)
+
+    def test_preserves_submission_order(self, tmp_path):
+        d = self._dir(tmp_path, "01-a.pdf", "02-b.pdf", "03-c.pdf")
+        submission = {"receipts": [
+            {"filename": "03-c.pdf"},
+            {"filename": "01-a.pdf"},
+            {"filename": "02-b.pdf"},
+        ]}
+        paths, warnings = select_receipt_paths(submission, d)
+        assert [p.name for p in paths] == ["03-c.pdf", "01-a.pdf", "02-b.pdf"]
+        assert warnings == []
+
+    def test_missing_listed_file_warns_and_is_skipped(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf")
+        submission = {"receipts": [
+            {"filename": "01-hotel.pdf"},
+            {"filename": "02-gone.pdf"},
+        ]}
+        paths, warnings = select_receipt_paths(submission, d)
+        assert [p.name for p in paths] == ["01-hotel.pdf"]
+        assert any("02-gone.pdf" in w and "missing" in w for w in warnings)
+
+    def test_yaml_filename_cannot_escape_the_receipts_dir(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf")
+        (tmp_path / "secret.pdf").write_bytes(b"%PDF-1.4\n")
+        submission = {"receipts": [{"filename": "../../secret.pdf"}]}
+
+        paths, warnings = select_receipt_paths(submission, d)
+
+        assert paths == []
+        assert any("missing" in w for w in warnings)
+
+    def test_no_receipts_dir_is_tolerated(self, tmp_path):
+        assert select_receipt_paths({"receipts": []}, None) == ([], [])
+        assert select_receipt_paths({}, tmp_path / "nope") == ([], [])
+
+    def test_non_reimbursement_submission_attaches_nothing(self, tmp_path):
+        d = self._dir(tmp_path, "stray.pdf")
+        paths, warnings = select_receipt_paths({"type": "timesheet"}, d)
+        assert paths == []
+        assert any("stray.pdf" in w for w in warnings)

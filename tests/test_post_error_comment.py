@@ -2,7 +2,7 @@
 
 GitHub-API-touching functions (find/create/update/delete comment, add/remove
 label) are integration territory — they're exercised against a real disposable
-issue in `contractor-engine-test` during Phase 1 end-to-end testing.
+issue in `test-contractor-payments` during Phase 1 end-to-end testing.
 """
 from __future__ import annotations
 
@@ -60,3 +60,36 @@ class TestRenderErrorComment:
     def test_header_is_friendly(self):
         out = render_error_comment([{"message": "x"}])
         assert "Submission needs a fix" in out
+
+
+class TestPostParseFailureFraming:
+    """A failure that happens *after* a clean parse — a claim too long to
+    render — used to borrow the parse-error wording, telling the contractor
+    "I couldn't parse this submission" about a submission that parsed fine.
+    """
+
+    ERRORS = [{"message": "This claim is too long for the one-page document."}]
+
+    def test_post_parse_failure_does_not_claim_a_parse_error(self):
+        body = render_error_comment(self.ERRORS, parse_failed=False)
+        assert "couldn't parse" not in body
+        assert "The submission itself is fine" in body
+        assert "couldn't be filed" in body
+        assert SENTINEL in body
+
+    def test_parse_failure_keeps_the_original_framing(self):
+        body = render_error_comment(self.ERRORS)
+        assert "I couldn't parse this submission" in body
+
+    def test_neither_promises_an_automatic_recheck(self):
+        """The caller fires on `issues: [labeled]` and
+        `issue_comment: [created]` only — editing the issue re-triggers
+        nothing, so promising a re-check leaves the contractor waiting."""
+        for parse_failed in (True, False):
+            body = render_error_comment(self.ERRORS, parse_failed=parse_failed)
+            assert "re-check automatically" not in body
+            assert "/validate" in body
+
+    def test_post_parse_framing_points_at_a_real_retry_route(self):
+        body = render_error_comment(self.ERRORS, parse_failed=False)
+        assert "`submit` label" in body or "/validate" in body

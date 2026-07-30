@@ -34,7 +34,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 
-SUBMISSION_LABELS = ("timesheet", "milestone-invoice")
+SUBMISSION_LABELS = ("timesheet", "milestone-invoice", "reimbursement")
 
 
 def sentinel_for(period: str) -> str:
@@ -90,12 +90,18 @@ def submission_type_from_labels(labels: list[str]) -> Optional[str]:
         return "timesheet"
     if "milestone-invoice" in labels:
         return "milestone_invoice"
+    if "reimbursement" in labels:
+        return "reimbursement"
     return None
 
 
 def render_reminder_comment(period: str, submission_type: str) -> str:
     """Render the reminder comment body with the period-encoded sentinel."""
-    type_label = "timesheet" if submission_type == "timesheet" else "invoice"
+    type_label = {
+        "timesheet": "timesheet",
+        "milestone_invoice": "invoice",
+        "reimbursement": "reimbursement claim",
+    }.get(submission_type, "submission")
     lines = [
         f"🔔 **Reminder — period `{period}` has ended**",
         "",

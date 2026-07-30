@@ -26,6 +26,7 @@ companion contractor-facing guide will live at
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — no date enforcement |
 | [8. Wrong currency / contract mismatch](#8-wrong-currency--contract-mismatch) | ✅ | — |
 | [9. Concurrent submissions](#9-concurrent-submissions) | ⚠️ Rare race | Low priority |
+| [10. Reimbursement claims](#10-reimbursement-claims-phase-5) | ✅ | Enable via sync_templates; receipts spot-check + email-size recovery documented |
 
 ---
 
@@ -54,7 +55,9 @@ the most recent completed period. No edits, no errors.
    preview, opens a PR with the PNG embedded inline, **closes and
    locks the originating issue** with a handoff comment linking to the
    PR (e.g. *"Submission filed — see #32..."*), and removes the
-   `submit` label if applied.
+   `submit` label if applied. The label is removed even when the run
+   fails, so re-applying it always retries; a failed run also posts a
+   comment saying what broke (see §6).
 6. Admin reviews the PR (visual PDF check via the PNG, sanity-check
    amounts/period/contract).
 7. Admin approves + merges the PR.
@@ -70,7 +73,9 @@ the most recent completed period. No edits, no errors.
      `templates/fiscal-host.yml` (which stays `true` as fail-safe).
    - Posts an audit comment on **both** the original submission issue
      and the merged PR.
-   - Applies the `processed` label to the PR.
+   - Applies the `processed` label to the PR — only when every step
+     above succeeded, so an unlabelled merged PR means "needs an
+     admin" (see §6).
    - Auto-deletes the submission branch.
 
 **Reminders.** On the 1st of each month, `period-reminders.yml` fires
@@ -182,7 +187,7 @@ PSL. Later, an error or omission is discovered.
 
 > **Engine status.** The two-mechanism model below is **implemented in
 > Phase 2.5** (see [PLAN.md §8](../PLAN.md#phase-25--revision--supplemental-handling))
-> and E2E-verified on `contractor-engine-test` on 2026-05-18. The
+> and E2E-verified on `test-contractor-payments` on 2026-05-18. The
 > "Workaround until Phase 2.5 lands" section at the bottom is kept
 > for historical reference and as the fallback recovery path if the
 > automated flow ever needs to be bypassed.
@@ -369,24 +374,49 @@ closes the PR without merging.
 
 ## 6. Workflow failure mid-pipeline
 
-**Situation.** `process-approved.yml` fails on one of its seven steps.
+**Situation.** `process-approved.yml` fails on one of its pipeline steps.
 Most common causes:
 
 - SMTP outage / credential rotation (email step fails).
 - Transient `gh` API rate limit.
-- A `git push` collision (unlikely, but possible if two
-  approvals run within seconds).
+- A `git push` collision when two approvals merge within seconds of
+  each other. The commit-back step now handles this itself: on a
+  rejected push it fetches, rebases onto the new `main` and retries,
+  up to five attempts. It only gives up if the rebase *conflicts* —
+  i.e. both approvals appended to the same ledger file at the same
+  spot — and a plain "Re-run failed jobs" fixes that, because the
+  re-run appends to the settled `main`.
 
 **What happens (current behaviour).**
 
-Steps run in order: `finalize_approval` → `update_ledger` → commit →
-`update_ledger_issue` → `notify_email` → `notify_comment` → apply
+Steps run in order: locate the submission YAML → resolve the
+originating issue → `finalize_approval` → `update_ledger` → commit +
+push to `main` → `update_ledger_issue` → `notify_email` →
+`notify_comment` → superseded-PR cross-comment → apply the `processed`
 label.
 
-If step N fails, steps N+1..7 are skipped. The state at that point is
-inconsistent: e.g. if `notify_email` fails, the ledger has been
-updated and committed, the pinned issue is refreshed, but no email
-was sent and no audit comment was posted.
+If step N fails, later steps are skipped — with two deliberate
+exceptions that make the failure visible instead of silent:
+
+- **The audit comment still posts** as long as the submission was
+  located, stamped, ledgered and pushed. So an email failure yields an
+  audit comment whose email line reads `📧 Email: ⚠️ not sent — see
+  workflow logs` rather than no comment at all.
+- **A final `failure()` step posts a per-step outcome table** on the
+  merged PR and (if resolvable) the originating issue, naming the
+  failed step and linking the run log. It never reports success it
+  cannot see, and it states plainly whether the approval email went
+  out.
+
+The **`processed` label is applied only on a fully green run** — so
+"merged submission PR with no `processed` label" is exactly the list of
+runs that need an admin.
+
+The state at the failure point is still inconsistent, and that part is
+unchanged: e.g. if `notify_email` fails, the ledger has been updated
+and committed and the pinned issue is refreshed, but no email was
+sent. What changed is that you now find out on the PR and the issue,
+not only by opening the Actions tab.
 
 > **Dev note — gap: no targeted re-run path.**
 > The whole workflow is wired to fire on `pull_request.merged`. If it
@@ -411,17 +441,23 @@ was sent and no audit comment was posted.
 
 **Admin actions.**
 
-1. Inspect the failed run in the Actions UI; identify which step
-   failed.
+1. Read the failure comment the workflow posted on the merged PR: its
+   table already says which step failed, what ran before it, and
+   whether the approval email went out. Open the linked run for the
+   actual traceback.
 2. **If the failure was after the ledger commit** (i.e. ledger is
-   updated, pinned issue is refreshed, but email/comment didn't fire):
+   updated and pushed, but the email and/or the pinned issue didn't
+   fire):
    - Re-run `notify_email` and `notify_comment` locally with the
-     paths from the failed PR.
-   - Apply the `processed` label manually via `gh pr edit`.
-3. **If the failure was at or before the ledger commit**: the workflow
-   can probably be re-run from the Actions UI ("Re-run failed jobs")
-   if the underlying cause (e.g. transient API error) is gone. If
-   not, fix the cause first.
+     paths from the failed PR. Do **not** re-run the whole workflow —
+     `update_ledger` raises on the now-duplicate `submission_id`.
+   - Apply the `processed` label manually via `gh pr edit` once the
+     email is out.
+3. **If the failure was at or before the ledger commit**: nothing was
+   pushed, so "Re-run failed jobs" from the Actions UI is the right
+   move once the underlying cause (transient API error, push
+   contention, branch protection) is gone. If not, fix the cause
+   first.
 
 ### Known failure mode — bot push rejected by branch protection
 
@@ -447,6 +483,13 @@ organization". An org admin sets this up once on `QuantEcon`
 targeting `contractor-*` repos; new contractor repos inherit it
 automatically.
 
+Note the shape of the log: the commit-back step retries a rejected
+push five times (fetch + rebase between attempts, since the usual
+cause of rejection is a concurrent approval, not protection), so a
+protection rejection shows up as five identical `GH006` blocks before
+the step gives up. That is the expected output, not five separate
+faults.
+
 **Recovery if it fires:** re-run the workflow ("Re-run failed jobs")
 after removing/correcting the protection. The pipeline is
 re-entrant in this case — `finalize_approval` is idempotent against
@@ -466,38 +509,33 @@ A new contract is being set up.
   submission `period` against `contract.start_date` / `end_date`.
   Submissions outside the contract window will still parse and create
   a PR. **Admin catches this in PR review.**
-- **Renewals**: a new `contracts/<new-id>.yml` is added. The
-  contractor's issue-form contract dropdown is **statically defined**
-  in `.github/ISSUE_TEMPLATE/{hourly-timesheet,milestone-invoice}.yml`
-  — adding a new contract requires editing those forms to include the
-  new contract ID in the dropdown.
+- **Renewals**: a new `contracts/<new-id>.yml` is added, then the
+  issue forms are **regenerated from repo state** (Phase 5):
+
+      python onboarding/sync_templates.py \
+          --repo-dir contractors/contractor-<handle> [--dry-run]
+
+  sync_templates rebuilds the contract dropdowns + reminder blocks
+  from every `status: active` contract, and applies the presence rule
+  (a form exists iff the repo has ≥1 active contract of that type /
+  `config/reimbursements.yml` for claims). Setting the old contract's
+  `status: ended` and re-running removes it from the dropdown — and
+  removes the whole form if it was the last contract of its type.
 - **Ledger continuity**: the new contract gets its own ledger file
   and its own pinned ledger issue. The old contract's ledger issue
-  stays open (or gets closed by Phase 3b's rollover helper when
-  built).
+  stays open.
 
-> **Dev note — minor gap.**
-> Adding a new contract is a multi-step manual process today:
->   1. Write `contracts/<new-id>.yml`.
->   2. Edit both issue-form dropdowns to include the new ID.
->   3. Open the initial ledger issue manually
->      (`scripts/update_ledger_issue.py` against an empty ledger).
->   4. Write the issue number into `<new-id>.yml` as `ledger_issue:`.
->   5. Optionally close the predecessor's ledger issue with a "this
->      contract has ended, see ledger for `<new-id>`" comment.
->
-> Phase 3b's contract-renewal helper is supposed to automate steps
-> 2–5. **Adjustment recommended when first real renewal happens:**
-> generate the issue-form dropdowns from the `contracts/` directory
-> at workflow time, instead of committing the dropdown statically.
-> Eliminates step 2 entirely.
+**Admin actions (renewal).**
 
-**Admin actions.**
-
-- Run through the 5-step process above when a new contract starts.
-- When the old contract ends, lock its pinned ledger issue (it's
-  already locked from comments via `update_ledger_issue.py`) and
-  optionally update its body with a note linking to the new contract.
+1. Write `contracts/<new-id>.yml` (and set the predecessor's
+   `status: ended` if applicable).
+2. Run `sync_templates.py --repo-dir ... --dry-run`, review, re-run
+   without `--dry-run` (commits + pushes the regenerated forms).
+3. Open the initial ledger issue
+   (`scripts/update_ledger_issue.py` against an empty ledger) and
+   write the issue number into `<new-id>.yml` as `ledger_issue:`.
+4. Optionally close the predecessor's ledger issue with a "this
+   contract has ended, see ledger for `<new-id>`" comment.
 
 ---
 
@@ -554,11 +592,73 @@ when the workflow tries to add a file that conflicts.
 > to check open PRs as well as committed state when computing the
 > `-vN` suffix. Defer until observed.
 
+**Concurrent *approvals* are a different (and now handled) case.**
+Merging two submission PRs seconds apart — routine from Phase 5, where
+one repo files timesheets, invoices and reimbursement claims against a
+shared `ledger/` — used to mean the second run's push to `main` was
+rejected and, because everything downstream was `success()`-gated, its
+approval email was silently dropped. `process-approved.yml` now
+fetches, rebases and retries the push (§6).
+
 **Admin actions.**
 
 - If it happens: close one of the two PRs (Scenario 5) and tell the
   contractor to consolidate into the surviving one (via issue edit,
   Scenario 2).
+
+---
+
+## 10. Reimbursement claims (Phase 5)
+
+**Enabling reimbursements on a repo.**
+
+1. Add `config/reimbursements.yml` to the contractor repo:
+
+   ```yaml
+   project: CHOW          # PSL funding code on claim PDFs + emails
+   allowed_categories: [travel, accommodation, meals, equipment, software, conference, other]
+   ledger_issue: null     # wired by the next step
+   ```
+
+2. Run the sync (seeds the claim form per the presence rule, updates
+   the caller workflows' label gate, ensures labels) and create the
+   pinned reimbursements ledger issue:
+
+       python onboarding/sync_templates.py \
+           --repo-dir contractors/contractor-<handle> \
+           --labels --init-reimbursement-ledger [--dry-run]
+
+   Deleting `config/reimbursements.yml` and re-running the sync
+   disables claims (the form disappears from the chooser).
+
+   New payees get all of this from `onboarding/new-contractor.py`
+   (answer the reimbursements prompt, or `--reimbursement-project`);
+   contract type `none` onboards a reimbursement-only payee (one-off
+   speakers, honoraria).
+
+**Review duties on a claim PR.** Beyond the usual checks:
+
+- Open each committed receipt under `receipts/<period>/<claim-id>/`
+  and spot-check: amounts match the rows, dates plausible, categories
+  sane. The receipts are the evidence PSL receives.
+- Out-of-period rows surface as non-blocking notes (trips legitimately
+  span month boundaries) — confirm the story makes sense.
+- Size warnings (>10 MB file / >15 MB bundle): consider asking the
+  contractor to re-export or split before merging — see below.
+
+**Email size failure.** The approval email attaches the claim PDF plus
+every receipt. Gmail rejects sends over ~25 MB; an oversized claim
+fails at SMTP *after* merge. Three signals, all of them intentional:
+the audit comment reads `📧 Email: ⚠️ not sent — see workflow logs`
+(everything else — ledger, PDFs, receipts in git — completed), a
+second comment names the failed step, and the run is red with no
+`processed` label. Recovery: download the approved PDF + receipts from
+the repo, forward them to PSL manually, then apply `processed` by hand.
+No re-merge and no ledger surgery needed — see §6.
+
+**Receipts are immutable evidence.** Revisions re-fetch and re-commit
+receipts under the `-vN` claim's own directory; the original claim's
+receipts stay put as the audit record, same as superseded PDFs.
 
 ---
 
@@ -633,7 +733,7 @@ the modern GitHub-recommended pattern for any automation that needs to
 write to protected branches.
 
 **Prerequisite to verify before committing fully** — install a throwaway
-GitHub App on `contractor-engine-test` and open the bypass picker. If
+GitHub App on `test-contractor-payments` and open the bypass picker. If
 the App appears under the "Apps" / "Integrations" section, the migration
 will work as designed. If it does not, we need to fall back to either
 Option B (restructure to avoid the post-merge push entirely) or stay on
@@ -675,7 +775,7 @@ From the App settings page, click **Install App** in the left sidebar.
 2. Choose **All repositories** if you want the App to pick up future
    `contractor-*` repos automatically, OR **Only select repositories**
    and pick the existing `contractor-*` ones (and any test repos like
-   `contractor-engine-test`).
+   `test-contractor-payments`).
 3. Confirm install.
 
 #### Step 3 — Store credentials as org secrets
@@ -688,12 +788,12 @@ setup, matching the SMTP secret pattern from Phase 2):
 ```bash
 # App ID is non-sensitive but easier to keep with the key.
 gh secret set ENGINE_APP_ID --org QuantEcon --body "12345" \
-  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+  --visibility selected --repos "test-contractor-payments,contractor-mmcky,..."
 
 # Private key — paste the contents of the downloaded .pem.
 gh secret set ENGINE_APP_PRIVATE_KEY --org QuantEcon \
   --body "$(cat ~/Downloads/quantecon-contractor-engine.*.private-key.pem)" \
-  --visibility selected --repos "contractor-engine-test,contractor-mmcky,..."
+  --visibility selected --repos "test-contractor-payments,contractor-mmcky,..."
 ```
 
 Use `--visibility all` if/when the App is installed on all org repos.
@@ -728,7 +828,7 @@ push step currently runs as `github-actions[bot]` with the auto-issued
      with:
        token: ${{ steps.engine_token.outputs.token }}
        ref: main
-       fetch-depth: 2
+       fetch-depth: 0   # must stay 0 — see the comment in the workflow
    ```
 
    ```yaml
@@ -747,9 +847,9 @@ needs no change; it just pins `@main` and inherits the new behaviour.
 
 #### Step 5 — Verify the App appears in the bypass picker
 
-This is the prerequisite check. On `contractor-engine-test`:
+This is the prerequisite check. On `test-contractor-payments`:
 
-1. Go to `https://github.com/QuantEcon/contractor-engine-test/settings/rules`
+1. Go to `https://github.com/QuantEcon/test-contractor-payments/settings/rules`
    (or org-level rules if testing org-level).
 2. Click **New ruleset** → **New branch ruleset**.
 3. In **Bypass list**, click **+ Add bypass**, filter for
@@ -777,7 +877,7 @@ auto-covers future `contractor-*` repos):
 
 Click **Create**.
 
-#### Step 7 — End-to-end verify on `contractor-engine-test`
+#### Step 7 — End-to-end verify on `test-contractor-payments`
 
 1. Open a test submission issue, `/validate`, `/submit`.
 2. Confirm a PR opens and `process-approved.yml` runs with the new
@@ -834,7 +934,7 @@ Capturing the development implications in one place for triage:
 
 1. ~~**Ledger double-count on revisions (Scenario 4).**~~ ✅ Resolved
    in Phase 2.5 — two-mechanism model implemented and E2E-verified on
-   `contractor-engine-test` (2026-05-18). Revisions supersede via
+   `test-contractor-payments` (2026-05-18). Revisions supersede via
    filesystem-based detection; independent second invoices in the
    same period get a `-{LETTER}` uniqueness suffix with no special
    semantics. See PLAN §8 Phase 2.5 for the verified flow.

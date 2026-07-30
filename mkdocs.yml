@@ -1,5 +1,5 @@
 site_name: QuantEcon Contractor Payments
-site_description: Guide for QuantEcon contractors submitting timesheets and invoices via GitHub.
+site_description: Guide for QuantEcon contractors submitting timesheets, invoices, and reimbursement claims via GitHub.
 site_url: https://quantecon.github.io/contractor-payments/
 repo_url: https://github.com/QuantEcon/contractor-payments
 repo_name: QuantEcon/contractor-payments
@@ -21,6 +21,7 @@ nav:
   - Contractor guide:
       - Submit a timesheet: contractor-guide/submit-timesheet.md
       - Submit a milestone invoice: contractor-guide/submit-invoice.md
+      - Submit a reimbursement claim: contractor-guide/submit-reimbursement.md
       - Corrections and revisions: contractor-guide/corrections.md
 
 markdown_extensions:

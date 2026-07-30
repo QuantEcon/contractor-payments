@@ -217,13 +217,121 @@ def render_milestone_body(ledger: dict, contract: dict) -> str:
     return "\n".join(lines)
 
 
-def render_body(ledger: dict, contract: dict) -> str:
-    """Pick the right renderer based on ledger.type."""
+def render_reimbursement_body(ledger: dict, reimbursements_config: dict) -> str:
+    """Render a markdown body for the per-repo reimbursements ledger.
+
+    Contractor-level (no contract): summary is a per-currency table since
+    claims are single-currency but the ledger spans currencies. Each claim
+    records the funding project it was billed to, so that renders per row —
+    it can vary over time if the repo's `config/reimbursements.yml` is
+    updated between claims.
+
+    `reimbursements_config` is that file's contents; it supplies the
+    *current* project code for the header. That's the only thing an empty
+    ledger can say about the arrangement, which is exactly the state
+    `onboarding/sync_templates.py` renders when it first opens the pinned
+    issue. Pass `{}` if unavailable — the header line is then omitted.
+    """
+    totals = ledger.get("totals", {})
+    claims = ledger.get("claims", [])
+    last_date, last_by = _last_approval(claims)
+
+    lines = [
+        "# 📒 Running ledger — Reimbursements",
+        "",
+        "> Auto-updated by the approval workflow. Don't edit manually — your",
+        "> changes will be overwritten on the next approval.",
+        "",
+    ]
+
+    project = reimbursements_config.get("project")
+    if project:
+        lines.extend([
+            f"**Funding project:** `{project}` — current setting; each claim "
+            f"below records the code it was actually billed to.",
+            "",
+        ])
+
+    lines.extend([
+        "## Summary",
+        "",
+    ])
+
+    if totals:
+        lines.extend([
+            "| Currency | Claims | Amount to date |",
+            "|---|---|---|",
+        ])
+        for currency, bucket in totals.items():
+            lines.append(
+                f"| {currency} | {bucket['claims_count']} "
+                f"| {_fmt_amount(bucket['amount_to_date'], currency)} {currency} |"
+            )
+        lines.append("")
+        if last_date:
+            lines.extend([
+                f"**Last approved:** {last_date}{' by @' + last_by if last_by else ''}",
+                "",
+            ])
+    else:
+        lines.extend(["_No claims approved yet._", ""])
+
+    if claims:
+        lines.extend([
+            "## Approved claims",
+            "",
+            "| Period | Submission | Project | Amount | Approved |",
+            "|---|---|---|---|---|",
+        ])
+        for c in claims:
+            is_superseded = c.get("status") == "superseded"
+            currency = c.get("currency", "")
+            period_cell = _strike(c["period"], is_superseded)
+            project_cell = _strike(f"`{c.get('project') or '—'}`", is_superseded)
+            amount_cell = _strike(
+                f"{_fmt_amount(c['amount'], currency)} {currency}", is_superseded,
+            )
+            approved_cell = _strike(
+                f"{c['approved_date']} by @{c['approved_by']}", is_superseded,
+            )
+            lines.append(
+                f"| {period_cell} | {_submission_cell(c)} | {project_cell} "
+                f"| {amount_cell} | {approved_cell} |"
+            )
+        lines.append("")
+    else:
+        lines.extend([
+            "## Approved claims",
+            "",
+            "_No claims approved yet._",
+            "",
+        ])
+
+    lines.append(f"<!-- {MARKER_PREFIX}:reimbursements -->")
+    return "\n".join(lines)
+
+
+def render_body(
+    ledger: dict,
+    contract: dict,
+    reimbursements_config: Optional[dict] = None,
+) -> str:
+    """Pick the right renderer based on ledger.type.
+
+    Reimbursement ledgers are contractor-level, so they take the repo's
+    `config/reimbursements.yml` (as `reimbursements_config`) rather than a
+    contract; `contract` is ignored for that type. Do NOT forward `contract`
+    into the config slot: a contract dict carries its own `project` key, so
+    the mix-up would silently render the contract's funding code as the
+    reimbursement arrangement's.
+    """
     ledger_type = ledger.get("type")
     if ledger_type == "hourly":
         return render_hourly_body(ledger, contract)
     if ledger_type == "milestone":
         return render_milestone_body(ledger, contract)
+    if ledger_type == "reimbursement":
+        return render_reimbursement_body(ledger, reimbursements_config or {})
     raise ValueError(f"Unknown ledger type `{ledger_type}`.")
 
 
@@ -269,6 +377,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Working tree root (default: current directory).")
     p.add_argument("--repo", default=None,
                    help="GitHub owner/name. Default: $GITHUB_REPOSITORY.")
+    p.add_argument("--reimbursements", type=Path, default=None,
+                   help="Path to config/reimbursements.yml (reimbursement ledgers "
+                        "only — holds the funding project and the `ledger_issue` "
+                        "number). Default: config/reimbursements.yml under --repo-root.")
     p.add_argument("--dry-run", action="store_true",
                    help="Render the body to stdout instead of editing the issue. "
                         "Useful for local development without an issue number.")
@@ -282,6 +394,38 @@ def main(argv: Optional[list[str]] = None) -> int:
     if ledger is None:
         print(f"ERROR: ledger {args.ledger} is empty.", file=sys.stderr)
         return 1
+
+    # Reimbursement ledgers are contractor-level: no contract to load, and
+    # the pinned-issue number lives in config/reimbursements.yml instead.
+    if ledger.get("type") == "reimbursement":
+        reimbursements_path = (
+            args.reimbursements
+            if args.reimbursements is not None
+            else repo_root / "config" / "reimbursements.yml"
+        )
+        reimbursements_config: dict = {}
+        if reimbursements_path.exists():
+            with open(reimbursements_path, encoding="utf-8") as f:
+                reimbursements_config = yaml.safe_load(f) or {}
+
+        body = render_reimbursement_body(ledger, reimbursements_config)
+
+        if args.dry_run:
+            print(body)
+            return 0
+
+        issue_number = reimbursements_config.get("ledger_issue")
+        if not issue_number:
+            print(
+                "WARN: config/reimbursements.yml has no `ledger_issue` field. "
+                "Skipping issue update; YAML write already succeeded.",
+                file=sys.stderr,
+            )
+            return 0
+
+        update_issue_body(int(issue_number), body, repo=args.repo)
+        print(f"Updated issue #{issue_number} on {args.repo or os.environ.get('GITHUB_REPOSITORY')}")
+        return 0
 
     # Load contract.
     contract_path = args.contract
@@ -306,7 +450,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     issue_number = contract.get("ledger_issue")
     if not issue_number:
         # Don't fail the workflow — Phase 3b onboarding may not have run for this
-        # contract yet (e.g. pre-Phase-3b contractor-engine-test), or the field
+        # contract yet (e.g. pre-Phase-3b test-contractor-payments), or the field
         # is intentionally absent. Log and exit 0 so the merge pipeline continues.
         print(
             f"WARN: contract `{ledger['contract_id']}` has no `ledger_issue` field. "

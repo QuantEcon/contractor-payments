@@ -1,11 +1,16 @@
-"""Create a submission PR from a parsed timesheet issue.
+"""Create a submission PR from a parsed submission issue.
 
 Pipeline:
   1. Load the parsed submission JSON (parse_issue.py --output-json).
-  2. Load the referenced contract from contracts/{contract_id}.yml.
+  2. Load the referenced contract from contracts/{contract_id}.yml —
+     or, for contractor-level reimbursement claims, the repo's
+     config/reimbursements.yml (funding project code; no contract).
   3. Enrich the submission with metadata (id, dates, submitter) and computed
-     totals (rate, amount, currency derived from the contract).
-  4. Write the submission YAML to submissions/{period}/{submission_id}.yml.
+     totals (rate, amount, currency derived from the contract; entry sums
+     for invoices and claims).
+  4. Write the submission YAML to submissions/{period}/{submission_id}.yml
+     (+ fetched receipt files under receipts/{period}/{submission_id}/ for
+     reimbursements — see fetch_receipts.py).
   5. Create a branch, commit, push.
   6. Open a PR with `Closes #{issue}` in the body.
 
@@ -23,6 +28,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from scripts import post_error_comment
 from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_submission_png
 from scripts.parse_issue import cross_check_milestone_ids
 
@@ -42,6 +49,7 @@ from scripts.parse_issue import cross_check_milestone_ids
 _TYPE_SLUG = {
     "timesheet": "timesheet",
     "milestone_invoice": "invoice",
+    "reimbursement": "reimbursement",
 }
 
 
@@ -159,6 +167,42 @@ def format_currency_amount(amount: float, currency: str) -> float | int:
     if currency.upper() == "JPY":
         return int(round(amount))
     return round(amount, 2)
+
+
+def rounding_drift_warning(submission: dict) -> Optional[dict]:
+    """Warn when the per-line rounded amounts no longer add up to the stored
+    total, or None when they do.
+
+    The stored total is the one the parser cross-checked against the figure
+    the contractor confirmed on the issue, so it is deliberately *not*
+    re-derived from the rounded lines (see `enrich_reimbursement`). In a
+    currency with no minor units that leaves a gap when a line carries
+    sub-unit precision: 100.5 + 100.5 JPY confirms as 201, but the rows print
+    as 100 and 100. Rather than silently ship a document whose rows don't sum
+    to its total, say so on the PR body where the admin decides. Non-blocking
+    by design — the total being paid is still the confirmed one, and blocking
+    here would fail the run with no way to tell the contractor why (the
+    `/validate` path enriches through the same code).
+    """
+    totals = submission.get("totals", {})
+    stored_total = totals.get("amount")
+    currency = totals.get("currency")
+    entries = submission.get("entries", [])
+    if stored_total is None or not currency:
+        return None
+    if not entries or any("amount" not in e for e in entries):
+        # Timesheets carry hours per line, not amounts — nothing to add up.
+        return None
+    line_sum = format_currency_amount(sum(e["amount"] for e in entries), currency)
+    if line_sum == stored_total:
+        return None
+    return {"message": (
+        f"the line items add up to {line_sum} {currency} but the confirmed "
+        f"total is {stored_total} {currency} — {currency} has no minor units, "
+        f"so amounts with decimals get rounded per line. The confirmed total "
+        f"is what will be paid; re-file with whole-{currency} amounts if the "
+        f"rows should match it exactly."
+    )}
 
 
 def enrich_submission(
@@ -289,6 +333,156 @@ def enrich_submission(
     raise ValueError(f"Unknown submission type `{submission_type}`.")
 
 
+def enrich_reimbursement(
+    submission: dict,
+    reimbursements_config: dict,
+    *,
+    submitter: str,
+    submission_id: str,
+    issue_number: int,
+    submitted_date: str,
+    supersedes: Optional[str] = None,
+    receipts_manifest: Optional[list[dict]] = None,
+) -> dict:
+    """Combine the parser's reimbursement submission with the repo's
+    `config/reimbursements.yml` + metadata.
+
+    Reimbursements are contractor-level (§4.7): there is no contract
+    reference, and the PSL funding `project` code comes from the
+    reimbursements config. Kept separate from `enrich_submission` so the
+    contract-backed production path keeps its signature and its
+    contract-mismatch guard untouched.
+
+    `receipts_manifest` is the fetch_receipts manifest (`filename` +
+    `source_url` per receipt); the committed YAML references the committed
+    filenames, keeping the original attachment URL for audit only. When the
+    fetch hasn't run (validate dry-run, --skip flows) the parser's
+    attachment links are recorded as-is.
+    """
+    if submission.get("type") != "reimbursement":
+        raise ValueError(
+            f"enrich_reimbursement called with type "
+            f"`{submission.get('type')}` — expected `reimbursement`."
+        )
+    if not reimbursements_config.get("project"):
+        # Guard at the shared chokepoint so every caller (the /validate
+        # dry-run included) fails with a pointed repo-misconfiguration
+        # message rather than a KeyError deep in the dict build.
+        raise ValueError(
+            "`project` (PSL funding code) is missing from the reimbursements "
+            "config — required so PSL can bill the claim against the right "
+            "cost centre. Fix config/reimbursements.yml."
+        )
+
+    currency = submission["totals"]["currency"]
+    entries = sorted(submission["entries"], key=lambda e: e["date"])
+    # Round the total the parser already cross-checked against the Total the
+    # contractor typed on the issue — not the sum of the per-line rounded
+    # amounts. Summing the rounded lines (which is what this did) let JPY's
+    # no-minor-units rounding move the total *after* validation, so the figure
+    # stored, rendered on the PDF and emailed to the fiscal host could differ
+    # from the one the contractor confirmed. The validated total is the total
+    # that gets paid; `rounding_drift_warning` surfaces any residual gap
+    # between it and the printed rows.
+    total_amount = format_currency_amount(submission["totals"]["amount"], currency)
+    for e in entries:
+        e["amount"] = format_currency_amount(e["amount"], currency)
+
+    if receipts_manifest:
+        receipts = [
+            {"filename": m["filename"], "source_url": m["source_url"]}
+            for m in receipts_manifest
+        ]
+    else:
+        receipts = [
+            {"filename": r["name"], "source_url": r["url"]}
+            for r in submission.get("receipts", [])
+        ]
+
+    enriched = {
+        "submission_id": submission_id,
+        # PSL funding/billing code — rendered as "Project" on the PDF, in
+        # place of the contract reference the other types carry.
+        "project": reimbursements_config["project"],
+        "type": "reimbursement",
+        "period": submission["period"],
+        "submitted_date": submitted_date,
+        "submitted_by": submitter,
+        "issue_number": issue_number,
+        "trip_context": submission.get("trip_context", ""),
+        "receipts": receipts,
+        "notes": submission.get("notes", ""),
+        "status": "pending",
+        "approved_by": None,
+        "approved_date": None,
+    }
+    if supersedes:
+        enriched["supersedes"] = supersedes
+        enriched["revision_of"] = _strip_revision_suffix(supersedes)
+    enriched["entries"] = entries
+    enriched["totals"] = {"amount": total_amount, "currency": currency}
+    return enriched
+
+
+def load_reimbursements_config(
+    repo_root: Path,
+    rel_path: str = "config/reimbursements.yml",
+) -> dict:
+    """Load the repo's reimbursement arrangement. Fails loud: a reimbursement
+    submission reaching this point in a repo without the config (or without a
+    funding `project` code) is a repo misconfiguration, not contractor error."""
+    path = repo_root / rel_path
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Reimbursements config not found: {path}. Reimbursement claims "
+            f"require config/reimbursements.yml (PSL funding `project` code, "
+            f"`allowed_categories`); enable reimbursements for this repo via "
+            f"onboarding/sync_templates.py."
+        )
+    with open(path, encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    if not config.get("project"):
+        raise ValueError(
+            f"`project` (PSL funding code) is missing from {path} — required "
+            f"so PSL can bill the claim against the right cost centre."
+        )
+    return config
+
+
+def place_receipts(
+    staging_dir: Path,
+    receipts_manifest: list[dict],
+    submission: dict,
+    repo_root: Path,
+) -> list[Path]:
+    """Copy fetched receipt files from the staging dir into the repo at
+    `receipts/{period}/{submission_id}/`.
+
+    Runs after suffix resolution so -B / -vN claims get their own directory
+    (which is why fetch_receipts stages to a temp dir first). Returns the
+    in-repo paths for staging."""
+    out_dir = (
+        repo_root / "receipts" / submission["period"] / submission["submission_id"]
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    placed: list[Path] = []
+    for entry in receipts_manifest:
+        destination = out_dir / entry["filename"]
+        shutil.copy2(staging_dir / entry["filename"], destination)
+        placed.append(destination)
+    return placed
+
+
+# PR-body size warnings for committed receipts: Gmail rejects messages over
+# ~25 MB, and the approval email carries the claim PDF + every receipt.
+_RECEIPT_FILE_WARN_BYTES = 10 * 1024 * 1024
+_RECEIPT_TOTAL_WARN_BYTES = 15 * 1024 * 1024
+
+
+def _mb(size_in_bytes: int) -> str:
+    return f"{size_in_bytes / (1024 * 1024):.1f} MB"
+
+
 def render_pr_body(
     issue_number: int,
     submitter: str,
@@ -297,17 +491,22 @@ def render_pr_body(
     pdf_path_rel: Optional[str] = None,
     png_url: Optional[str] = None,
     warnings: Optional[list[dict]] = None,
+    receipts_manifest: Optional[dict] = None,
 ) -> str:
     """Compose the PR body. Includes `Closes #N` so merge closes the issue.
 
     `png_url` is a full raw URL to the rendered preview image so reviewers
     see it inline in the PR description without leaving the review surface.
+    `receipts_manifest` is fetch_receipts' output (`receipts` + `total_bytes`)
+    for reimbursement claims — rendered as a file list with sizes plus
+    non-blocking warnings when the bundle approaches the email size cap.
     """
     totals = submission["totals"]
     submission_type = submission.get("type", "timesheet")
     type_label = {
         "timesheet": "Timesheet",
         "milestone_invoice": "Milestone Invoice",
+        "reimbursement": "Reimbursement Claim",
     }.get(submission_type, "Submission")
 
     lines = [
@@ -315,12 +514,17 @@ def render_pr_body(
         "",
         f"**Type:** {type_label}",
         f"**Period:** `{submission['period']}`",
-        f"**Contract:** `{submission['contract_id']}`",
     ]
-    if submission_type == "timesheet":
-        lines.append(f"**Total hours:** {totals['hours']}")
+    if submission_type == "reimbursement":
+        # Contractor-level: no contract; the PSL funding code stands in.
+        lines.append(f"**Project:** `{submission['project']}`")
+        lines.append(f"**Line items:** {len(submission['entries'])}")
     else:
-        lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
+        lines.append(f"**Contract:** `{submission['contract_id']}`")
+        if submission_type == "timesheet":
+            lines.append(f"**Total hours:** {totals['hours']}")
+        else:
+            lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
     lines.append(f"**Total amount:** {totals['amount']} {totals['currency']}")
     lines.append("")
     if submission_type == "timesheet":
@@ -331,6 +535,32 @@ def render_pr_body(
                 f"**{totals['hours']}** exceed the contract's "
                 f"`max_hours_per_month` of **{cap}**. "
                 f"Confirm out-of-band approval before merging.",
+                "",
+            ])
+    if submission_type == "reimbursement" and receipts_manifest:
+        receipt_entries = receipts_manifest.get("receipts", [])
+        total_bytes = receipts_manifest.get(
+            "total_bytes", sum(e.get("bytes", 0) for e in receipt_entries)
+        )
+        lines.append("### Receipts")
+        lines.append("")
+        for entry in receipt_entries:
+            lines.append(f"- `{entry['filename']}` — {_mb(entry['bytes'])}")
+        lines.append(f"- **Total:** {_mb(total_bytes)} across {len(receipt_entries)} file(s)")
+        lines.append("")
+        oversized = [e for e in receipt_entries if e.get("bytes", 0) > _RECEIPT_FILE_WARN_BYTES]
+        for entry in oversized:
+            lines.extend([
+                f"> ⚠️ **Large receipt** — `{entry['filename']}` is "
+                f"{_mb(entry['bytes'])}. The approval email attaches every "
+                f"receipt; consider a smaller export.",
+                "",
+            ])
+        if total_bytes > _RECEIPT_TOTAL_WARN_BYTES:
+            lines.extend([
+                f"> ⚠️ **Receipts bundle is {_mb(total_bytes)}** — the approval "
+                f"email (claim PDF + receipts) may exceed the ~25 MB send limit. "
+                f"Consider splitting the claim before merging.",
                 "",
             ])
     if png_url:
@@ -412,6 +642,75 @@ def checkout_existing_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", branch], cwd=cwd)
 
 
+# Directories the engine owns outright on a submission branch. Everything
+# under them for a given issue is generated, so a resubmit is free to
+# replace the previous run's output wholesale.
+_ARTIFACT_DIRS = ("submissions", "generated_pdfs", "receipts")
+
+
+def purge_branch_artifacts(
+    base_ref: str,
+    cwd: Optional[Path] = None,
+    *,
+    dirs: tuple[str, ...] = _ARTIFACT_DIRS,
+) -> list[Path]:
+    """Delete every engine artifact this branch added on top of `base_ref`.
+
+    Called on the update path (open PR, same issue re-submitted) after the
+    branch is checked out, before the new artifacts are written. Without it
+    a resubmit only ever *adds*: the previous run's submission YAML, PDF/PNG
+    and receipts all survive alongside the new ones, because `place_receipts`
+    merges into the receipts directory and `stage_and_commit` is only handed
+    the paths it just wrote. Three ways that bites:
+
+      * receipts are index-numbered from `01-` in issue order, so changing
+        the attachment set leaves withdrawn receipts (and duplicates of kept
+        ones under their old numbers) committed and emailed to the host;
+      * correcting the claim period writes a *second* submission YAML, and
+        process-approved.yml then approves whichever one sorts first — which
+        for a forward correction is the abandoned claim;
+      * a second same-month claim filed before the first merges collides on
+        the un-suffixed id and the PR becomes unmergeable.
+
+    Scoped to what the branch itself contributed (`base_ref...HEAD`) so
+    artifacts already merged on the base branch — the original claim behind
+    a `-vN` revision, say — are left alone. `dirs` narrows it further: only
+    purge what this run will regenerate, so `--skip-pdf` keeps the committed
+    PDF rather than dropping it. Returns the deleted paths so the caller can
+    stage the removals.
+    """
+    result = _run(
+        ["git", "diff", "--name-only", "--diff-filter=AM",
+         f"{base_ref}...HEAD", "--", *dirs],
+        cwd=cwd,
+    )
+    root = Path(cwd) if cwd else Path(".")
+    removed: list[Path] = []
+    for rel in result.stdout.split("\n"):
+        rel = rel.strip()
+        if not rel:
+            continue
+        path = root / rel
+        if path.is_file():
+            path.unlink()
+            removed.append(path)
+
+    # Prune the period/submission directories the deletions just emptied. Git
+    # does not track empty directories, so this is tidiness rather than
+    # correctness — but it keeps the working tree a faithful picture of the
+    # commit, which matters when the next step globs a receipts directory.
+    artifact_roots = {root / d for d in dirs}
+    for path in removed:
+        parent = path.parent
+        while parent not in artifact_roots and parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # not empty, or gone already
+            parent = parent.parent
+    return removed
+
+
 def stage_and_commit(
     paths: list[Path],
     issue_number: int,
@@ -426,9 +725,14 @@ def stage_and_commit(
     changes (no-op — possible when re-running on an existing branch
     where the regenerated artifacts are identical to what's already
     committed). Callers should treat False as "nothing to push".
+
+    Staged with `git add --all -- <path>` so that *removals* are recorded
+    too: on the update path `purge_branch_artifacts` deletes the previous
+    run's output, and a plain `git add <path>` of a vanished file leaves the
+    deletion unstaged — the branch would then keep both copies.
     """
-    for p in paths:
-        _run(["git", "add", str(p)], cwd=cwd)
+    if paths:
+        _run(["git", "add", "--all", "--", *(str(p) for p in paths)], cwd=cwd)
     # Has anything been staged? `git diff --cached --quiet` returns 0
     # when there are no staged diffs, non-zero otherwise.
     result = _run(["git", "diff", "--cached", "--quiet"], cwd=cwd, check=False)
@@ -437,6 +741,7 @@ def stage_and_commit(
     type_label = {
         "timesheet": "timesheet",
         "milestone_invoice": "milestone invoice",
+        "reimbursement": "reimbursement claim",
     }.get(submission_type, "submission")
     verb = "Update" if update else "Add"
     _run([
@@ -486,6 +791,71 @@ def open_pr(
         body_path.unlink(missing_ok=True)
 
 
+def update_pr_body(pr_number: int, body: str, cwd: Optional[Path] = None) -> bool:
+    """Rewrite an open PR's description. Returns True on success.
+
+    The push updates a PR's *commits*, never its body, so on the resubmit path
+    the body kept describing the first submission — stale total, stale period,
+    stale line items, stale receipt list — while the YAML and PDF underneath it
+    moved on. That body is the admin's approval decision surface, so it has to
+    track the branch.
+
+    Deliberately non-fatal: by the time this runs the submission is already
+    committed and pushed, and losing the submission over a failed `gh` call
+    would be far worse than an out-of-date description. The caller warns.
+    """
+    fd, name = tempfile.mkstemp(suffix=".md", prefix="pr-body-")
+    body_path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        result = _run(
+            ["gh", "pr", "edit", str(pr_number), "--body-file", str(body_path)],
+            cwd=cwd, check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return False
+        return True
+    finally:
+        body_path.unlink(missing_ok=True)
+
+
+def warn_stale_pr_body(pr_number: int, cwd: Optional[Path] = None) -> bool:
+    """Comment on the PR that its description is out of date. Returns True if
+    the comment landed.
+
+    The fallback for `update_pr_body` failing. The run stays green in that
+    case — the submission is committed and pushed — so the only other signal
+    is a stderr line in a workflow log nobody opens, leaving the approver
+    reading stale numbers with no indication they are stale.
+
+    Never raises: this is already the degraded path.
+    """
+    note = (
+        "> [!WARNING]\n"
+        "> **This description is out of date.** The submission was updated "
+        "and re-pushed, but refreshing this description failed.\n"
+        ">\n"
+        "> Review the committed submission YAML and the rendered PDF in "
+        "**Files changed** — those are current. The totals and line items "
+        "above may describe an earlier version of this submission."
+    )
+    result = _run(
+        ["gh", "pr", "comment", str(pr_number), "--body", note],
+        cwd=cwd, check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"WARNING: could not comment the stale-description caveat on PR "
+            f"#{pr_number} either — this log is the only record.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 def write_submission_yaml(submission: dict, repo_root: Path) -> Path:
@@ -515,6 +885,162 @@ def submission_png_path(submission: dict, repo_root: Path) -> Path:
     period = submission["period"]
     submission_id = submission["submission_id"]
     return repo_root / "generated_pdfs" / period / f"{submission_id}.png"
+
+
+# A page object in a typst-rendered PDF: `<</Type/Page/Parent ...>>`. The
+# lookahead only has to reject `/Pages` (the page-tree node, which carries
+# `/Count`); `/Type/PageLabels` and friends don't exist.
+_PDF_PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?!s)")
+
+
+def pdf_page_count(pdf_path: Path) -> Optional[int]:
+    """Best-effort page count for a typst-rendered PDF, or None if unknown.
+
+    Deliberately dependency-free — the submission workflow installs pyyaml and
+    nothing else, so pypdf isn't available where this runs. typst writes its
+    page objects as plain (uncompressed) dictionaries in both the pinned 0.13.0
+    and current releases, so counting `/Type /Page` occurrences is accurate
+    there; None is returned when the scan finds none at all, so a caller's
+    decision never rests on a structure we didn't recognise.
+    """
+    try:
+        raw = pdf_path.read_bytes()
+    except OSError:
+        return None
+    count = len(_PDF_PAGE_OBJECT.findall(raw))
+    return count or None
+
+
+# typst's message when asked to export a multi-page document to a single image.
+# Matched loosely (the wording has shifted across releases) but specifically
+# enough that an unrelated render failure is not mistaken for overflow.
+_MULTIPAGE_EXPORT_HINTS = (
+    "multiple images",
+    "page number template",
+    "cannot export multiple",
+)
+
+
+def _is_multipage_export_error(exc: BaseException) -> bool:
+    """True when a PNG render failure is typst refusing a multi-page export.
+
+    Used to keep the "your submission is too long" message off failures that
+    have nothing to do with length — a missing font or a template error would
+    otherwise be reported to the contractor as their problem while the admin
+    saw no error at all.
+    """
+    text = str(exc).lower()
+    return any(hint in text for hint in _MULTIPAGE_EXPORT_HINTS)
+
+
+def render_overflow_error(submission: dict, pages: Optional[int]) -> list[dict]:
+    """Contractor-facing error for a submission that outgrew the one-page
+    template, in parse_issue's `errors` shape.
+
+    The templates are single-page A4 by design and the PR preview is a single
+    image, so there is no rendering path for page 2: typst refuses the PNG
+    export outright. The row budget is not a fixed number — it depends on
+    description lengths and on the typst version — hence the fuzzy guidance.
+    """
+    type_label = {
+        "timesheet": "timesheet",
+        "milestone_invoice": "invoice",
+        "reimbursement": "claim",
+    }.get(submission.get("type", ""), "submission")
+    spilled = f" (it needs {pages} pages)" if pages and pages > 1 else ""
+    return [{"message": (
+        f"This {type_label} is too long for the one-page document the engine "
+        f"produces{spilled}, so it can't be rendered or filed. It has "
+        f"{len(submission.get('entries', []))} line items; roughly 25–30 fit, "
+        f"depending on how long the descriptions are. To fix: shorten the "
+        f"longest descriptions, and/or split it into more than one submission "
+        f"(for a claim, one issue per trip works well) and file them "
+        f"separately."
+    )}]
+
+
+def report_submit_error(
+    errors: list[dict],
+    issue_number: int,
+    repo_root: Path,
+    *,
+    errors_file: Optional[str] = None,
+    warnings: Optional[list[dict]] = None,
+) -> None:
+    """Surface a failure that happens *after* parsing to the contractor.
+
+    A submit-mode failure raised from this script has nowhere to go on its own:
+    the workflow's submit-error comment is gated on the parse and
+    receipt-fetch steps, and a failing step skips every step after it — so the
+    contractor gets no comment at all, moments after `/validate` told them the
+    submission was ready. Reuse the parse-error channel rather than inventing
+    a second one: same errors JSON shape, same sentinel comment, same
+    `parse-error` label, so the existing `post_error_comment clear` step tidies
+    it up when the next attempt succeeds.
+
+    Never raises — the caller is already returning non-zero, and that exit code
+    is what stops the run. A failure to comment degrades to a loud log.
+
+    Renders with `parse_failed=False`: the body parsed cleanly, so the
+    parse-error framing ("I couldn't parse this submission") would be false
+    and would send the contractor looking for a syntax error that isn't there.
+
+    On success it touches `CONTRACTOR_NOTIFIED_MARKER` so the workflow's
+    catch-all `failure()` comment stands down — otherwise the contractor gets
+    two comments, the generic one explicitly contradicting this specific one.
+    """
+    for err in errors:
+        print(f"ERROR: {err['message']}", file=sys.stderr)
+
+    if errors_file:
+        # Keep the file channel consistent with parse_issue / fetch_receipts,
+        # so anything reading it downstream sees the same failure.
+        try:
+            with open(errors_file, "w", encoding="utf-8") as f:
+                json.dump({"errors": errors, "warnings": warnings or []}, f, indent=2)
+        except OSError as exc:
+            print(f"WARNING: could not write {errors_file}: {exc}", file=sys.stderr)
+
+    repo = os.environ.get("GITHUB_REPOSITORY") or detect_repo_owner_name(repo_root)
+    if not repo:
+        print(
+            f"WARNING: no GITHUB_REPOSITORY and `gh repo view` failed — cannot "
+            f"tell issue #{issue_number} what went wrong; this log is the only "
+            f"record.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        post_error_comment.post_or_update(
+            repo, issue_number, errors, warnings or [],
+            post_error_comment.DEFAULT_LABEL,
+            parse_failed=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — already on the failure path
+        print(
+            f"WARNING: could not comment on issue #{issue_number} ({exc}) — the "
+            f"contractor has not been told; follow up manually.",
+            file=sys.stderr,
+        )
+        return
+    _mark_contractor_notified()
+
+
+# Touched by report_submit_error once the contractor has a specific comment on
+# the issue. `process-submission.yml`'s catch-all failure() step checks for it
+# and stays quiet, so the two never contradict each other.
+CONTRACTOR_NOTIFIED_MARKER = "/tmp/contractor_notified"
+
+
+def _mark_contractor_notified(
+    marker: str = CONTRACTOR_NOTIFIED_MARKER,
+) -> None:
+    try:
+        Path(marker).write_text("1", encoding="utf-8")
+    except OSError as exc:
+        # Worst case the contractor gets a second, generic comment. Not worth
+        # failing the already-failing run over.
+        print(f"WARNING: could not write {marker}: {exc}", file=sys.stderr)
 
 
 def detect_repo_owner_name(cwd: Path) -> Optional[str]:
@@ -584,6 +1110,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "chain anchor, `supersedes` + `revision_of` metadata "
                         "stamped in the YAML, and `(revision)` appended to the PR "
                         "title. See PLAN §8 Phase 2.5.")
+    p.add_argument("--receipts-manifest", default=None,
+                   help="Manifest JSON from fetch_receipts.py. Reimbursement "
+                        "claims only; ignored (and may be absent/empty) for "
+                        "other types.")
+    p.add_argument("--receipts-staging-dir", default=None,
+                   help="Staging directory fetch_receipts.py downloaded into. "
+                        "Required when --receipts-manifest has entries.")
     args = p.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -626,9 +1159,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             errs_data = json.load(f)
         warnings = errs_data.get("warnings", [])
 
-    contract = load_contract(repo_root, parsed["contract_id"])
-
     submission_type = parsed.get("type", "timesheet")
+
+    # Contract-backed types load their contract; reimbursements are
+    # contractor-level and load config/reimbursements.yml instead.
+    contract: Optional[dict] = None
+    reimbursements_config: Optional[dict] = None
+    if submission_type == "reimbursement":
+        reimbursements_config = load_reimbursements_config(repo_root)
+    else:
+        contract = load_contract(repo_root, parsed["contract_id"])
+
+    receipts_manifest_data: Optional[dict] = None
+    if args.receipts_manifest and Path(args.receipts_manifest).exists():
+        with open(args.receipts_manifest, encoding="utf-8") as f:
+            manifest_candidate = json.load(f)
+        if manifest_candidate.get("receipts"):
+            receipts_manifest_data = manifest_candidate
+
     base_id = generate_submission_id(
         args.issue_author, parsed["period"], submission_type=submission_type
     )
@@ -652,36 +1200,93 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-    submission = enrich_submission(
-        parsed,
-        contract,
-        submitter=args.issue_author,
-        submission_id=submission_id,
-        issue_number=args.issue_number,
-        submitted_date=args.submitted_date,
-        supersedes=args.supersedes,
-    )
+    if submission_type == "reimbursement":
+        submission = enrich_reimbursement(
+            parsed,
+            reimbursements_config,
+            submitter=args.issue_author,
+            submission_id=submission_id,
+            issue_number=args.issue_number,
+            submitted_date=args.submitted_date,
+            supersedes=args.supersedes,
+            receipts_manifest=(
+                receipts_manifest_data["receipts"]
+                if receipts_manifest_data else None
+            ),
+        )
+    else:
+        submission = enrich_submission(
+            parsed,
+            contract,
+            submitter=args.issue_author,
+            submission_id=submission_id,
+            issue_number=args.issue_number,
+            submitted_date=args.submitted_date,
+            supersedes=args.supersedes,
+        )
 
-    # Phase 3b: non-blocking cross-check between submitted milestone IDs and
-    # the contract's pre-declared schedule. Surfaces as warnings on the PR
-    # body so the admin sees typos at review time without the engine
-    # rejecting otherwise-valid submissions. No-op for hourly contracts and
-    # for milestone contracts that don't carry a structured `milestones[]`
-    # list yet.
-    for w in cross_check_milestone_ids(submission, contract):
-        warnings.append({"message": w.message})
+        # Phase 3b: non-blocking cross-check between submitted milestone IDs
+        # and the contract's pre-declared schedule. Surfaces as warnings on
+        # the PR body so the admin sees typos at review time without the
+        # engine rejecting otherwise-valid submissions. No-op for hourly
+        # contracts and for milestone contracts that don't carry a structured
+        # `milestones[]` list yet.
+        for w in cross_check_milestone_ids(submission, contract):
+            warnings.append({"message": w.message})
+
+    # Non-blocking: flag a total that the per-line currency rounding pulled
+    # away from the rows it's printed above (JPY sub-yen amounts only).
+    drift = rounding_drift_warning(submission)
+    if drift:
+        warnings.append(drift)
 
     # If there's an open PR for this branch, switch to the branch BEFORE
     # writing any artifacts (untracked files would conflict with the
     # branch's tracked content on checkout). Stale branches without an
     # open PR are force-pushed past — they don't need a checkout.
+    purged: list[Path] = []
     if has_open_pr:
+        # Capture the default-branch tip we were checked out on before
+        # switching, so the purge below can tell "added by this branch"
+        # from "already merged on the base branch".
+        base_ref = _run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root
+        ).stdout.strip()
         checkout_existing_branch(branch, cwd=repo_root)
+        # The resubmit replaces the previous run's output rather than
+        # accumulating alongside it. See purge_branch_artifacts.
+        purge_dirs = _ARTIFACT_DIRS
+        if args.skip_pdf:
+            # Nothing will regenerate them, so leave the committed PDFs alone.
+            purge_dirs = tuple(d for d in purge_dirs if d != "generated_pdfs")
+        purged = purge_branch_artifacts(
+            base_ref, cwd=repo_root, dirs=purge_dirs
+        )
+        for path in purged:
+            print(f"Removed stale {path.relative_to(repo_root).as_posix()}")
 
     # Write the YAML.
     yaml_path = write_submission_yaml(submission, repo_root)
     yaml_rel = yaml_path.relative_to(repo_root).as_posix()
     print(f"Wrote {yaml_rel}")
+
+    # Commit fetched receipts alongside the claim (reimbursements only).
+    # Placement happens here — after suffix resolution — so -B / -vN claims
+    # land in their own receipts/{period}/{submission_id}/ directory.
+    receipt_paths: list[Path] = []
+    if receipts_manifest_data:
+        if not args.receipts_staging_dir:
+            print("ERROR: --receipts-manifest has entries but "
+                  "--receipts-staging-dir was not given.", file=sys.stderr)
+            return 2
+        receipt_paths = place_receipts(
+            Path(args.receipts_staging_dir),
+            receipts_manifest_data["receipts"],
+            submission,
+            repo_root,
+        )
+        for receipt_path in receipt_paths:
+            print(f"Wrote {receipt_path.relative_to(repo_root).as_posix()}")
 
     # Render the PDF + PNG preview (both in pending state — approval block
     # says "PENDING REVIEW"). PDF is the authoritative artifact for the
@@ -689,7 +1294,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # so reviewers see it without leaving the PR.
     pdf_rel: Optional[str] = None
     png_url: Optional[str] = None
-    paths_to_stage: list[Path] = [yaml_path]
+    # `purged` first so the removals are staged even when the resubmit
+    # rewrites a different period/id and never touches those paths again.
+    paths_to_stage: list[Path] = [*purged, yaml_path, *receipt_paths]
     if not args.skip_pdf:
         pdf_path = submission_pdf_path(submission, repo_root)
         png_path = submission_png_path(submission, repo_root)
@@ -699,13 +1306,59 @@ def main(argv: Optional[list[str]] = None) -> int:
             template_dir=templates_dir,
             output_path=pdf_path,
         )
-        render_submission_png(
-            submission_path=yaml_path,
-            settings_path=settings_path,
-            template_dir=templates_dir,
-            output_path=png_path,
-            ppi=args.png_ppi,
-        )
+
+        # The templates are single-page A4 and entry rows are unbounded, so a
+        # long enough submission spills onto page 2 — at which point typst
+        # refuses to export the PNG preview at all ("cannot export multiple
+        # images without a page number template"). That used to raise here:
+        # after the artifacts were written, before the commit, with the
+        # workflow's submit-error comment already skipped — so the contractor
+        # got nothing back, having just been told "ready to submit" by
+        # `/validate`. Check the rendered page count (the exact row budget
+        # moves with the typst version and with description lengths, so it
+        # can't be a row limit) and report the overflow to them instead.
+        pages = pdf_page_count(pdf_path)
+        if pages is not None and pages > 1:
+            report_submit_error(
+                render_overflow_error(submission, pages),
+                args.issue_number, repo_root,
+                errors_file=args.errors_file, warnings=warnings,
+            )
+            return 1
+        try:
+            render_submission_png(
+                submission_path=yaml_path,
+                settings_path=settings_path,
+                template_dir=templates_dir,
+                output_path=png_path,
+                ppi=args.png_ppi,
+            )
+        except RuntimeError as exc:
+            if pages == 1:
+                # Single page, so the PNG export failed for some other reason
+                # — not the contractor's problem. Keep the loud raise.
+                raise
+            if not _is_multipage_export_error(exc):
+                # Page count was unreadable AND typst is complaining about
+                # something else — a missing font, a template bug. Blaming the
+                # contractor for "too long" would hide a real defect and leave
+                # the admin with no error, so raise. This matters more over
+                # time: if a future typst writes PDFs whose page count
+                # `pdf_page_count` can't read, `pages` is None for *every*
+                # document and this branch becomes the default path.
+                raise
+            # Page count unreadable, but typst named the multi-page export as
+            # the reason — same binary just produced the PDF from the same
+            # template, so treat it as the overflow.
+            print("PDF page count could not be determined; typst reports a "
+                  "multi-page export failure, so treating this as overflow.",
+                  file=sys.stderr)
+            report_submit_error(
+                render_overflow_error(submission, pages),
+                args.issue_number, repo_root,
+                errors_file=args.errors_file, warnings=warnings,
+            )
+            return 1
         pdf_rel = pdf_path.relative_to(repo_root).as_posix()
         png_rel = png_path.relative_to(repo_root).as_posix()
         paths_to_stage.extend([pdf_path, png_path])
@@ -750,12 +1403,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("No content changes detected; branch left in current state.",
               file=sys.stderr)
 
-    if has_open_pr:
-        # PR already open on this branch; the push updated it in place.
-        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
-        return 0
-
-    # Fresh branch → open a new PR.
+    # Describes what this run produced — the totals, period, line items,
+    # receipt list and email-size warnings the admin approves against.
     body = render_pr_body(
         issue_number=args.issue_number,
         submitter=args.issue_author,
@@ -764,7 +1413,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         pdf_path_rel=pdf_rel,
         png_url=png_url,
         warnings=warnings,
+        receipts_manifest=receipts_manifest_data,
     )
+
+    if has_open_pr:
+        # PR already open on this branch; the push updated its commits, but
+        # GitHub never re-derives the description — so refresh it here or the
+        # admin reviews the *first* submission's numbers against the current
+        # PDF. `png_url` is already scoped to this branch (raw_url is built
+        # with `branch`), so the preview points at the image just committed.
+        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
+        if update_pr_body(open_pr_number, body, cwd=repo_root):
+            print(f"Refreshed PR #{open_pr_number} description.")
+        else:
+            # The submission is committed and pushed at this point; a failed
+            # description update must not throw that away.
+            print(
+                f"WARNING: could not refresh PR #{open_pr_number}'s description "
+                f"— it still describes an earlier submission. The pushed YAML "
+                f"and PDF are the current ones: review those, not the PR body, "
+                f"or re-run /submit to retry.",
+                file=sys.stderr,
+            )
+            # The run stays green, so a warning in the log is invisible to the
+            # person who matters. The PR body is the stated approval-decision
+            # surface on a payment path — put the caveat where the approver
+            # will actually see it.
+            warn_stale_pr_body(open_pr_number, cwd=repo_root)
+        return 0
+
+    # Fresh branch → open a new PR.
     pr_url = open_pr(
         args.issue_title, body, cwd=repo_root,
         extra_labels=[submission_type.replace("_", "-")],

@@ -1,7 +1,7 @@
 # QuantEcon Contractor Payments
 
 This site is the step-by-step guide for QuantEcon contractors filing
-timesheets and invoices through GitHub.
+timesheets, invoices, and reimbursement claims through GitHub.
 
 ## Where to start
 
@@ -13,6 +13,11 @@ If your contract is **milestone-based** (a fixed amount per
 deliverable), see:
 
 [**→ Submit a milestone invoice**](contractor-guide/submit-invoice.md)
+
+If you're **claiming expenses** (travel, equipment, software — with
+receipts), see:
+
+[**→ Submit a reimbursement claim**](contractor-guide/submit-reimbursement.md)
 
 If something went wrong with a previous submission and you need to fix
 it, see:

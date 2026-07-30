@@ -1,6 +1,6 @@
 # QuantEcon Contractor Payments — Implementation Plan
 
-**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim deferred to Phase 5.
+**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim in build (Phase 5 — gating decisions resolved 2026-06-11, see §9).
 **Source issue:** [QuantEcon/admin#3 — PRJ: QuantEcon Timesheet Management System](https://github.com/QuantEcon/admin/issues/3)
 **Related (broader vision, separate track):** [QuantEcon/admin#5 — PRJ: QuantEcon admin infrastructure](https://github.com/QuantEcon/admin/issues/5)
 
@@ -15,12 +15,12 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 1.5** — Milestone Invoice engine
 - [x] **Phase 3a** — Reusable workflows (engine code centralised; contractor repos are thin callers)
 - [x] **Phase 2** — Merge processing + email notify to PSL (engine code complete; partial E2E verified through ledger update + pinned-issue refresh; SMTP credentials needed to unlock the email step)
-- [x] 🛑 **BREAK** — testing phase (full E2E verified on `contractor-engine-test`; `testing_mode: true` confirmed working)
-- [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `contractor-engine-test`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
+- [x] 🛑 **BREAK** — testing phase (full E2E verified on `test-contractor-payments`; `testing_mode: true` confirmed working)
+- [x] **Phase 2.5** — Revision + Independent-invoice handling (full E2E verified on `test-contractor-payments`: revision via `-vN` with supersede semantics, plus same-period `-B` independent invoices; both paths through ledger, PDF banner, email, cross-comments)
 - [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
-- [x] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate` + period-close reminders (full E2E verified on `contractor-engine-test` 2026-05-19: six scenarios passed including the parse-fail → fix → re-submit arc and reminder idempotency)
-- [ ] **Phase 4** — Docs + first real contractors (per-repo `testing_mode` opt-in to production; see §9 "Email recipients & testing")  ← **current target**
-- [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
+- [x] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate` + period-close reminders (full E2E verified on `test-contractor-payments` 2026-05-19: six scenarios passed including the parse-fail → fix → re-submit arc and reminder idempotency)
+- [ ] **Phase 4** — Docs + first real contractors (per-repo `testing_mode` opt-in to production; see §9 "Email recipients & testing")
+- [ ] **Phase 5** — Reimbursement Claim engine (gating decisions resolved 2026-06-11; build on branch `phase-5-reimbursement`)  ← **current target**
 
 ## Contents
 
@@ -280,7 +280,7 @@ The system doesn't enforce this format (it accepts any string), but the onboardi
 
 One file per contract. To renew, the admin copies an existing contract file, edits the dates and rate (or milestone schedule), gives it a new `contract_id`, and marks the old one `ended`.
 
-**Currency handling:** each contract specifies its own currency. Supported ISO 4217 codes in v1: `AUD`, `USD`, `JPY`. The Typst template renders amounts with the ISO code as a suffix (e.g. `45.00 AUD`, `30.00 USD`, `77000 JPY`) — clean and unambiguous, no symbol conventions. `JPY` is rendered without decimal places; `AUD` and `USD` use two. Other ISO codes can be added when a real contractor needs one.
+**Currency handling:** each contract specifies its own currency. Supported ISO 4217 codes in v1: `AUD`, `USD`, `JPY`. The Typst template renders amounts with the ISO code as a suffix (e.g. `45.00 AUD`, `30.00 USD`, `77,000 JPY`) — clean and unambiguous, no symbol conventions. Every currency gets thousands separators; `JPY` is rendered without decimal places, `AUD` and `USD` with two. Other ISO codes can be added when a real contractor needs one.
 
 ### 4.3 Submission forms — overview
 
@@ -524,24 +524,27 @@ A single reimbursement claim covers one **period** (calendar month) and may bund
 **Form fields:**
 
 1. **Year** + **Month** (dropdowns, both required) — same two-dropdown pattern as §4.4. Parser combines them to `YYYY-MM`. The period is the month the claim is *filed against*, not necessarily when the expense was incurred (though usually the same month).
-2. **Line items** (textarea, required) — one row per receipt, pipe-delimited: `YYYY-MM-DD | amount | category | description`. Currency is fixed for the submission (see field 3); per-line currency mixing is out of scope in v1. Categories must match the contractor repo's `config/settings.yml` allowed list.
-3. **Currency** (dropdown, required) — ISO 4217 code; same supported list as contracts (`AUD | USD | JPY` in v1, extensible). One currency per submission.
-4. **Total amount** (number, required) — contractor enters the total; parser verifies it matches the sum of line-item amounts (rejects on mismatch as a sanity check).
+2. **Expense Entries** (textarea, required) — one row per receipt line, pipe-delimited: `YYYY-MM-DD | amount | category | description` (parser splits on the first three pipes; description may contain `|`). Currency is fixed for the submission (see field 3); per-line currency mixing resolved out of scope (see §9 "Reimbursement currency"). Categories must match the contractor repo's `config/reimbursements.yml` allowed list. **Duplicate dates are allowed** — flight + hotel on the same day is the normal case (contrast with timesheets, which reject duplicate dates).
+3. **Currency** (dropdown, required) — ISO 4217 code; same supported list as contracts (`AUD | USD | JPY` in v1, extensible). One currency per submission; a multi-currency trip is filed as one claim per currency (same-month claims take the `-B` supplemental suffix, §v1.1).
+4. **Total** (input, required) — contractor enters the total; parser verifies it matches the sum of line-item amounts (rejects on mismatch as a sanity check).
 5. **Trip / project context** (textarea, optional) — free text. Useful for trips where line items don't individually justify their purpose.
-6. **Receipts** — see "Receipt storage" below.
+6. **Receipts** (textarea, required) — the contractor drags receipt files (PDF / PNG / JPG) into this field; GitHub stores them as issue attachments and leaves markdown links in the body. At `/submit` the engine downloads each attachment (token-authenticated fetch) and **commits them to `receipts/{period}/{submission_id}/`** on the submission branch; on approval they are attached to the PSL email alongside the claim PDF. Receipts are **claim-level** (a bundle for the whole claim), not per-line-item. Resolved 2026-06-11 — see §9 "Receipt storage".
 7. **Confirmation** (checkbox, required) — single ack.
-
-**Receipt storage — DEFERRED.** Where receipts physically live (GitHub issue attachments? Committed PDFs in `receipts/<period>/`? External store?) is an open decision (see §10). The Reimbursement engine ships in **Phase 5** (post-launch — see §8) *after* this decision is made and the multi-currency design is settled; the form schema above will pick up a `receipts:` field and a per-line-item `currency` column then.
 
 **Parser must reject:**
 
-- Any line-item date outside the selected `Period` (warn rather than reject if a trip legitimately spans a month boundary — exact policy decided during build).
+- Unparseable line-item date; amount ≤ 0; fewer than four pipe-separated segments; empty category or description.
 - Sum of line items ≠ stated total.
-- Empty line items.
+- Zero line items.
 - Currency not in supported list.
-- Category not in the contractor repo's allowed list.
+- Category not in the contractor repo's `config/reimbursements.yml` allowed list.
+- No receipt attachments found in the Receipts field.
 
-**Submission ID:** `{handle}-reimbursement-{period}` (e.g. `mmcky-reimbursement-2025-09`). Collision suffix `-vN` applies if a second reimbursement is filed for the same month — a legitimate case (multiple trips in one month), distinct from revisions.
+**Parser warns (non-blocking, admin decides):**
+
+- Line-item date outside the selected `Period` — trips legitimately span month boundaries (same posture as milestone catch-up submissions).
+
+**Submission ID:** `{handle}-reimbursement-{period}` (e.g. `mmcky-reimbursement-2025-09`). Standard suffix semantics (§v1.1): `-B`, `-C` for additional independent claims in the same month (multiple trips), `-vN` for revisions that supersede a prior claim.
 
 ### 4.8 Generic submission YAML shape
 
@@ -581,14 +584,19 @@ totals:
 
 # --- reimbursement ---
 # contract_id intentionally absent — reimbursements are contractor-level
-line_items:
-  - {date: ..., amount: ..., category: ..., description: ..., receipt: <path>}
+project: ...        # PSL funding code, from config/reimbursements.yml (§9)
+entries:
+  - {date: ..., amount: ..., category: ..., description: ...}
 trip_context: |
   ...
+receipts:
+  - {filename: <committed path under receipts/{period}/{submission_id}/>, source_url: <original attachment URL, audit only>}
 totals:
-  amount: ...       # sum of line_items[].amount
+  amount: ...       # sum of entries[].amount
   currency: ...     # one currency per submission
 ```
+
+> **Amended at Phase 5 build (2026-06-11)** from the original sketch: the reimbursement block uses `entries:` (not `line_items:`) so the generic engine machinery — entry sorting, display-string formatting, ledger passthrough — runs unmodified across all three types; and receipts are a **claim-level `receipts:` list** (not a per-line `receipt:` field) because mapping N dragged attachments onto individual rows is unreliable — the bundle is reviewed as a whole.
 
 This shared shape means Phase 2 merge processing — ledger update, approval re-render, payments-manager notify — runs the same pipeline for all three types, branching only at the render-template selection and the per-type ledger writer.
 
@@ -713,7 +721,7 @@ No CLI, no ceremony. One additional file to edit beyond the contract YAML (the f
 - [ ] Resolve open items in §10 (payments manager handle, admin handle/team, org-level reusable-workflow setting, runner-minutes budget)
 
 ### Phase 1 — Timesheets engine in a single test repo ✅
-Built everything against `QuantEcon/contractor-engine-test`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub. PDF + PNG preview rendering pulled forward from Phase 2 so reviewers see the actual artifact during PR review.
+Built everything against `QuantEcon/test-contractor-payments`. All three flows (valid submission, invalid submission, fix-and-retrigger) verified end-to-end against live GitHub. PDF + PNG preview rendering pulled forward from Phase 2 so reviewers see the actual artifact during PR review.
 
 Engine scripts and templates:
 - [x] `scripts/parse_issue.py` + tests — parser with lenient input handling and line-specific errors (§4.3, §4.4)
@@ -727,7 +735,7 @@ Engine scripts and templates:
 Form, workflow, test repo:
 - [x] `contractor-template/.github/ISSUE_TEMPLATE/hourly-timesheet.yml` + `config.yml` (§4.3)
 - [x] `contractor-template/.github/workflows/issue-to-pr.yml` — non-reusable Phase 1 form; installs Typst 0.13.0 via curl
-- [x] `QuantEcon/contractor-engine-test` (private, disposable) seeded with the above + a hand-written `config/settings.yml` and one `contracts/QE-PSL-2026-001.yml`
+- [x] `QuantEcon/test-contractor-payments` (private, disposable) seeded with the above + a hand-written `config/settings.yml` and one `contracts/QE-PSL-2026-001.yml`
 - [x] End-to-end verified: valid submission → PR with YAML + PDF + PNG; invalid → sentinel error comment + label; edit-to-fix → state cleaned up; revision (same period re-submit) → `-v2` suffix applied
 
 Project scaffold:
@@ -746,7 +754,7 @@ Engine + form + tests:
 - [x] **`contractor-template/.github/workflows/issue-to-pr.yml`** — routes both `timesheet` and `milestone-invoice` labels through one pipeline (parser auto-detects).
 - [x] **`scripts/setup_labels.py`** — idempotent label bootstrap (gap surfaced in this phase: GitHub Issue Forms silently drop unknown labels). Phase 3b's onboarding will call this.
 - [x] 107 tests passing (51 hourly parser, 15 milestone parser, +20 misc).
-- [x] End-to-end verified: opened a milestone-invoice issue on `contractor-engine-test`, workflow produced a PR with YAML + PDF + PNG, parse-error label cleanup confirmed.
+- [x] End-to-end verified: opened a milestone-invoice issue on `test-contractor-payments`, workflow produced a PR with YAML + PDF + PNG, parse-error label cleanup confirmed.
 
 Repo housekeeping:
 - [x] Renamed `QuantEcon/timesheets` → `QuantEcon/contractor-payments`. Engine repo URL refs + local clone path updated.
@@ -758,8 +766,8 @@ Phase 1.5 surfaced an operational risk: contractor repos carried their own copie
 - [x] **Engine repo visibility flipped to public** — required for `actions/checkout` on the engine repo from a contractor repo's workflow (the caller's `GITHUB_TOKEN` is scoped only to itself; a PAT would have added rotation overhead with no real benefit since the engine carries no data). Trade-off accepted; recipient emails now live in org-level Variables instead of committed files (see §9 Email recipient policy).
 - [x] **Engine repo: [`.github/workflows/process-submission.yml`](.github/workflows/process-submission.yml)** — `on: workflow_call`. Two checkouts (contractor repo at working dir, engine at `./engine`). Scripts run with `PYTHONPATH=engine` and `--templates-dir engine/templates`.
 - [x] **Contractor-template `.github/workflows/issue-to-pr.yml`** — collapsed to a thin caller: `uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main`, passes the `github.event.issue` context, applies the label-gate predicate, `secrets: inherit` for future SMTP credentials.
-- [x] **`contractor-engine-test`** — workflow replaced with the thin caller; `scripts/` + `templates/` directories deleted (2,306 lines removed). Engine repo is now the only source of truth.
-- [x] **End-to-end verification** — opened issue #13 on `contractor-engine-test` via the new thin caller; workflow ran cleanly through the reusable workflow, opened PR #14 with correct YAML + PDF + PNG.
+- [x] **`test-contractor-payments`** — workflow replaced with the thin caller; `scripts/` + `templates/` directories deleted (2,306 lines removed). Engine repo is now the only source of truth.
+- [x] **End-to-end verification** — opened issue #13 on `test-contractor-payments` via the new thin caller; workflow ran cleanly through the reusable workflow, opened PR #14 with correct YAML + PDF + PNG.
 
 ### Phase 2 — Merge processing + email notify
 On PR merge, the engine runs `process-approved.yml` (implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands.
@@ -782,8 +790,8 @@ Documentation:
 - [x] **`notes/EMAIL_SETUP.md`** ([f9a5550](https://github.com/QuantEcon/contractor-payments/commit/f9a5550) + [4619305](https://github.com/QuantEcon/contractor-payments/commit/4619305)) — Gmail / Google Workspace setup runbook. Three options for the sending identity (alias of existing account / standalone user / Google Group — alias is the recommended path since it matches QuantEcon's actual setup). Walks through 2-Step Verification, dedicated app-password generation, secret population, local smoke test, troubleshooting, Reply-To handling.
 
 End-to-end:
-- [x] **Manual one-shot:** initial ledger issue ([#15](https://github.com/QuantEcon/contractor-engine-test/issues/15)) opened on `contractor-engine-test` for contract `QE-IUJ-2025-002` — pinned, locked, label `ledger`, body pre-populated with the empty-state markdown. Issue number written into `contracts/QE-IUJ-2025-002.yml` as `ledger_issue: 15`. (Phase 3b onboarding will automate this for real contractor repos.)
-- [x] **Partial E2E verified** — opened test issue #16, workflow created PR #17, admin merge fired `process-approved` ([run 25780661113](https://github.com/QuantEcon/contractor-engine-test/actions/runs/25780661113)). 6 of 7 pipeline steps green: PDF/PNG flipped amber → green, ledger YAML committed, pinned issue #15 auto-refreshed to show the new claim. Email step failed as expected without `SMTP_PASSWORD`; comment + label steps skipped.
+- [x] **Manual one-shot:** initial ledger issue ([#15](https://github.com/QuantEcon/test-contractor-payments/issues/15)) opened on `test-contractor-payments` for contract `QE-IUJ-2025-002` — pinned, locked, label `ledger`, body pre-populated with the empty-state markdown. Issue number written into `contracts/QE-IUJ-2025-002.yml` as `ledger_issue: 15`. (Phase 3b onboarding will automate this for real contractor repos.)
+- [x] **Partial E2E verified** — opened test issue #16, workflow created PR #17, admin merge fired `process-approved` ([run 25780661113](https://github.com/QuantEcon/test-contractor-payments/actions/runs/25780661113)). 6 of 7 pipeline steps green: PDF/PNG flipped amber → green, ledger YAML committed, pinned issue #15 auto-refreshed to show the new claim. Email step failed as expected without `SMTP_PASSWORD`; comment + label steps skipped.
 - [ ] **Full E2E** — pending SMTP credentials (see §10). Once those are set: open one more test submission + merge → confirm email lands in the `vars.QUANTECON_EMAIL_REVIEWER` mailbox (testing_mode keeps PSL off), audit comment posts on the issue, `processed` label appears on the PR.
 
 ---
@@ -793,7 +801,7 @@ End-to-end:
 Once Phase 3a + Phase 2 implemented, the discipline was to **stop and test thoroughly** before continuing. During this phase:
 
 - `notifications.testing_mode` stayed **true** — the mailbox referenced by `vars.QUANTECON_EMAIL_REVIEWER` received all approval emails; `vars.PSL_EMAIL` was never contacted.
-- Full E2E verified on `contractor-engine-test` (issue #18 / run [26006508196](https://github.com/QuantEcon/contractor-engine-test/actions/runs/26006508196)): submit → review → merge → email lands → audit comments on both issue + PR → ledger refreshed → `processed` label applied.
+- Full E2E verified on `test-contractor-payments` (issue #18 / run [26006508196](https://github.com/QuantEcon/test-contractor-payments/actions/runs/26006508196)): submit → review → merge → email lands → audit comments on both issue + PR → ledger refreshed → `processed` label applied.
 - `testing_mode: true` is retained through Phase 2.5 and Phase 3b. The flip to `testing_mode: false` happens at the start of Phase 4.
 
 The testing surfaced an operational design question (post-merge corrections), captured and addressed in **Phase 2.5** below.
@@ -802,8 +810,8 @@ The testing surfaced an operational design question (post-merge corrections), ca
 
 ### Phase 2.5 — Revision + Supplemental handling ✅
 
-**End-to-end verified** on `contractor-engine-test` (2026-05-18):
-- **Revision flow**: edit closed issue #18 body → engine detected revision via filesystem state → opened PR [#20](https://github.com/QuantEcon/contractor-engine-test/pull/20) (`(revision)` title suffix, REVISION banner on PDF, `supersedes` + `revision_of` metadata) → admin merged → email landed with `REVISION approved` subject → ledger replaced original with v2 (77,000 → 80,000 JPY; superseded entry rendered struck-through in pinned issue [#15](https://github.com/QuantEcon/contractor-engine-test/issues/15)) → cross-comment posted on the now-superseded PR [#19](https://github.com/QuantEcon/contractor-engine-test/pull/19).
+**End-to-end verified** on `test-contractor-payments` (2026-05-18):
+- **Revision flow**: edit closed issue #18 body → engine detected revision via filesystem state → opened PR [#20](https://github.com/QuantEcon/test-contractor-payments/pull/20) (`(revision)` title suffix, REVISION banner on PDF, `supersedes` + `revision_of` metadata) → admin merged → email landed with `REVISION approved` subject → ledger replaced original with v2 (77,000 → 80,000 JPY; superseded entry rendered struck-through in pinned issue [#15](https://github.com/QuantEcon/test-contractor-payments/issues/15)) → cross-comment posted on the now-superseded PR [#19](https://github.com/QuantEcon/test-contractor-payments/pull/19).
 - **Independent `-B` flow**: fresh issue #21 for the same period → engine detected collision but no revision target → assigned `-B` suffix purely for ID uniqueness, no metadata, no banner → admin merged PR #22 → email plain "approved" subject → ledger appended as a third active claim (total now 172,000 JPY across 3 claims; the still-superseded original excluded).
 
 Two bugs were surfaced and fixed during E2E:
@@ -811,7 +819,7 @@ Two bugs were surfaced and fixed during E2E:
 - Cross-comment search was substring-matching the revision's own PR body; tightened to `<id>.yml` + explicit current-PR exclusion ([39c7792](https://github.com/QuantEcon/contractor-payments/commit/39c7792)).
 
 Two follow-on polish items also landed during the same testing window:
-- CODEOWNERS added to `contractor-template/.github/CODEOWNERS` (with `$ADMIN` placeholder, substituted by Phase 3b onboarding); deployed literally to `contractor-engine-test`. Auto-requests admin review on every PR — sharper signal than the @mention buried in the PR body, and surfaces on the PR as state until reviewed ([e1bf74b](https://github.com/QuantEcon/contractor-payments/commit/e1bf74b)).
+- CODEOWNERS added to `contractor-template/.github/CODEOWNERS` (with `$ADMIN` placeholder, substituted by Phase 3b onboarding); deployed literally to `test-contractor-payments`. Auto-requests admin review on every PR — sharper signal than the @mention buried in the PR body, and surfaces on the PR as state until reviewed ([e1bf74b](https://github.com/QuantEcon/contractor-payments/commit/e1bf74b)).
 - Email body uses `approved_by` from the stamped submission: "Approved by QuantEcon @{handle} for processing." instead of the prior generic "admin" string ([e1bf74b](https://github.com/QuantEcon/contractor-payments/commit/e1bf74b)).
 
 
@@ -867,7 +875,7 @@ The engine doesn't track PSL payment state (out-of-band). Admin uses judgment ba
 - [ ] **`update_ledger.py`** branches on `supersedes` metadata (revision path replaces; otherwise appends — covers both originals and `-B`/`-C` invoices uniformly).
 - [ ] **`update_ledger_issue.py`** renders superseded entries **struck-through with a link to the revision** and **excludes them from the running totals**. Keeps the audit trail discoverable; keeps the totals accurate. (Decided 2026-05-18.)
 - [ ] **Tests** — parser + ledger + create_submission_pr coverage for: revision of original, revision of revision, `-B` then revision of `-B`, multiple `-B`/`-C` independent invoices in same period.
-- [ ] **End-to-end test on `contractor-engine-test`** — exercise both a revision flow (reopen + edit) and an independent-second-invoice flow (`-B`). Verify ledger arithmetic, cross-references on the revision side, and that the `-B` side is indistinguishable from a normal submission downstream of ID assignment.
+- [ ] **End-to-end test on `test-contractor-payments`** — exercise both a revision flow (reopen + edit) and an independent-second-invoice flow (`-B`). Verify ledger arithmetic, cross-references on the revision side, and that the `-B` side is indistinguishable from a normal submission downstream of ID assignment.
 
 **Accounting principle:** every issued invoice number stays a record. Cancellation isn't a thing in good practice — supersession is. The original PDF remains in `generated_pdfs/` as the record of what PSL was originally sent. Independent invoices in the same period stand on their own.
 
@@ -926,7 +934,7 @@ This phase reshapes the submission flow so the **issue is a long-lived draft** t
 - [x] **Close + lock issue on successful submission** — `gh issue close` (with a PR-handoff comment) + `gh issue lock --reason resolved` at the end of the submit-success path.
 - [x] **Validate-result content** — `scripts/post_validate_result.py` renders either a ✅ success comment (table of contract / period / hours / rate / total, currency-aware) reusing `enrich_submission` for totals, or a ❌ error comment (same line-specific format as the parse-error path). Single sentinel; comment is upserted across re-runs.
 - [x] **Tests** — 17 tests in `tests/test_post_validate_result.py` (render success + error paths, both submission types), 26 in `tests/test_send_reminders.py` (period extraction, period-closed arithmetic across timezones, reminder render, label routing). Trigger-router gates are GitHub Actions YAML expressions — covered by E2E rather than unit tests. Total suite: **211 passing**.
-- [x] **E2E on `contractor-engine-test` (2026-05-19).** Six scenarios passed end-to-end:
+- [x] **E2E on `test-contractor-payments` (2026-05-19).** Six scenarios passed end-to-end:
   - Issue #27 opened via form → no PR, no workflow side effects (only label-event runs that skipped on the gate).
   - `/validate` with valid entries → ✅ sentinel comment with computed totals (3 days, 10.5 hours, 525 AUD).
   - `/validate` with a bad row → same comment **upserted** in place with line-specific error.
@@ -948,7 +956,7 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 - [x] **`contractor-template/.github/workflows/period-reminders.yml`** — thin caller with `on: schedule:` (cron `0 9 1 * *`) + `workflow_dispatch` (so admins can run on demand or dry-run against a test repo). Onboarding script picks it up automatically via the existing `rglob` over `contractor-template/`.
 - [x] **Reminder comment content.** 🔔 header naming the closed period + `/validate` and `/submit` next-steps + close-if-nothing-to-file advice + period-encoded sentinel `<!-- submission-reminder:YYYY-MM -->`.
 - [ ] **Escalation (optional, deferred).** Day-7 admin-@-mention follow-up. Not built; revisit if drafts pile up in practice.
-- [x] **E2E coverage** — verified during the Phase 3c E2E (2026-05-19): dry-run + real + re-run cycle on issue #11 of `contractor-engine-test` for period `2025-11`. See the Phase 3c E2E checklist above for details.
+- [x] **E2E coverage** — verified during the Phase 3c E2E (2026-05-19): dry-run + real + re-run cycle on issue #11 of `test-contractor-payments` for period `2025-11`. See the Phase 3c E2E checklist above for details.
 
 **Open items for this phase:**
 - **Submitter authorization.** Default: author-only may run `/submit` and `/validate`. Admin-override (so an admin can submit on behalf of an RA in a pinch) deferred until friction is observed.
@@ -960,12 +968,12 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 
 - [x] **Scaffold + landing page** (commit [18cd80e](https://github.com/QuantEcon/contractor-payments/commit/18cd80e)) — `mkdocs.yml`, `docs/index.md` placeholder ("guide coming soon"), gh-pages branch workflow. Moved `EMAIL_SETUP.md` from `docs/` to `notes/` so it's not published as part of the public site.
 - [x] **Switched to Pages artifact deploy** (commit [4b174ce](https://github.com/QuantEcon/contractor-payments/commit/4b174ce)) — `.github/workflows/docs.yml` uses `actions/upload-pages-artifact` + `actions/deploy-pages`; `gh-pages` branch deleted. Repo Pages source set to "GitHub Actions". Site live at https://quantecon.github.io/contractor-payments/.
-- [x] **Contractor guide pages** (under `docs/contractor-guide/`) — three tutorials shipped with 14 screenshots captured from `contractor-engine-test` (commit [0c9889d](https://github.com/QuantEcon/contractor-payments/commit/0c9889d)):
+- [x] **Contractor guide pages** (under `docs/contractor-guide/`) — three tutorials shipped with 14 screenshots captured from `test-contractor-payments` (commit [0c9889d](https://github.com/QuantEcon/contractor-payments/commit/0c9889d)):
   - [x] `submit-timesheet.md` — hourly timesheet walk-through, full Phase 3c flow (draft → `/validate` → `/submit`); 7 screenshots showing chooser, form, body-edit, `/validate` success + error (upsert visible via "Last edited by github-actions"), `/submit` + close + lock, and the opened PR with inline PNG preview.
   - [x] `submit-invoice.md` — milestone invoice variant. Worked example anchored to milestone 3 / 2026-07-15 / 77000 JPY; 7 screenshots paralleling the timesheet sequence. Covers catch-up submissions and the milestone-ID warning behaviour.
   - [x] `corrections.md` — per-stage correction paths (pre-submit, pre-merge, pre-payment revision, post-payment), plus parse-error recovery and "bot didn't respond" troubleshooting. Text-only.
   - Index page rewritten to point at the three tutorials with one-paragraph "how the flow works" preamble.
-  - PR-rendered screenshots (`ts-07` + `mi-07`) have the contractor info column redacted with a black box; test repo settings still contain real PII so a future cleanup task (sanitize `contractor-engine-test/config/settings.yml`) will let future captures be unredacted.
+  - PR-rendered screenshots (`ts-07` + `mi-07`) have the contractor info column redacted with a black box; test repo settings still contain real PII so a future cleanup task (sanitize `test-contractor-payments/config/settings.yml`) will let future captures be unredacted.
 - [x] **Fixed broken doc URLs in `contractor-template/`** — `ISSUE_TEMPLATE/config.yml`, both issue templates, and `README.md` now point at `https://quantecon.github.io/contractor-payments/...` instead of the never-existed `blob/main/docs/CONTRACTOR_GUIDE.md`. README's "Submitting" section also updated to describe the Phase 3c flow (`/validate` + `/submit`) instead of the pre-Phase-3c auto-PR-on-creation flow.
 - [ ] Admin guide — deferred; the admin runbook content can live in `notes/` or as a separate non-public section. Decide before flipping `testing_mode`.
 - [ ] **First real contractor onboarding checklist.** Run before / during the first real `onboarding/new-contractor.py` invocation:
@@ -978,21 +986,49 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 - [ ] **Per-repo production cutover.** When a contractor's flow is verified, set `notifications.testing_mode: false` in *their* `config/settings.yml` and commit. That repo starts sending real approval emails to PSL; all other repos are unaffected. The engine default in [templates/fiscal-host.yml](../templates/fiscal-host.yml) stays `true` as the fail-safe.
 - [ ] Onboard a small number of additional real contractors; iterate on friction.
 
-### Phase 5 — Reimbursement Claim engine + multi-select onboarding (post-launch)
+### Phase 5 — Reimbursement Claim engine + conditional form availability (post-launch)
 
-Deferred to a standalone phase because reimbursements are materially more complex than timesheets and invoices: they involve **multi-currency** receipts (a single trip may produce receipts in 2-3 currencies), **receipt storage** (an unresolved open question — see §10), ad-hoc authorisation (no pre-existing contract to check against), and tax-category handling that varies by jurisdiction. Bundling these into Phase 1.5 / 2 would have slowed the launch; running them as a post-launch addition lets real Phase 4 contractors stress-test the simpler types first.
+Deferred to a standalone phase because reimbursements are materially more complex than timesheets and invoices: they involve **multi-currency** receipts (a single trip may produce receipts in 2-3 currencies), **receipt storage** (resolved 2026-06-11 — see §9), ad-hoc authorisation (no pre-existing contract to check against), and tax-category handling that varies by jurisdiction. Bundling these into Phase 1.5 / 2 would have slowed the launch; running them as a post-launch addition lets real Phase 4 contractors stress-test the simpler types first.
 
-**Phase 5 build:**
+**Gating decisions resolved 2026-06-11** (see §9 for the full rows): receipts are committed to the contractor repo and emailed to PSL; one currency per claim; the reimbursement arrangement lives in a new `config/reimbursements.yml` (funding `project` code, `allowed_categories`, `ledger_issue`) with `config/settings.yml` unchanged as the identity file; issue forms are gated on repo state (file presence). The original "multi-select onboarding" idea became **presence-by-config**: a form is seeded iff its config exists.
 
-- [ ] **Receipt-storage policy resolved** (where receipts live, PII handling, size limits, multi-page) — see §10.
-- [ ] **Multi-currency design** — does a single reimbursement carry multiple currencies (per-line-item currency), or is each currency a separate submission? Decision drives both the form shape and the PDF render.
-- [ ] **`scripts/parse_reimbursement_issue.py`** (or branch in `parse_issue.py`) — handles line items with date/amount/category/currency/description; validates totals (per-currency if multi-currency); validates category against `config/settings.yml` allowed list.
-- [ ] **`config/settings.yml` extension** — add `reimbursement.allowed_categories: [...]` per contractor.
-- [ ] **`contractor-template/.github/ISSUE_TEMPLATE/reimbursement-claim.yml`** — the new form (§4.7), updated for multi-currency.
-- [ ] **`templates/reimbursement.typ`** — Typst template (title `QUANTECON REIMBURSEMENT`; line-item table; trip-context block; receipts appendix per policy).
-- [ ] **`scripts/create_submission_pr.py`** — extend for the third type.
-- [ ] **`onboarding/new-contractor.py`** — add the multi-select for issue templates. From this phase forward, an admin can configure a payee as reimbursement-only (e.g. one-off speakers, honorarium recipients) or as a full contractor with all three types. Also adds the `reimbursement.allowed_categories` prompt.
-- [ ] End-to-end test against `contractor-engine-test` (or a new `contractor-reimbursement-test`): submit a reimbursement claim with multiple line items (and multi-currency if that design wins), verify the merge flow.
+**Build plan (engine work on branch `phase-5-reimbursement`; merges to `main` only after E2E; live repos unaffected until retrofit):**
+
+- [x] **Stage 0a — test repo rename + sanitize** (commit 6ee4e18) — `contractor-engine-test` renamed to `test-contractor-payments` via `gh repo rename` (old URLs redirect); 45 engine-side references updated. Sanitization turned out to be a no-op: the test repo's `config/settings.yml` already carries fictional values ("QE Test Contractor" / noreply@) — the Phase 4 PII note was stale.
+- [x] **Stage 0b — receipts-download spike. RESULT: attachments ARE fetchable, but NOT with `secrets.GITHUB_TOKEN`.** Run on test repo issue [#38](https://github.com/QuantEcon/test-contractor-payments/issues/38) (2026-07-30) with one PDF, one PNG and one JPEG dragged in. Measured, all three URLs:
+
+  | Credential | Result |
+  |---|---|
+  | `secrets.GITHUB_TOKEN` (Actions job token) | **HTTP 404** — cannot read `user-attachments` |
+  | A user PAT with repo access | **HTTP 200**, byte-exact (24.1 / 21.4 / 27.9 KB) |
+  | No auth | **HTTP 404** — correctly private |
+
+  So the receipts policy is technically viable and attachments are genuinely private, but the built-in job token is not sufficient — which is what the spike existed to find out. `detect_extension` correctly identified `.pdf` / `.jpg` / `.png` from the fetched bytes, including the two `assets/<uuid>` URLs that carry no filename extension, so the magic-byte approach is confirmed against real GitHub-served content rather than crafted headers. The tightened `_ATTACHMENT_URL_RE` matched all three real URLs (previously untested against genuine attachment URLs), and `_extract_receipt_links` parsed a realistic mixed section — one markdown link plus the two `<img src=...>` tags GitHub inserts for images — with no errors or warnings.
+
+  **Open decision, and it is a security one, not a plumbing one.** A reusable workflow runs as a job in the *contractor's* repo, so any credential it uses is reachable by someone with Write on that repo — which every contractor has on their own. A PAT that can read private attachments is a broader credential than the SMTP secrets discussed in §11. Committing receipts therefore needs one of: a PAT accepted as contractor-reachable; the fetch relocated to an engine-side workflow contractors cannot edit; the §9 links-only fallback (no credential, but PSL may lack access to follow the links); or receipts committed by the contractor directly, which removes the credential problem entirely at some cost to the drag-and-drop UX. **Not yet decided — Stage 8's receipts cases stay blocked on this.**
+- [x] **Stage 1 — parser** (commit ad92d5b). Fix the greedy `_looks_like_header` heuristic first (§10 carry-over), then `Expense Entries` / `Currency` / `Total` / `Receipts` section parsing per §4.7 (duplicate dates allowed; out-of-period warns; category list from `config/reimbursements.yml`).
+- [x] **Stage 2 — submission pipeline** (commit 018d999). New `scripts/fetch_receipts.py` (download + sanitize + allowlist pdf/png/jpg + manifest); `create_submission_pr.py` reimbursement enrichment (no contract), receipts placement under `receipts/{period}/{submission_id}/`, PR-body receipts list + size warnings (>10 MB/file, >15 MB total vs Gmail's ~25 MB cap); `/validate` totals for the new type.
+- [x] **Stage 3 — `templates/reimbursement.typ`** (commit 8b16924; single-page verified to ~25 realistic rows locally) (title `QUANTECON REIMBURSEMENT CLAIM`; Date | Category | Description | Amount table; trip-context block; receipts filename list; single-page worst-case verified) + `generate_pdf.py` dispatch.
+- [x] **Stage 4 — approval side** (commit 544316f). `ledger/reimbursements.yml` (per-repo, per-currency totals buckets); pinned-issue render; PSL email attaches claim PDF + receipts, Project line replaces Contract line; audit comment parity (fixes latent `contract_id` KeyError in `notify_comment.py`).
+- [x] **Stage 5 — engine workflows** (commit d9b3d15). `process-submission.yml` + `process-approved.yml`: type-gated receipts fetch, reimbursement-aware validate-success and ledger-path steps (fixes two latent `['contract_id']` KeyErrors); existing-type paths kept byte-identical.
+- [x] **Stage 6 — contractor template** (commit 7661f78). `reimbursement-claim.yml` form (§4.7), templated `config/reimbursements.yml`, `issue-to-pr.yml` label gate gains `reimbursement` (per-repo file — retrofit required; engine merge alone does not enable routing).
+- [x] **Stage 7 — onboarding + sync** (commit d8e63ad; also fixes a latent template bug — placeholder names in form header comments are now $$-escaped so multi-contract substitutions can't splice into the YAML). New `onboarding/sync_templates.py`: regenerates issue forms + caller workflows + labels for an existing repo from its `contracts/` + `config/reimbursements.yml` (presence rule; deletes dead forms — replaces the `"(no contracts yet)"` placeholder behaviour); `--init-reimbursement-ledger` creates the pinned ledger issue. `new-contractor.py`: contract type `none` (reimbursement-only payees), reimbursement prompts, seeding delegated to sync_templates.
+- [ ] **Stage 8 — E2E on `test-contractor-payments`** (SETUP DONE: reimbursements enabled with project CHOW-TEST, forms synced, pinned ledger issue #37, callers pinned to the engine branch; PR QuantEcon/contractor-payments#4 open): claim with same-day + out-of-period rows, 2 receipts (PDF+PNG); `/validate` error paths (total mismatch, bad category); `/submit` → receipts committed; merge → ledger buckets + pinned issue + email (testing_mode=true) with attachments; `-B` second claim in a second currency; `-v2` revision supersede.
+  Three further cases added 2026-07-30. Both suffix cases above allocate a **fresh** submission directory (`-B` / `-v2`), so both would have passed cleanly while the resubmit artifact-accumulation bug ([e553473](https://github.com/QuantEcon/contractor-payments/commit/e553473)) was live — the orderings below are the ones that actually exercise same-directory reuse and suffix computation against uncommitted state:
+  - [ ] **Same-id resubmit before merge.** `/submit`, then reopen the issue, change the attachment set (drop one receipt, drag in a different one), `/submit` again, merge. Then read the PSL email's attachment list: it must carry exactly the second set — no leftover from the first, and the claim PDF's receipts filename list must agree with what's attached and with `receipts/{period}/{submission_id}/` on `main`.
+  - [ ] **Period-corrected resubmit before merge.** `/submit` for the wrong month, correct Year/Month on the issue, `/submit` again, merge. Confirm the *corrected* claim is the one that gets approved, ledgered (right per-currency bucket, right `period`) and emailed, and that nothing from the wrong-period submission survives on `main` — no orphan `submissions/{wrong-period}/` YAML, `receipts/{wrong-period}/`, or `generated_pdfs/{wrong-period}/`.
+  - [ ] **`-B` pair with both claims open at once.** File claim A and the second-currency claim *before merging either*, then merge them in order. The `-B` case listed above merges A first, so the suffix is computed against already-committed state and the collision path is never stressed — as written it may pass and hide the bug. Both-open-then-merge is the ordering that catches it: verify the second claim really lands as `-B` (not a duplicate of A's ID), and that merging A doesn't disturb the open `-B` PR's artefacts.
+- [ ] **Stage 9 — merge → `main`; retrofit live repos** via sync_templates (adds claim form + label gate; removes dead placeholder forms) + real `config/reimbursements.yml` + ledger issue.
+- [ ] **Stage 10 — docs** (`docs/contractor-guide/submit-reimbursement.md` + nav + admin runbook) and PLAN.md closing pass.
+
+**Reviewed and deliberately deferred (review pass, 2026-07-30).** A technical review of the branch turned up more than that pass fixed. Recording what was looked at and consciously left open, so the next person doesn't rediscover it as if it were news:
+
+- **Stage 0b is IN FLIGHT, not deferred** — the attachment-fetch spike is still the gate on all of Stage 8. Nothing below changes that ordering.
+- **Follow-up after Stage 9 — `onboarding/templates/welcome-email.md` has no reimbursement variant.** The welcome-email template lives on `main` ([#5](https://github.com/QuantEcon/contractor-payments/pull/5)), not on this branch, and is written for labor contracts only. A payee onboarded for reimbursements only (contract type `none`, Stage 7) therefore gets a welcome email that never mentions claims, receipts, categories, or the `config/reimbursements.yml` their repo was set up with. Deliberately **not** created here — the file doesn't exist on this branch, so adding it would just set up a merge collision. Do it as its own PR on `main` once Stage 9 lands: add a reimbursement-claim section plus a `none`-payee variant that omits the contract/timesheet paragraphs.
+- **Org-level SMTP secret scope** — the accepted risk now written up in §11 is *not* closed. Narrowing the secrets' repository scope is an org-settings change, not a code change on this branch, and it should be decided alongside the GitHub App direction in §8 Phase 3b rather than piecemeal.
+- **Branch protection** on contractor repos stays deferred (§8 Phase 3b, §11). Phase 5 doesn't change the picture; the reimbursement path pushes with the same bot identity as the existing types.
+- **§10 "Parser header-row heuristic is too greedy"** — the heuristic itself was tightened in Stage 1, but the §10 row stays until Stage 9 puts the fix on `main`, since that's the point at which live repos actually get it.
+- **PR size, measured correctly.** For PR [#4](https://github.com/QuantEcon/contractor-payments/pull/4), quote the **three-dot** diff (`git diff --shortstat main...HEAD`) — at [e553473](https://github.com/QuantEcon/contractor-payments/commit/e553473) that is **41 files changed, +4980/-377**. The `-418` deletion count in the PR description is a two-dot artifact: `main..HEAD` diffs against the *current* `main`, which has moved on since the branch point (`42f103e`), so `main`'s own PR #5 — the 53-line `onboarding/templates/welcome-email.md` above — is counted as a deletion by this branch. Three-dot diffs against the merge base and attributes only this branch's work. Both figures drift with every commit; re-measure rather than copying a number forward.
 
 ### v2+ (future, in scope of this PLAN if needed)
 - SMTP email delivery (currently @-mention only)
@@ -1023,7 +1059,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Email mechanism | Google Workspace SMTP from a QuantEcon service-account mailbox (sender lives in `secrets.SMTP_USER`/`SMTP_FROM` — see Email credentials row) | QuantEcon already owns the Google Workspace; no third-party transactional service needed at this volume (well under Gmail's 2,000/day limit). Switch to Postmark/Mailgun later if deliverability ever becomes an issue. |
 | Email recipient policy | Recipient addresses live as GitHub **org-level Variables** (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL_REVIEWER`), not in any file in this (public) engine repo | Engine repo is public for `actions/checkout` access; literal email addresses in committed files would be harvested for spam. Variables keep recipients private without auth/PAT overhead. |
 | Email credentials | GitHub **org-level** secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) | Scoped at the org so every contractor repo's reusable-workflow run can read them without per-repo setup. Never in any YAML; never committed. |
-| Email recipients & testing | Two-layer `testing_mode` resolution (most specific wins): (1) contractor repo `config/settings.yml` → `notifications.testing_mode`, (2) engine `templates/fiscal-host.yml` → `notifications.testing_mode`, (3) hard-coded `true` fail-safe. While the effective `testing_mode` is `true`, mail goes to `vars.QUANTECON_EMAIL_REVIEWER` only — PSL is never contacted. Recipient addresses themselves are org-level Variables, not in either file. | Per-repo override lets production and test repos coexist: real contractors opt into PSL delivery with `testing_mode: false` in their own settings; `contractor-engine-test` inherits the safe `true` default with no config. The dangerous action (emailing real PSL) is always an explicit opt-in, never the silence default. Replaces the original single global flip. |
+| Email recipients & testing | Two-layer `testing_mode` resolution (most specific wins): (1) contractor repo `config/settings.yml` → `notifications.testing_mode`, (2) engine `templates/fiscal-host.yml` → `notifications.testing_mode`, (3) hard-coded `true` fail-safe. While the effective `testing_mode` is `true`, mail goes to `vars.QUANTECON_EMAIL_REVIEWER` only — PSL is never contacted. Recipient addresses themselves are org-level Variables, not in either file. | Per-repo override lets production and test repos coexist: real contractors opt into PSL delivery with `testing_mode: false` in their own settings; `test-contractor-payments` inherits the safe `true` default with no config. The dangerous action (emailing real PSL) is always an explicit opt-in, never the silence default. Replaces the original single global flip. |
 | v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
 | Milestone contract shape | Structured `milestones[]` schedule with `(id, date, amount, description)` per row, **plus** the contractor entering the row at submission time. Parser emits a non-blocking warning if the submitted milestone ID isn't in the contract's schedule. | Onboarding collects the schedule interactively, so the structured field is free at write-time. Warnings catch typos cheaply without making the engine a hard gate; admin still verifies during PR review. Originally deferred (lightweight `notes:`-only spec) — flipped 2026-05-18 once Phase 3b's onboarding flow made the structured collection trivial. |
 | Submission trigger | Issue is a long-lived draft; PR opens only on an explicit `/submit` comment or `submit` label. `/validate` comment runs the parser in dry-run mode (no PR), reporting parse status + computed totals as a sentinel-marked comment that updates in place across re-runs. Form layer still provides the structured/restricted UI for the initial body seed; HTML-comment format reminders persist through edits. | Lets RAs accumulate hours across days/weeks inside the issue body itself rather than maintaining an external spreadsheet, surfaces parse errors before commit, and keeps the issue as a working surface rather than a single-shot form drop. PR remains canonical once opened (issue closed + locked on `/submit`). Decided 2026-05-19; Phase 3c builds it. |
@@ -1038,6 +1074,11 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Document-date timezone | Payer's locale (`psl_foundation.timezone` in `fiscal-host.yml`, default `America/New_York`) | Paperwork lines up with payer's books; contractor locale irrelevant. UTC fallback if unset. |
 | Contractor address | Optional `contractor.address` in `settings.yml` (multi-line) | Recommended for tax-invoice compliance; renders only when populated. No bank/tax-ID data ever — that policy carries through from earlier. |
 | External Actions | None on the financial-data path | Inherited from source issue. |
+| Receipt storage (reimbursements) | Contractor drags receipt files (PDF/PNG/JPG) into the issue form; at `/submit` the engine downloads the attachments (token-authenticated fetch — no official API) and **commits them to `receipts/{period}/{submission_id}/`** on the submission branch; on approval-merge they are **attached to the PSL email** alongside the claim PDF. Receipts are claim-level (a bundle), not per-line-item. Size posture: warn in the PR body at >10 MB/file or >15 MB total (Gmail ~25 MB cap); warn-don't-block. | Decided 2026-06-11. Full audit trail in git (receipts survive issue deletion and travel with the financial record); PSL receives the evidence without GitHub access; contractor UX stays "drag into the form". PII-on-receipts accepted — same posture as settings/contract data in private repos (§11). Trade-off accepted: binary growth in contractor repo history at this volume. |
+| Reimbursement currency | **One currency per claim** (form dropdown, AUD/USD/JPY). A multi-currency trip is filed as one claim per currency; same-month claims take the standard `-B` supplemental suffix. | Decided 2026-06-11. Keeps form, parser, totals cross-check, PDF, ledger, and email subject single-currency-simple; each PSL payout is single-currency anyway. Per-line-item currency reconsidered and rejected — it touches every layer for marginal contractor convenience. |
+| Reimbursement arrangement config | New per-repo file **`config/reimbursements.yml`** holding `project` (PSL funding code, rendered as "Project" on PDF + email like contracts), `allowed_categories`, and `ledger_issue`. `config/settings.yml` stays pure identity (name/github/email/address + admin + notifications) — unchanged. | Decided 2026-06-11 after discussion. Engagement-shaped data stays out of the identity file, mirroring how contracts are separate files; pairs with `ledger/reimbursements.yml` the way `contracts/QE-X.yml` pairs with `ledger/QE-X.yml`. Rejected: a `reimbursement:` block in settings.yml (overloads the identity SSOT); a `type: reimbursement` contract file (contradicts the contractor-level decision above; gives PSL contract IDs for non-agreements). |
+| Conditional issue-form availability | **A form is present iff its config exists**: `hourly-timesheet.yml` iff ≥1 active hourly contract, `milestone-invoice.yml` iff ≥1 active milestone contract, `reimbursement-claim.yml` iff `config/reimbursements.yml` exists. `onboarding/sync_templates.py` regenerates forms from repo state (idempotent; deletes dead forms) for onboarding, retrofit, and contract changes. | Decided 2026-06-11. Replaces both the Phase 5 "multi-select" idea (presence-by-config beats an explicit picker) and the `"(no contracts yet)"` placeholder seeding, which left dead forms visible in the chooser (the §5 "empty dropdowns hide forms" description was aspirational — placeholder options are valid YAML). Reimbursement-only payees get exactly one form; adding a contract later + re-running sync surfaces the others. |
+| Reimbursement ledger | One per-repo **`ledger/reimbursements.yml`** (not per-contract): `claims[]` entries `{submission_id, period, approved_date, approved_by, amount, currency, project}` with **per-currency totals buckets** `{<CCY>: {amount_to_date, claims_count}}`; pinned ledger issue number lives in `config/reimbursements.yml` → `ledger_issue`. | Decided 2026-06-11. Claims are single-currency but a contractor may claim across currencies over time — per-currency buckets avoid meaningless cross-currency sums. Supersede semantics identical to contract ledgers. |
 
 ---
 
@@ -1050,8 +1091,8 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - ~~**Org-level recipient variables.**~~ ✅ Resolved: `vars.PSL_EMAIL` (PSL Foundation contact) and `vars.QUANTECON_EMAIL_REVIEWER` (QuantEcon human reviewer/approver, Cc) are set as org-level Variables on `QuantEcon`. Visibility: Private repositories.
 - **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
 - **Broken doc URLs in `contractor-template/`.** `contractor-template/.github/ISSUE_TEMPLATE/config.yml` and the "Need help?" link inside both `hourly-timesheet.yml` and `milestone-invoice.yml` point at `blob/main/docs/CONTRACTOR_GUIDE.md` — a path that never existed and won't, since the guide is now a published MkDocs site. Repoint at `https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/` (and the invoice equivalent) once those pages land in Phase 4. Tracked in the Phase 4 task list.
-- **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
-- **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
+- ~~**Receipt storage for Reimbursement Claims.**~~ ✅ Resolved 2026-06-11: issue attachments fetched + committed to `receipts/{period}/{submission_id}/`, attached to the PSL email; claim-level bundle; warn-don't-block size posture; receipts surface in the claim PDF as a filename list (no thumbnails/appendix — single-page constraint). See §9 "Receipt storage (reimbursements)".
+- ~~**Multi-currency for Reimbursement Claims.**~~ ✅ Resolved 2026-06-11: one currency per claim; multi-currency trips file one claim per currency (`-B` suffix for same-month). See §9 "Reimbursement currency".
 - **Parser header-row heuristic is too greedy** (Phase 3c E2E finding, 2026-05-19). `_looks_like_header` in `scripts/parse_issue.py` skips any row whose first field contains the substring `date`, `day`, `when`, `id`, or `milestone` — caught us when a contractor typed `bad-date | 2 | oops` as a data row and the parser silently skipped it, producing a false `/validate` success. Fix: tighten the heuristic to recognise the actual seeded header row (`Date | Hours | Description` / `ID | Date | Amount | Description`) rather than matching on keyword substrings. Small change + new test; non-blocking because the contractor would notice that the bad row's hours/amount didn't appear in the `/validate` totals.
 
 ---
@@ -1062,6 +1103,12 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - No third-party GitHub Actions on any financial-data path. Only `actions/checkout` and `actions/setup-python` from first-party `actions/*`.
 - Branch protection on `main` for every contractor repo: **DEFERRED (no protection in place as of 2026-05-20)** — original ruleset-based spec no longer works after GitHub UI changes removed the GitHub Actions integration as a bypass actor; migration path is a dedicated GitHub App for the engine push. See §8 Phase 3b "Branch protection on `main` — DEFERRED" and `notes/ADMIN_RUNBOOK.md`.
 - GitHub Secrets only for credentials the workflow needs. From Phase 2: SMTP credentials (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) live as **org-level** secrets on `QuantEcon`, so every contractor repo's reusable-workflow run reads them without per-repo setup. Never in any YAML; never committed.
+- **Accepted risk (recorded 2026-07-30): the org-level SMTP secrets are readable by every Write-holder in every repo they're scoped to.** Actions secrets are available to *any* workflow in a repo the secret is scoped to, and a collaborator with **Write** can add workflows to that repo and cause them to run. Contractors hold Write on their own repo by design (§3.2 — they need to push to their submission PR branches). So the honest bound on who can read `SMTP_PASSWORD` is *every Write-holder across the org-secret scope* (currently "Private repositories", i.e. every private repo in `QuantEcon`), not just the approval path and not just this engine repo.
+  - **`secrets: inherit` is not the mechanism**, and deleting it wouldn't close anything. That keyword only forwards secrets into a `workflow_call`; a repo-scoped secret is visible to a workflow in that repo regardless. Removing it *would* break the approval email — `process-approved.yml` is the only consumer.
+  - **Branch protection is not a mitigation either.** A workflow triggered by a push runs from the pushed ref, so nothing has to reach the default branch first. This is orthogonal to the deferred branch-protection work above.
+  - **Blast radius is mailbox-wide, not send-only.** `SMTP_PASSWORD` is a Google app password on `admin@quantecon.org` (§8 Phase 2), and app passwords authenticate IMAP as well as SMTP submission. So the exposure is "acts as that mailbox", not merely "can send as `payments@`". No contractor *data* is reachable that the holder's own repo doesn't already contain.
+  - **The mitigation is org-side, not code-side.** (a) Narrow the `SMTP_*` secrets' repository scope to the specific repos that need them (only contractor repos run `process-approved.yml`), which shrinks the Write-holder set to exactly the intended one; and/or (b) move sending to an identity that isn't an org-wide shared secret — a GitHub App or a send service with per-repo, revocable credentials — which pairs naturally with the GitHub App migration already sketched for the engine push (§8 Phase 3b). Rotation is cheap in the meantime (regenerate the app password, update the one secret).
+  - **Why it's accepted for now:** this is a structural consequence of letting contractors hold Write on their own repos, not a live incident. At 5–10 trusted payees, with workflow runs and pushes visible on each repo's timeline, the residual risk is small. Revisit when the payee count grows, if a less-trusted payee is onboarded, or if the sending mailbox ever holds anything beyond approval mail.
 - **Email content is sensitive.** Approval emails carry the contractor's real name, contract ID, period, amount, and an attached PDF with the same data. In transit: TLS via SMTP submission port 587. At rest: in the PSL recipient's inbox + Cc on the QuantEcon admin mailbox. We accept this — the recipient is the fiscal host, the email is what triggers payment, and there's no way to deliver value to PSL without the data being present at the receiving end. The `notifications.testing_mode` flag keeps PSL off the recipient list until a repo is explicitly cut over. It resolves per-repo — the contractor repo's `config/settings.yml` overrides the engine-wide default in `templates/fiscal-host.yml`, which stays `true` (fail-safe); a repo that configures nothing never emails PSL (see §9 "Email recipients & testing").
 - **No email addresses in committed files.** The engine repo is public to allow `actions/checkout` from contractor repos. Recipient addresses (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL_REVIEWER`) and sender credentials (`secrets.SMTP_*`) are stored only as GitHub org-level Variables / Secrets — never committed. Git history was scrubbed of pre-policy literal addresses via `git filter-repo` at the introduction of this rule.
 - Python deps minimal: stdlib + `pyyaml`.
@@ -1073,7 +1120,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 
 - Local working dirs:
   - `/Users/mmcky/work/quantecon/contractor-payments/` (engine, this repo)
-  - `/Users/mmcky/work/quantecon/contractor-engine-test/` (Phase 1/2 test repo — pre-Phase-3b clone location)
+  - `/Users/mmcky/work/quantecon/test-contractor-payments/` (Phase 1/2 test repo — pre-Phase-3b clone location)
   - `contractors/contractor-{handle}/` (relative to the engine repo root — onboarding script clones new contractor repos here; gitignored). Co-locating these under the engine repo means admin tools can chdir into a contractor checkout without leaving the engine workspace.
 - Local toolchain: `typst` (`brew install typst`), Python 3.12+, `gh` CLI, `pypdf` (dev — used to assert single-page output in worst-case tests).
 - Running the engine locally:

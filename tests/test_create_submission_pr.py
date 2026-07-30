@@ -1,22 +1,32 @@
 """Tests for the pure data-transformation helpers in create_submission_pr.py.
 
 git/gh side effects are integration territory — exercised in the end-of-Phase-1
-test against contractor-engine-test.
+test against test-contractor-payments.
 """
 from __future__ import annotations
 
-import pytest
+import json
+import shutil
+from pathlib import Path
 
+import pytest
+import yaml
+
+from scripts import create_submission_pr as cspr
 from scripts.create_submission_pr import (
     _strip_revision_suffix,
     branch_name_for_issue,
+    enrich_reimbursement,
     enrich_submission,
     format_currency_amount,
     generate_submission_id,
+    pdf_page_count,
+    render_overflow_error,
     render_pr_body,
     resolve_payer_today,
     resolve_revision_suffix,
     resolve_uniqueness_suffix,
+    rounding_drift_warning,
 )
 
 
@@ -204,6 +214,43 @@ class TestCurrencyFormatting:
     def test_currency_case_insensitive(self):
         assert format_currency_amount(5000.0, "jpy") == 5000
         assert isinstance(format_currency_amount(5000.0, "jpy"), int)
+
+
+class TestRoundingDriftWarning:
+    """The stored total is the parser-validated one, so per-line rounding in a
+    currency with no minor units can leave the printed rows short of it. That
+    has to be visible on the PR body, not silent."""
+
+    def _submission(self, entries, total, currency="JPY"):
+        return {"type": "reimbursement", "entries": entries,
+                "totals": {"amount": total, "currency": currency}}
+
+    def test_none_when_lines_sum_to_the_total(self):
+        assert rounding_drift_warning(self._submission(
+            [{"amount": 100}, {"amount": 200}], 300,
+        )) is None
+
+    def test_flags_jpy_sub_yen_drift(self):
+        # 100.5 + 100.5 confirms as 201; each row prints as 100 (JPY rounds).
+        warning = rounding_drift_warning(self._submission(
+            [{"amount": 100}, {"amount": 100}], 201,
+        ))
+        assert warning is not None
+        assert "200 JPY" in warning["message"]
+        assert "201 JPY" in warning["message"]
+
+    def test_ignores_timesheets_whose_lines_carry_hours(self):
+        assert rounding_drift_warning({
+            "type": "timesheet",
+            "entries": [{"hours": 3.5}, {"hours": 5.0}],
+            "totals": {"hours": 8.5, "amount": 382.5, "currency": "AUD"},
+        }) is None
+
+    def test_no_total_or_no_entries_is_not_a_warning(self):
+        assert rounding_drift_warning({"totals": {}, "entries": []}) is None
+        assert rounding_drift_warning(
+            self._submission([], 100)
+        ) is None
 
 
 # ─── Enrichment ─────────────────────────────────────────────────────────────
@@ -564,3 +611,525 @@ class TestRenderPrBody:
 class TestBranchNaming:
     def test_branch_name_format(self):
         assert branch_name_for_issue(42) == "submission/issue-42"
+
+
+# ─── Reimbursement enrichment (§4.7, Phase 5) ───────────────────────────────
+
+PARSED_REIMBURSEMENT_SAMPLE = {
+    "type": "reimbursement",
+    "period": "2026-06",
+    "entries": [
+        {"date": "2026-06-05", "amount": 300.0, "category": "meals",
+         "description": "Team dinner"},
+        {"date": "2026-06-03", "amount": 12000.0, "category": "accommodation",
+         "description": "Hotel one night"},
+    ],
+    "totals": {"amount": 12300.0, "currency": "JPY"},
+    "trip_context": "PyCon JP — invited talk.",
+    "receipts": [
+        {"name": "taxi-receipt.png",
+         "url": "https://github.com/user-attachments/assets/aaa"},
+        {"name": "hotel-invoice.pdf",
+         "url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf"},
+    ],
+    "notes": "",
+    "status": "pending",
+}
+
+REIMBURSEMENTS_CONFIG = {
+    "project": "CHOW",
+    "allowed_categories": ["travel", "accommodation", "meals"],
+    "ledger_issue": 7,
+}
+
+RECEIPTS_MANIFEST_ENTRIES = [
+    {"filename": "01-taxi-receipt.png",
+     "source_url": "https://github.com/user-attachments/assets/aaa",
+     "bytes": 120_000, "sha256": "aa" * 32},
+    {"filename": "02-hotel-invoice.pdf",
+     "source_url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf",
+     "bytes": 480_000, "sha256": "bb" * 32},
+]
+
+
+def _enrich_reimbursement(parsed=None, config=REIMBURSEMENTS_CONFIG, **overrides):
+    import copy
+    defaults = dict(
+        submitter="janedoe",
+        submission_id="janedoe-reimbursement-2026-06",
+        issue_number=42,
+        submitted_date="2026-06-11",
+    )
+    defaults.update(overrides)
+    return enrich_reimbursement(
+        copy.deepcopy(parsed or PARSED_REIMBURSEMENT_SAMPLE), config, **defaults
+    )
+
+
+class TestGenerateReimbursementId:
+    def test_reimbursement_slug(self):
+        assert (generate_submission_id("janedoe", "2026-06", "reimbursement")
+                == "janedoe-reimbursement-2026-06")
+
+
+class TestEnrichReimbursement:
+    def test_project_from_config_no_contract_keys(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["project"] == "CHOW"
+        assert "contract_id" not in enriched
+        assert "contract_start_date" not in enriched
+        assert "contract_end_date" not in enriched
+
+    def test_entries_sorted_and_jpy_amounts_int(self):
+        enriched = _enrich_reimbursement()
+        assert [e["date"] for e in enriched["entries"]] == ["2026-06-03", "2026-06-05"]
+        assert enriched["totals"] == {"amount": 12300, "currency": "JPY"}
+        assert all(isinstance(e["amount"], int) for e in enriched["entries"])
+
+    def test_aud_amounts_two_decimals(self):
+        parsed = {
+            **PARSED_REIMBURSEMENT_SAMPLE,
+            "entries": [
+                {"date": "2026-06-03", "amount": 184.505, "category": "travel",
+                 "description": "Taxi"},
+            ],
+            "totals": {"amount": 184.505, "currency": "AUD"},
+        }
+        enriched = _enrich_reimbursement(parsed=parsed)
+        assert enriched["totals"]["amount"] == 184.5
+        assert enriched["totals"]["currency"] == "AUD"
+
+    def test_receipts_from_manifest_substitute_filenames(self):
+        enriched = _enrich_reimbursement(receipts_manifest=RECEIPTS_MANIFEST_ENTRIES)
+        assert enriched["receipts"] == [
+            {"filename": "01-taxi-receipt.png",
+             "source_url": "https://github.com/user-attachments/assets/aaa"},
+            {"filename": "02-hotel-invoice.pdf",
+             "source_url": "https://github.com/user-attachments/files/1/hotel-invoice.pdf"},
+        ]
+
+    def test_receipts_fallback_to_parser_links_without_manifest(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["receipts"][0] == {
+            "filename": "taxi-receipt.png",
+            "source_url": "https://github.com/user-attachments/assets/aaa",
+        }
+
+    def test_trip_context_and_metadata(self):
+        enriched = _enrich_reimbursement()
+        assert enriched["trip_context"].startswith("PyCon JP")
+        assert enriched["submitted_by"] == "janedoe"
+        assert enriched["issue_number"] == 42
+        assert enriched["status"] == "pending"
+        assert enriched["approved_by"] is None
+
+    def test_supersedes_stamps_revision_metadata(self):
+        enriched = _enrich_reimbursement(
+            submission_id="janedoe-reimbursement-2026-06-v2",
+            supersedes="janedoe-reimbursement-2026-06",
+        )
+        assert enriched["supersedes"] == "janedoe-reimbursement-2026-06"
+        assert enriched["revision_of"] == "janedoe-reimbursement-2026-06"
+
+    def test_confirmed_total_is_not_re_derived_from_rounded_lines(self):
+        """The parser cross-checked 201 against the Total the contractor typed,
+        so 201 is what gets stored, rendered and paid. Re-deriving the total
+        from the JPY-rounded rows (the old ordering) stored 200 instead —
+        rounding silently moving a validated figure."""
+        parsed = {
+            **PARSED_REIMBURSEMENT_SAMPLE,
+            "entries": [
+                {"date": "2026-06-03", "amount": 100.5, "category": "meals",
+                 "description": "Lunch"},
+                {"date": "2026-06-04", "amount": 100.5, "category": "meals",
+                 "description": "Dinner"},
+            ],
+            "totals": {"amount": 201.0, "currency": "JPY"},
+        }
+        enriched = _enrich_reimbursement(parsed=parsed)
+        assert enriched["totals"]["amount"] == 201
+        assert [e["amount"] for e in enriched["entries"]] == [100, 100]
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(ValueError):
+            _enrich_reimbursement(parsed={**PARSED_SAMPLE})
+
+
+class TestLoadReimbursementsConfig:
+    def test_missing_file_raises_pointed_error(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        with pytest.raises(FileNotFoundError) as exc:
+            load_reimbursements_config(tmp_path)
+        assert "config/reimbursements.yml" in str(exc.value)
+
+    def test_missing_project_raises(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "reimbursements.yml").write_text(
+            "allowed_categories: [travel]\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            load_reimbursements_config(tmp_path)
+        assert "project" in str(exc.value)
+
+    def test_loads_full_config(self, tmp_path):
+        from scripts.create_submission_pr import load_reimbursements_config
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "reimbursements.yml").write_text(
+            "project: CHOW\nallowed_categories: [travel, meals]\nledger_issue: 7\n"
+        )
+        config = load_reimbursements_config(tmp_path)
+        assert config["project"] == "CHOW"
+        assert config["ledger_issue"] == 7
+
+
+class TestPlaceReceipts:
+    def test_copies_into_period_and_id_directory(self, tmp_path):
+        from scripts.create_submission_pr import place_receipts
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "01-taxi-receipt.png").write_bytes(b"\x89PNG fake")
+        (staging / "02-hotel-invoice.pdf").write_bytes(b"%PDF fake")
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        submission = {
+            "period": "2026-06",
+            "submission_id": "janedoe-reimbursement-2026-06-B",
+        }
+        placed = place_receipts(
+            staging, RECEIPTS_MANIFEST_ENTRIES, submission, repo_root,
+        )
+        expected_dir = repo_root / "receipts" / "2026-06" / "janedoe-reimbursement-2026-06-B"
+        assert [p.parent for p in placed] == [expected_dir, expected_dir]
+        assert (expected_dir / "01-taxi-receipt.png").read_bytes() == b"\x89PNG fake"
+        assert (expected_dir / "02-hotel-invoice.pdf").read_bytes() == b"%PDF fake"
+
+
+class TestRenderPrBodyReimbursement:
+    def _manifest(self, entries=None, total=None):
+        entries = entries if entries is not None else RECEIPTS_MANIFEST_ENTRIES
+        return {
+            "receipts": entries,
+            "total_bytes": total if total is not None else sum(e["bytes"] for e in entries),
+        }
+
+    def _body(self, manifest=...):
+        enriched = _enrich_reimbursement(receipts_manifest=RECEIPTS_MANIFEST_ENTRIES)
+        return render_pr_body(
+            issue_number=42, submitter="janedoe",
+            submission=enriched,
+            submission_path_rel="submissions/2026-06/janedoe-reimbursement-2026-06.yml",
+            receipts_manifest=self._manifest() if manifest is ... else manifest,
+        )
+
+    def test_project_line_replaces_contract_line(self):
+        body = self._body()
+        assert "**Project:** `CHOW`" in body
+        assert "**Contract:**" not in body
+
+    def test_line_items_and_total(self):
+        body = self._body()
+        assert "**Line items:** 2" in body
+        assert "12300 JPY" in body
+
+    def test_receipts_listed_with_sizes(self):
+        body = self._body()
+        assert "### Receipts" in body
+        assert "`01-taxi-receipt.png` — 0.1 MB" in body
+        assert "`02-hotel-invoice.pdf` — 0.5 MB" in body
+        assert "across 2 file(s)" in body
+
+    def test_no_size_warnings_under_thresholds(self):
+        body = self._body()
+        assert "Large receipt" not in body
+        assert "may exceed" not in body
+
+    def test_oversized_file_warns(self):
+        entries = [
+            {**RECEIPTS_MANIFEST_ENTRIES[0], "bytes": 11 * 1024 * 1024},
+            RECEIPTS_MANIFEST_ENTRIES[1],
+        ]
+        body = self._body(manifest=self._manifest(entries=entries))
+        assert "Large receipt" in body
+        assert "01-taxi-receipt.png" in body
+
+    def test_oversized_bundle_warns(self):
+        entries = [
+            {**RECEIPTS_MANIFEST_ENTRIES[0], "bytes": 9 * 1024 * 1024},
+            {**RECEIPTS_MANIFEST_ENTRIES[1], "bytes": 8 * 1024 * 1024},
+        ]
+        body = self._body(manifest=self._manifest(entries=entries))
+        assert "may exceed" in body
+
+    def test_no_manifest_no_receipts_section(self):
+        body = self._body(manifest=None)
+        assert "### Receipts" not in body
+
+
+# ─── Multi-page overflow (single-page templates) ─────────────────────────────
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Shaped like typst's own output: an uncompressed page-tree node plus one
+# uncompressed dictionary per page, written without spaces after the names.
+def _fake_pdf(pages: int) -> bytes:
+    kids = " ".join(f"{i + 2} 0 R" for i in range(pages))
+    objs = "".join(
+        f"{i + 2} 0 obj\n<</Type/Page/Parent 1 0 R/Contents {i + 50} 0 R>>\nendobj\n"
+        for i in range(pages)
+    )
+    return (
+        f"%PDF-1.7\n1 0 obj\n<</Type/Pages/Count {pages}/Kids[{kids}]>>\nendobj\n"
+        f"{objs}"
+    ).encode("latin-1")
+
+
+class TestPdfPageCount:
+    def test_counts_single_and_multi_page(self, tmp_path):
+        one, two = tmp_path / "one.pdf", tmp_path / "two.pdf"
+        one.write_bytes(_fake_pdf(1))
+        two.write_bytes(_fake_pdf(2))
+        assert pdf_page_count(one) == 1
+        assert pdf_page_count(two) == 2
+
+    def test_unrecognised_bytes_are_unknown_not_zero(self, tmp_path):
+        blob = tmp_path / "x.pdf"
+        blob.write_bytes(b"not a pdf at all")
+        assert pdf_page_count(blob) is None
+
+    def test_missing_file_is_unknown(self, tmp_path):
+        assert pdf_page_count(tmp_path / "absent.pdf") is None
+
+    @pytest.mark.skipif(shutil.which("typst") is None, reason="typst not installed")
+    def test_agrees_with_real_typst_output(self, tmp_path):
+        """Pins the byte scan to what typst actually emits — the whole point of
+        the check is that it works on the pinned CI version's PDFs."""
+        from scripts.generate_pdf import render_submission_pdf
+
+        def claim(rows: int) -> Path:
+            submission = {
+                "submission_id": "janedoe-reimbursement-2026-06",
+                "project": "CHOW", "type": "reimbursement", "period": "2026-06",
+                "submitted_date": "2026-06-11", "submitted_by": "janedoe",
+                "issue_number": 42, "trip_context": "PyCon JP - invited talk.",
+                "receipts": [{"filename": "01-taxi.png", "source_url": "u"}],
+                "notes": "", "status": "pending",
+                "approved_by": None, "approved_date": None,
+                "entries": [
+                    {"date": f"2026-06-{i % 28 + 1:02d}", "amount": 100,
+                     "category": "meals",
+                     "description": f"Line item {i} with a fairly long description"}
+                    for i in range(rows)
+                ],
+                "totals": {"amount": 100 * rows, "currency": "JPY"},
+            }
+            path = tmp_path / f"claim-{rows}.yml"
+            path.write_text(yaml.safe_dump(submission, sort_keys=False), encoding="utf-8")
+            out = tmp_path / f"claim-{rows}.pdf"
+            render_submission_pdf(
+                submission_path=path,
+                settings_path=REPO_ROOT / "contractor-template/config/settings.yml",
+                template_dir=REPO_ROOT / "templates",
+                output_path=out,
+            )
+            return out
+
+        assert pdf_page_count(claim(5)) == 1
+        # 40 rows overflows on both the pinned 0.13.0 and current typst.
+        assert pdf_page_count(claim(40)) > 1
+
+
+class TestRenderOverflowError:
+    def test_names_the_type_and_says_what_to_do(self):
+        errors = render_overflow_error(
+            {"type": "reimbursement", "entries": [{}] * 40}, 2,
+        )
+        assert len(errors) == 1
+        message = errors[0]["message"]
+        assert "claim" in message
+        assert "40 line items" in message
+        assert "split" in message
+        assert "2 pages" in message
+
+    def test_omits_the_page_count_when_it_is_unknown(self):
+        message = render_overflow_error(
+            {"type": "timesheet", "entries": [{}] * 40}, None,
+        )[0]["message"]
+        assert "pages" not in message
+        assert "timesheet" in message
+
+
+class TestOverflowIsReportedToTheContractor:
+    """A claim that spills onto page 2 used to raise `RuntimeError` from the
+    PNG render — after the artifacts were written, before the commit, with the
+    workflow's submit-error comment already skipped. The contractor got nothing
+    at all, right after `/validate` said the claim was ready."""
+
+    _MULTIPAGE_ERROR = (
+        "error: cannot export multiple images without a page number template "
+        "({p}, {0p}) in the output path"
+    )
+
+    def _run_main(self, tmp_path, monkeypatch, *, pdf_bytes, png_fails,
+                  png_error=_MULTIPAGE_ERROR):
+        repo = tmp_path / "repo"
+        (repo / "config").mkdir(parents=True)
+        (repo / "config" / "reimbursements.yml").write_text(
+            "project: CHOW\nallowed_categories: [meals, accommodation]\n",
+            encoding="utf-8",
+        )
+        submission_file = tmp_path / "submission.json"
+        submission_file.write_text(
+            json.dumps(PARSED_REIMBURSEMENT_SAMPLE), encoding="utf-8"
+        )
+        errors_file = tmp_path / "errors.json"
+        errors_file.write_text(
+            json.dumps({"errors": [], "warnings": []}), encoding="utf-8"
+        )
+
+        posted: list[tuple] = []
+        # Everything that would make the submission real, recorded rather than
+        # run: an unrenderable claim must reach none of it.
+        filed: list[str] = []
+        monkeypatch.setenv("GITHUB_REPOSITORY", "QuantEcon/contractor-janedoe")
+        monkeypatch.setattr(cspr, "remote_branch_exists", lambda *a, **k: False)
+        monkeypatch.setattr(cspr, "create_branch", lambda *a, **k: None)
+        monkeypatch.setattr(cspr, "stage_and_commit",
+                            lambda *a, **k: (filed.append("commit"), True)[1])
+        monkeypatch.setattr(cspr, "push_branch",
+                            lambda *a, **k: filed.append("push"))
+        monkeypatch.setattr(cspr, "open_pr",
+                            lambda *a, **k: (filed.append("pr"), "https://pr")[1])
+
+        def fake_pdf(*, output_path, **kwargs):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(pdf_bytes)
+
+        def fake_png(*, output_path, **kwargs):
+            if png_fails:
+                # Real shape: generate_pdf puts typst's own diagnostic in the
+                # message, and the overflow path branches on it.
+                raise RuntimeError(
+                    f"typst compile failed with exit code 1. "
+                    f"Working dir kept for inspection: /tmp/x\n"
+                    f"typst said: {png_error}"
+                )
+            output_path.write_bytes(b"\x89PNG")
+
+        monkeypatch.setattr(cspr, "render_submission_pdf", fake_pdf)
+        monkeypatch.setattr(cspr, "render_submission_png", fake_png)
+        monkeypatch.setattr(
+            cspr.post_error_comment, "post_or_update",
+            lambda *args, **kwargs: posted.append((args, kwargs)),
+        )
+
+        code = cspr.main([
+            "--submission-file", str(submission_file),
+            "--errors-file", str(errors_file),
+            "--issue-number", "42",
+            "--issue-author", "janedoe",
+            "--issue-title", "Reimbursement 2026-06",
+            "--repo-root", str(repo),
+            "--submitted-date", "2026-06-11",
+        ])
+        return code, posted, filed, errors_file
+
+    def test_multi_page_pdf_comments_on_the_issue_and_fails(self, tmp_path, monkeypatch):
+        code, posted, filed, errors_file = self._run_main(
+            tmp_path, monkeypatch, pdf_bytes=_fake_pdf(2), png_fails=True,
+        )
+        assert code == 1
+        assert filed == []          # not committed, not pushed, no PR
+        assert len(posted) == 1
+        args, kwargs = posted[0]
+        repo, issue, errors, _warnings, label = args
+        assert (repo, issue, label) == ("QuantEcon/contractor-janedoe", 42, "parse-error")
+        assert "too long" in errors[0]["message"]
+        # The body parsed fine — this must NOT render as a parse error, or the
+        # contractor goes hunting for a syntax mistake that isn't there.
+        assert kwargs == {"parse_failed": False}
+        # Same file channel parse_issue / fetch_receipts use.
+        assert json.loads(errors_file.read_text())["errors"] == errors
+
+    def test_detected_before_the_png_render_even_if_png_would_succeed(
+        self, tmp_path, monkeypatch,
+    ):
+        code, posted, filed, _ = self._run_main(
+            tmp_path, monkeypatch, pdf_bytes=_fake_pdf(2), png_fails=False,
+        )
+        assert code == 1
+        assert filed == []
+        assert len(posted) == 1
+
+    def test_unknown_page_count_plus_failed_png_is_treated_as_overflow(
+        self, tmp_path, monkeypatch,
+    ):
+        """The same typst binary just rendered the PDF from the same template,
+        so a PNG-only failure is the multi-page export refusing."""
+        code, posted, filed, _ = self._run_main(
+            tmp_path, monkeypatch, pdf_bytes=b"unparseable", png_fails=True,
+        )
+        assert code == 1
+        assert filed == []
+        assert len(posted) == 1
+
+    def test_single_page_png_failure_still_raises_loudly(self, tmp_path, monkeypatch):
+        """One page means the PNG failed for some other reason — a template or
+        font problem is the admin's to see, not a 'shorten your claim' note."""
+        with pytest.raises(RuntimeError):
+            self._run_main(
+                tmp_path, monkeypatch, pdf_bytes=_fake_pdf(1), png_fails=True,
+            )
+
+    def test_unknown_page_count_plus_unrelated_png_failure_raises(
+        self, tmp_path, monkeypatch,
+    ):
+        """The dangerous combination: page count unreadable AND the PNG failed
+        for a reason that has nothing to do with length. Blaming the contractor
+        would hide a real defect and leave the admin with no error at all.
+
+        This is not hypothetical drift-protection: if a future typst writes
+        PDFs whose page count `pdf_page_count` cannot read, `pages` is None for
+        *every* document and this becomes the default path.
+        """
+        with pytest.raises(RuntimeError, match="unknown font"):
+            self._run_main(
+                tmp_path, monkeypatch, pdf_bytes=b"unparseable", png_fails=True,
+                png_error="error: unknown font family: NonexistentSans",
+            )
+
+    def test_multipage_hint_detection(self):
+        """Matched against typst's real wording, captured from typst 0.15.1."""
+        assert cspr._is_multipage_export_error(
+            RuntimeError(self._MULTIPAGE_ERROR)
+        )
+        assert not cspr._is_multipage_export_error(
+            RuntimeError("error: unknown font family: NonexistentSans")
+        )
+        assert not cspr._is_multipage_export_error(
+            RuntimeError("typst compile failed with exit code 1.")
+        )
+
+    def test_single_page_claim_is_unaffected(self, tmp_path, monkeypatch):
+        code, posted, filed, _ = self._run_main(
+            tmp_path, monkeypatch, pdf_bytes=_fake_pdf(1), png_fails=False,
+        )
+        assert code == 0
+        assert posted == []
+        assert filed == ["commit", "push", "pr"]
+
+
+class TestEnrichReimbursementConfigGuard:
+    def test_missing_project_raises_pointed_error(self):
+        # The /validate path loads the config file directly (not via
+        # load_reimbursements_config), so the chokepoint guard is what
+        # turns an empty/incomplete config into a pointed message
+        # instead of a KeyError.
+        with pytest.raises(ValueError, match="PSL funding code"):
+            _enrich_reimbursement(config={})
+
+    def test_null_project_raises_too(self):
+        with pytest.raises(ValueError, match="config/reimbursements.yml"):
+            _enrich_reimbursement(config={"project": None, "allowed_categories": []})

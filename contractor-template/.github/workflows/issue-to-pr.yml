@@ -33,7 +33,8 @@ jobs:
     if: >-
       (
         contains(github.event.issue.labels.*.name, 'timesheet') ||
-        contains(github.event.issue.labels.*.name, 'milestone-invoice')
+        contains(github.event.issue.labels.*.name, 'milestone-invoice') ||
+        contains(github.event.issue.labels.*.name, 'reimbursement')
       ) && (
         (
           github.event_name == 'issues' &&
@@ -62,6 +63,12 @@ jobs:
       event_action: ${{ github.event.action }}
       # `/validate` comments select validate mode; everything else (the
       # `submit` label, `/submit` comments) routes to submit mode.
+      # Must match the `@ref` on the `uses:` line above. The engine checks
+      # its own scripts out at this ref, and there is no context value that
+      # would let it derive one — so pinning the workflow without pinning this
+      # runs a different commit's code. Keep the two in step; the engine's
+      # tests/test_workflows.py asserts they agree.
+      engine_ref: main
       mode: >-
         ${{ (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/validate')) && 'validate' || 'submit' }}
     secrets: inherit

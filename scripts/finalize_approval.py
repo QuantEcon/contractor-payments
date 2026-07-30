@@ -7,10 +7,11 @@ and `approved_date` both null. This script updates those three fields and
 re-renders the PDF + PNG so the approval block flips from the amber
 "PENDING REVIEW" state to the green "APPROVED BY @... ON ..." state.
 
-The template at templates/timesheet.typ + templates/invoice.typ already
-handles the rendering branch based on whether `approved_by` is null — see
-the approval block at the bottom of each template. No template change is
-needed.
+The templates (templates/timesheet.typ, templates/invoice.typ,
+templates/reimbursement.typ) already handle the rendering branch based on
+whether `approved_by` is null — see the approval block at the bottom of
+each template. This script is type-agnostic; generate_pdf dispatches on
+`type`.
 
 CLI:
   python -m scripts.finalize_approval \\
@@ -78,15 +79,40 @@ def mark_superseded_yaml(
 ) -> Path:
     """Locate the superseded submission's YAML and stamp it as superseded.
 
+    `period` is the *revision's* period and is only a hint: it is where the
+    predecessor usually lives, but a revision that also corrects the period
+    (`2026-05` claimed, revised to `2026-06`) leaves the predecessor under
+    the old one. Look there first, then fall back to scanning every period
+    directory for the id — assuming the revision's period raised
+    FileNotFoundError mid-pipeline, and since neither workflow gates on
+    failure, that aborted the ledger update, the approval email and the
+    audit comment while leaving the revision already stamped `approved`.
+
     Returns the path that was updated. Raises FileNotFoundError if the
-    YAML can't be found — caller decides whether to treat that as fatal
-    (it indicates the revision workflow is operating on inconsistent state).
+    YAML can't be found anywhere — caller decides whether to treat that as
+    fatal (it indicates the revision workflow is operating on inconsistent
+    state).
     """
-    path = repo_root / "submissions" / period / f"{superseded_id}.yml"
+    filename = f"{superseded_id}.yml"
+    path = repo_root / "submissions" / period / filename
+    if not path.exists():
+        candidates = sorted(
+            (repo_root / "submissions").glob(f"*/{filename}")
+        )
+        if len(candidates) > 1:
+            raise FileNotFoundError(
+                f"Cannot mark `{superseded_id}` as superseded: ambiguous — "
+                f"found in {len(candidates)} periods "
+                f"({', '.join(c.parent.name for c in candidates)})."
+            )
+        if candidates:
+            path = candidates[0]
     if not path.exists():
         raise FileNotFoundError(
-            f"Cannot mark `{superseded_id}` as superseded: "
-            f"YAML not found at {path}. Workflow state inconsistent."
+            f"Cannot mark `{superseded_id}` as superseded: YAML not found "
+            f"under {repo_root / 'submissions'} (looked in period "
+            f"`{period}` and every other period directory). "
+            f"Workflow state inconsistent."
         )
     with open(path, encoding="utf-8") as f:
         previous = yaml.safe_load(f)

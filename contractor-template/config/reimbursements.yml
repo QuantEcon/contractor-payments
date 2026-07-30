@@ -1,0 +1,33 @@
+# Reimbursement arrangement for this contractor (engine Phase 5).
+#
+# The presence of this file enables the Reimbursement Claim issue form for
+# this repo (seeded by onboarding / onboarding/sync_templates.py); delete the
+# file and re-run sync_templates to disable reimbursements.
+#
+# NOTE: This file is a template. `$REIMBURSEMENT_PROJECT` and
+# `$REIMBURSEMENT_CATEGORIES` are substituted at seeding time; `ledger_issue`
+# is written by `sync_templates.py --init-reimbursement-ledger` once the
+# pinned ledger issue exists.
+
+# PSL funding/billing code — rendered as "Project" on claim PDFs + emails so
+# PSL knows which cost centre to bill.
+project: $REIMBURSEMENT_PROJECT
+
+# Line-item categories the parser accepts (case-insensitive); anything else
+# fails validation on the contractor's claim.
+#
+# Must be a YAML **list**. `allowed_categories: travel, meals` (no brackets)
+# is a single string, not a list — sync_templates.py rejects that shape rather
+# than let it become an allowlist that refuses every real category.
+#
+# To accept ANY category, delete this key entirely. An empty list is a
+# configuration error, NOT "reject everything" — the parser skips the check
+# when the list is empty, so the two readings contradict each other and
+# sync_templates.py refuses to guess.
+allowed_categories: $REIMBURSEMENT_CATEGORIES
+
+# Pinned "Running ledger — Reimbursements" issue number (auto-updated on
+# each approval). Written by onboarding / sync_templates; must be an issue
+# number or `null` (an unsubstituted placeholder here reads as "already
+# wired" and silently skips the ledger, so it is rejected).
+ledger_issue: $REIMBURSEMENT_LEDGER_ISSUE
