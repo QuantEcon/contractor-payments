@@ -1,0 +1,75 @@
+# Unit tests for the engine. Until this existed the suite ran only when
+# someone remembered to run it locally, so nothing was enforced on a PR.
+#
+# Two things here are deliberate rather than incidental:
+#
+#   - **Typst is installed, at the version the pipeline pins.** One test
+#     (`pdf_page_count` vs a real render) is `skipif(typst is None)`, and it
+#     guards the assumption behind the whole claim-overflow path: that typst
+#     writes countable page objects. Skipping it in CI would leave the guard
+#     running nowhere. The version is *derived* from the pipeline workflows
+#     rather than repeated here, so CI can't drift from production.
+#   - **The matrix covers 3.12 and 3.13.** 3.12 is what the submission and
+#     approval workflows run, so it is the version that matters; 3.13 is what
+#     the maintainer has locally. Testing both catches the drift where a fix
+#     verified on one breaks the other.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the engine and its dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install Typst at the version the pipeline pins
+        run: |
+          # Derived, not duplicated: tests/test_workflows.py asserts every
+          # workflow pins the same exact version, so this cannot silently
+          # diverge from what actually renders contractors' documents.
+          TYPST_VERSION=$(grep -ohE 'TYPST_VERSION="[0-9.]+"' \
+            .github/workflows/process-submission.yml \
+            | head -1 | cut -d'"' -f2)
+          if [ -z "$TYPST_VERSION" ]; then
+            echo "ERROR: could not derive TYPST_VERSION from" \
+                 ".github/workflows/process-submission.yml." >&2
+            echo "If the install step there was reworded, update this grep —" \
+                 "do not hard-code a version." >&2
+            exit 1
+          fi
+          echo "Installing Typst ${TYPST_VERSION} (from process-submission.yml)"
+          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo mv /tmp/typst-*/typst /usr/local/bin/typst
+          typst --version
+
+      - name: Run the test suite
+        # -ra surfaces skips: a test that silently stopped running is the
+        # failure mode this workflow exists to prevent.
+        run: pytest -q -ra

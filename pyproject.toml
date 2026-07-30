@@ -8,5 +8,14 @@ dependencies = ["pyyaml"]
 [project.optional-dependencies]
 dev = ["pytest"]
 
+# The engine runs from a checkout (`python -m scripts.x`) and never installs
+# itself, so this repo has several top-level directories that are not packages
+# (docs/, templates/, notes/, contractors/, ...). Naming the two that are keeps
+# setuptools' auto-discovery from erroring out on the ambiguity, which is what
+# makes `pip install -e ".[dev]"` work for CI and for contributors — so the
+# dependency list above stays the single source of truth.
+[tool.setuptools]
+packages = ["scripts", "onboarding"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
