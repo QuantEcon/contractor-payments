@@ -63,6 +63,17 @@ on:
         required: false
         type: string
         default: "submit"
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line, or the
+          pipeline definition and the code it drives come from different
+          commits — see the resolve step below for why that is not detectable
+          any other way. Optional, defaulting to 'main': a caller that pins
+          `@main` and omits this gets exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
 
 jobs:
   process:
@@ -78,7 +89,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Resolve which engine commit to run, BEFORE checking it out.
+      # Run the scripts from the same engine commit as this workflow file.
       #
       # `actions/checkout` with no `ref:` takes the engine's default branch, so
       # a caller pinned to `@some-branch` got that branch's workflow YAML
@@ -86,58 +97,27 @@ jobs:
       # passes a flag the scripts don't have — which is how it surfaced:
       # `parse_issue.py: error: unrecognized arguments: --reimbursements`.
       #
-      # `github.job_workflow_ref` is this reusable workflow's own path@ref, e.g.
-      # `QuantEcon/contractor-payments/.github/workflows/process-submission.yml@refs/heads/main`.
-      # (`github.job_workflow_sha` looks like the obvious choice but is empty in
-      # the github context — verified on a real run, hence the hard failure
-      # below rather than a silent fallback.)
-      - name: Resolve the engine ref (this workflow's own commit)
-        id: engine_ref
-        env:
-          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
-          # Printed only when the primary lookup fails, so a future runner or
-          # GHES version that populates these differently is diagnosable from
-          # the failed run itself rather than needing a debug commit.
-          CONTEXT_DUMP: |
-            github.job_workflow_ref = '${{ github.job_workflow_ref }}'
-            github.job_workflow_sha = '${{ github.job_workflow_sha }}'
-            github.workflow_ref     = '${{ github.workflow_ref }}'
-            github.workflow_sha     = '${{ github.workflow_sha }}'
-            github.ref              = '${{ github.ref }}'
-            github.sha              = '${{ github.sha }}'
-        run: |
-          if [ -z "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: github.job_workflow_ref is empty, so the engine ref" >&2
-            echo "cannot be resolved. Checking out the default branch instead" >&2
-            echo "would risk running scripts that do not match this pipeline," >&2
-            echo "so this run stops here." >&2
-            echo "--- ref-bearing github context values, for diagnosis: ---" >&2
-            echo "$CONTEXT_DUMP" >&2
-            exit 1
-          fi
-          # Strip the `<path>.yml@` prefix; a branch name may itself contain
-          # `@`, so anchor on the filename rather than the last `@`.
-          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
-          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
-            exit 1
-          fi
-          echo "engine ref: ${ENGINE_REF} (from ${JOB_WORKFLOW_REF})"
-          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
-
+      # The ref has to come from the caller as an input. There is no context
+      # value for it: `github.job_workflow_ref` and `github.job_workflow_sha`
+      # both read as EMPTY here (verified on real runs), and
+      # `github.workflow_ref` / `github.workflow_sha` describe the *calling*
+      # workflow in the contractor repo, not this one. Hence `engine_ref`,
+      # which contractor-template keeps in step with its `uses:` pin and
+      # tests/test_workflows.py asserts they agree.
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          ref: ${{ steps.engine_ref.outputs.ref }}
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Report which engine commit is running
+        env:
+          ENGINE_REF: ${{ inputs.engine_ref }}
         run: |
           # Traceability: every run states the exact scripts it used, so a
           # surprising outcome can be tied to a commit without guesswork.
-          echo "engine scripts at $(git -C engine rev-parse HEAD)"
-          echo "  (ref ${{ steps.engine_ref.outputs.ref }})"
+          echo "engine scripts at $(git -C engine rev-parse HEAD) (ref ${ENGINE_REF})"
 
       - name: Set up Python
         uses: actions/setup-python@v5

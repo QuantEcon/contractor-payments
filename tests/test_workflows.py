@@ -187,7 +187,7 @@ class TestTypstPinIsConsistent:
 
 
 class TestEngineCheckoutIsPinnedToTheWorkflow:
-    """Every reusable workflow must check the engine out at its OWN commit.
+    """Every reusable workflow must run the engine scripts from a pinned ref.
 
     `actions/checkout` with no `ref:` takes the repository's default branch, so
     a caller pinned to `@some-branch` got that branch's workflow YAML driving
@@ -195,30 +195,34 @@ class TestEngineCheckoutIsPinnedToTheWorkflow:
     the scripts don't have — which is how it surfaced on the test repo:
     `parse_issue.py: error: unrecognized arguments: --reimbursements`.
 
-    The ref is derived from `github.job_workflow_ref` (this workflow's own
-    `path@ref`) in a step that runs *before* the checkout. Note
-    `github.job_workflow_sha` is NOT usable — it reads as empty in the github
-    context, confirmed on a real run, which is why the resolve step fails hard
-    instead of falling back to the default branch.
+    The ref arrives as the `engine_ref` input, because no context value
+    supplies it: `github.job_workflow_ref` and `github.job_workflow_sha` both
+    read as empty (verified on real runs), and `github.workflow_ref` describes
+    the *calling* workflow in the contractor repo rather than this one.
     """
 
-    PIN = "${{ steps.engine_ref.outputs.ref }}"
+    PIN = "${{ inputs.engine_ref }}"
 
-    def _engine_checkouts(self, path):
+    @staticmethod
+    def _is_reusable(workflow):
+        # PyYAML parses a bare `on:` key as the boolean True.
+        triggers = workflow.get("on") or workflow.get(True) or {}
+        return "workflow_call" in triggers
+
+    def _engine_checkouts(self, workflow):
         return [
-            step for step in _steps(_load(path))
+            step for step in _steps(workflow)
             if (step.get("uses") or "").startswith("actions/checkout")
             and (step.get("with") or {}).get("repository")
                == "QuantEcon/contractor-payments"
         ]
 
     @pytest.mark.parametrize("path", ENGINE_WORKFLOWS, ids=lambda p: p.name)
-    def test_engine_checkout_is_pinned(self, path):
+    def test_engine_checkout_uses_the_pinned_ref(self, path):
         workflow = _load(path)
-        # Only reusable workflows have a job_workflow_sha to pin to.
-        if "workflow_call" not in (workflow.get("on") or workflow.get(True) or {}):
+        if not self._is_reusable(workflow):
             pytest.skip("not a reusable workflow")
-        checkouts = self._engine_checkouts(path)
+        checkouts = self._engine_checkouts(workflow)
         assert checkouts, f"{path.name}: no engine checkout found"
         for step in checkouts:
             ref = (step.get("with") or {}).get("ref")
@@ -229,25 +233,47 @@ class TestEngineCheckoutIsPinnedToTheWorkflow:
             )
 
     @pytest.mark.parametrize("path", ENGINE_WORKFLOWS, ids=lambda p: p.name)
-    def test_pinned_checkout_is_verified_at_runtime(self, path):
-        """An empty `job_workflow_sha` would make `ref:` empty, and checkout
-        would silently fall back to the default branch — the exact failure the
-        pin prevents. The workflows that write to a contractor repo assert the
-        checked-out SHA rather than trusting it."""
+    def test_reusable_workflows_declare_engine_ref(self, path):
         workflow = _load(path)
-        if "workflow_call" not in (workflow.get("on") or workflow.get(True) or {}):
+        if not self._is_reusable(workflow):
             pytest.skip("not a reusable workflow")
-        if not self._engine_checkouts(path):
+        if not self._engine_checkouts(workflow):
             pytest.skip("no engine checkout")
-        if path.name == "send-reminders.yml":
-            pytest.skip("read-only reminder pass; no artifacts written")
-        runs = " ".join(s.get("run") or "" for s in _steps(workflow))
-        assert "job_workflow_ref is empty" in runs or "JOB_WORKFLOW_REF" in runs, (
-            f"{path.name}: pins the engine checkout but never checks that the "
-            f"ref resolved, so an empty job_workflow_ref would silently become "
-            f"a default-branch checkout."
+        triggers = workflow.get("on") or workflow.get(True) or {}
+        inputs = (triggers["workflow_call"] or {}).get("inputs") or {}
+        assert "engine_ref" in inputs, f"{path.name}: no engine_ref input"
+        spec = inputs["engine_ref"]
+        assert spec.get("required") is False, (
+            f"{path.name}: engine_ref must stay optional so existing callers "
+            f"that omit it keep working."
         )
-        assert "rev-parse HEAD" in runs, (
-            f"{path.name}: does not report which engine commit it ran, so a "
-            f"surprising outcome cannot be tied back to a commit."
+        assert spec.get("default") == "main", (
+            f"{path.name}: engine_ref should default to 'main' — the behaviour "
+            f"a caller pinned at @main already had."
         )
+
+
+class TestCallerTemplatesPinBothHalves:
+    """A caller pins the engine twice — the `@ref` on `uses:` and the
+    `engine_ref` input — and the two must agree. This is the drift that made
+    the original bug undetectable, so it gets a test rather than a comment."""
+
+    @pytest.mark.parametrize("path", CALLER_WORKFLOWS, ids=lambda p: p.name)
+    def test_uses_ref_and_engine_ref_agree(self, path):
+        workflow = _load(path)
+        for name, job in (workflow.get("jobs") or {}).items():
+            uses = job.get("uses")
+            if not uses or "contractor-payments" not in uses:
+                continue
+            uses_ref = uses.rsplit("@", 1)[-1]
+            engine_ref = (job.get("with") or {}).get("engine_ref")
+            assert engine_ref is not None, (
+                f"{path.name}: job `{name}` calls the engine at @{uses_ref} but "
+                f"passes no engine_ref, so the scripts would come from the "
+                f"engine's default branch instead."
+            )
+            assert engine_ref == uses_ref, (
+                f"{path.name}: job `{name}` calls the engine at @{uses_ref} but "
+                f"passes engine_ref={engine_ref!r}. The workflow and the scripts "
+                f"it drives would come from different commits."
+            )

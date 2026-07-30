@@ -17,6 +17,15 @@ on:
         required: false
         type: boolean
         default: false
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line. Optional,
+          defaulting to 'main': a caller that pins `@main` and omits this gets
+          exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
 
 jobs:
   remind:
@@ -29,31 +38,13 @@ jobs:
       - name: Check out the contractor repo
         uses: actions/checkout@v4
 
-      # Run this workflow's own engine commit — see the note in
-      # process-submission.yml.
-      - name: Resolve the engine ref (this workflow's own commit)
-        id: engine_ref
-        env:
-          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
-        run: |
-          if [ -z "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: github.job_workflow_ref is empty; cannot resolve the" >&2
-            echo "engine ref." >&2
-            exit 1
-          fi
-          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
-          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
-            exit 1
-          fi
-          echo "engine ref: ${ENGINE_REF}"
-          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
-
+      # Run the scripts from the same engine commit as this workflow file —
+      # the ref comes from the caller; see process-submission.yml.
       - name: Check out the engine repo
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          ref: ${{ steps.engine_ref.outputs.ref }}
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Set up Python

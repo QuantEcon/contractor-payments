@@ -49,6 +49,16 @@ on:
       merged_by:
         required: true
         type: string
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line, or the
+          pipeline definition and the code it drives come from different
+          commits. Optional, defaulting to 'main': a caller that pins `@main`
+          and omits this gets exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
 
 jobs:
   process:
@@ -73,42 +83,24 @@ jobs:
           fetch-depth: 0
           ref: main
 
-      # Run the scripts from this workflow's own commit — see the note in
-      # process-submission.yml. It matters more here: this is the workflow that
-      # stamps approval, writes the ledger and emails the fiscal host, so the
-      # scripts doing that must be the ones reviewed alongside this YAML.
-      # Fatal rather than best-effort: guessing is not an acceptable degraded
-      # mode on the payment path.
-      - name: Resolve the engine ref (this workflow's own commit)
-        id: engine_ref
-        env:
-          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
-        run: |
-          if [ -z "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: github.job_workflow_ref is empty, so the engine ref" >&2
-            echo "cannot be resolved. Refusing to fall back to the default" >&2
-            echo "branch on the approval path." >&2
-            exit 1
-          fi
-          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
-          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
-            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
-            exit 1
-          fi
-          echo "engine ref: ${ENGINE_REF} (from ${JOB_WORKFLOW_REF})"
-          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
-
+      # Run the scripts from the same engine commit as this workflow file.
+      # The ref must come from the caller: there is no context value for it
+      # (see the long note in process-submission.yml). It matters more here —
+      # this workflow stamps approval, writes the ledger and emails the fiscal
+      # host, so the scripts doing that must be the ones reviewed alongside
+      # this YAML.
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          ref: ${{ steps.engine_ref.outputs.ref }}
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Report which engine commit is running
+        env:
+          ENGINE_REF: ${{ inputs.engine_ref }}
         run: |
-          echo "engine scripts at $(git -C engine rev-parse HEAD)"
-          echo "  (ref ${{ steps.engine_ref.outputs.ref }})"
+          echo "engine scripts at $(git -C engine rev-parse HEAD) (ref ${ENGINE_REF})"
 
       - name: Set up Python
         uses: actions/setup-python@v5
