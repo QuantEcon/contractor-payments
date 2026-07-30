@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from scripts.update_ledger import (
+    _recompute_totals,
     _build_entry,
     _empty_ledger,
     append_submission,
@@ -379,3 +380,39 @@ class TestRounding:
         out = append_submission(sub2, ledger)
         # 4.1 + 4.2 = 8.299999... in float — should round cleanly
         assert out["totals"]["hours_to_date"] == 8.3
+
+
+class TestTotalsAreRounded:
+    """Float summation left artefacts like `305.21999999999997` in the
+    committed ledger, while every surface that displays it formatted on the
+    way out — so the stored audit record and the numbers people read
+    disagreed."""
+
+    def test_float_artefact_does_not_reach_the_ledger(self):
+        ledger = {"type": "hourly", "totals": {}}
+        items = [
+            {"hours": 1, "amount": 100.10, "status": "approved"},
+            {"hours": 1, "amount": 100.10, "status": "approved"},
+            {"hours": 1, "amount": 105.02, "status": "approved"},
+        ]
+        _recompute_totals(ledger, items)
+
+        total = ledger["totals"]["amount_to_date"]
+        assert total == 305.22
+        # repr, not ==: the artefact is invisible to equality but is exactly
+        # what `yaml.safe_dump` writes into the committed file.
+        assert repr(total) == "305.22"
+
+    def test_jpy_integer_totals_are_unaffected(self):
+        ledger = {"type": "milestone", "totals": {}}
+        _recompute_totals(ledger, [{"amount": 77000, "status": "approved"}])
+        assert repr(ledger["totals"]["amount_to_date"]) == "77000"
+
+    def test_superseded_entries_still_excluded(self):
+        ledger = {"type": "milestone", "totals": {}}
+        _recompute_totals(ledger, [
+            {"amount": 100.10, "status": "approved"},
+            {"amount": 999.99, "status": "superseded"},
+        ])
+        assert ledger["totals"]["amount_to_date"] == 100.10
+        assert ledger["totals"]["claims_count"] == 1

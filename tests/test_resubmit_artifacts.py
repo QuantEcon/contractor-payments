@@ -192,3 +192,34 @@ class TestPeriodCorrectionLeavesOneSubmission:
         assert sorted(t for t in _tracked(repo) if t.startswith("generated_pdfs/")) == [
             "generated_pdfs/2026-06/x-2026-06.pdf"
         ]
+
+
+class TestStalePrBodyIsFlaggedOnThePr:
+    """`update_pr_body` failing leaves the run green and the submission pushed,
+    so the only signal used to be a stderr line in a workflow log. The PR body
+    is the approval-decision surface, so the caveat has to land on the PR.
+    """
+
+    def test_warns_on_the_pr_when_the_body_could_not_be_refreshed(
+        self, repo, monkeypatch,
+    ):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cspr, "_run", fake_run)
+        assert cspr.warn_stale_pr_body(7, cwd=repo) is True
+
+        assert calls[0][:4] == ["gh", "pr", "comment", "7"]
+        body = calls[0][calls[0].index("--body") + 1]
+        assert "out of date" in body
+        assert "Files changed" in body
+
+    def test_returns_false_when_even_the_comment_fails(self, repo, monkeypatch):
+        monkeypatch.setattr(
+            cspr, "_run",
+            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "no auth"),
+        )
+        assert cspr.warn_stale_pr_body(7, cwd=repo) is False

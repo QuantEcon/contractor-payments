@@ -237,17 +237,56 @@ def _label(delim: str) -> str:
     return "tab" if delim == "\t" else delim
 
 
+# Column labels that appear in the seeded header rows:
+#   `Date | Hours | Description` (hourly)
+#   `ID | Date | Amount | Description` (milestone)
+# plus the hand-typed variants people actually write. Recognising a header
+# only costs a skipped row; failing to recognise one reports it as a malformed
+# data row, so this list errs on the generous side. Safe to extend: a data row
+# can never be mistaken for a header because its first cell is always a date,
+# ID or amount (see _looks_like_header).
+_HEADER_COLUMN_LABELS = {
+    # seeded
+    "date", "day", "hours", "description", "id", "amount",
+    # observed / plausible hand-typed variants
+    "note", "notes", "comment", "comments", "task", "tasks", "work",
+    "hour", "hrs", "time", "when", "desc", "details", "detail", "item",
+    "milestone", "currency", "rate", "qty", "quantity", "total", "spent",
+}
+
+# Markdown emphasis a contractor may wrap header cells in (`**Date**`).
+_EMPHASIS_CHARS = "*_`"
+
+
 def _looks_like_header(line: str, delim: str) -> bool:
-    """First field looks like a label, not a data value — covers both hourly
-    (`Date | Hours | Description`) and milestone (`ID | Date | Amount | Description`)
-    header rows."""
-    parts = line.split(delim, 1)
-    if not parts:
+    """True only for a header row (e.g. `Date | Hours | Description`).
+
+    A row is a header when it has at least two non-empty cells, its FIRST cell
+    is exactly a known column label, and at least one other cell is too.
+
+    Matching whole cells — not substrings — is the point. The previous
+    heuristic tested `any(kw in first for kw in ("date", "day", ...))`, so
+    `bad-date | 2 | oops` matched on the substring "date", failed
+    `_parse_date`, and was silently skipped as a header. That turned a
+    malformed data row into a false `/validate` success (PLAN §10, E2E finding
+    2026-05-19). Exact cell matching cannot do that: `bad-date` contains
+    "date" but is not equal to it, so the row is reported as the malformed
+    data it is.
+
+    Requiring the first cell plus one other — rather than *every* cell — keeps
+    header rows whose trailing column was renamed (`Day | Hours | Notes`) or
+    emphasised (`**Date** | **Hours** | **Description**`) recognised.
+    """
+    cells = [
+        c.strip().strip(_EMPHASIS_CHARS).strip().lower()
+        for c in line.split(delim)
+    ]
+    non_empty = [c for c in cells if c]
+    if len(non_empty) < 2:
         return False
-    first = parts[0].strip().lower()
-    if any(kw in first for kw in ("date", "day", "when", "id", "milestone")):
-        return _parse_date(first) is None
-    return False
+    if non_empty[0] not in _HEADER_COLUMN_LABELS:
+        return False
+    return any(c in _HEADER_COLUMN_LABELS for c in non_empty[1:])
 
 
 # ─── Hourly entries parsing (`Time Entries`) ────────────────────────────────

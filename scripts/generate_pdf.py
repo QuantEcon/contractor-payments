@@ -71,8 +71,13 @@ def _add_display_strings(data: dict) -> dict:
     currency = totals.get("currency", "")
 
     def fmt_money(value: float) -> str:
+        # JPY has no minor units, hence the int — but it does use thousands
+        # separators, so omitting them was accidental rather than a locale
+        # choice. It also made the PDF the odd one out: for one submission the
+        # amount rendered as `163300` here while the email, the pinned ledger
+        # issue and the audit comment all said `163,300`.
         if currency.upper() == "JPY":
-            return str(int(round(value)))
+            return f"{int(round(value)):,}"
         return f"{value:,.2f}"
 
     out = dict(data)

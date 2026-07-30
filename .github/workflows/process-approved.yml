@@ -190,7 +190,41 @@ jobs:
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "Process approved submission from PR #${{ inputs.pr_number }} [skip ci]"
-            git push origin main
+            # Two approvals merging close together both push to main. Without
+            # a retry the loser is simply rejected — and because nothing
+            # downstream is failure-gated that used to silently cost the
+            # email, the audit comment and the label.
+            PUSHED=false
+            for ATTEMPT in 1 2 3 4 5; do
+              if git push origin HEAD:main; then
+                PUSHED=true
+                echo "Pushed to main on attempt ${ATTEMPT}."
+                break
+              fi
+              echo "Push rejected (attempt ${ATTEMPT}/5) — another approval likely landed first."
+              git fetch origin main
+              if ! git rebase FETCH_HEAD; then
+                git rebase --abort || true
+                echo "ERROR: rebase onto the updated main conflicted." >&2
+                echo "Another approval touched the same ledger lines. Nothing has been" >&2
+                echo "pushed and no email was sent; the ledger on main still has only" >&2
+                echo "the other approval's entry." >&2
+                echo "Fix: 'Re-run failed jobs' — the re-run checks out the settled main" >&2
+                echo "and appends this submission after the other entry, which replays" >&2
+                echo "cleanly." >&2
+                exit 1
+              fi
+              # No point backing off after the final attempt.
+              if [ "$ATTEMPT" -lt 5 ]; then
+                sleep $((ATTEMPT * 3))
+              fi
+            done
+            if [ "$PUSHED" != "true" ]; then
+              echo "ERROR: could not push to main after 5 attempts (persistent" >&2
+              echo "contention, or a rejected push such as branch protection)." >&2
+              echo "Nothing downstream ran: no email, no audit comment, no label." >&2
+              exit 1
+            fi
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
