@@ -127,6 +127,53 @@ _RECEIPT_MIME = {
 }
 
 
+def select_receipt_paths(
+    submission: dict,
+    receipts_dir: Optional[Path],
+) -> tuple[list[Path], list[str]]:
+    """Resolve which receipt files to attach, from the submission's own list.
+
+    Returns `(paths, warnings)`. The submission YAML is the authority: it is
+    what the admin approved and what the claim PDF renders from, so driving
+    the attachments off it keeps the email, the PDF and the approved record in
+    agreement by construction.
+
+    Globbing the directory instead does not hold that property. The receipts
+    directory is keyed by submission id, so a re-submitted claim reuses it,
+    and anything an earlier run left behind — a receipt the contractor
+    withdrew, or a kept receipt duplicated under its old index prefix — would
+    be attached and sent to the fiscal host without appearing in the PDF.
+    Stray and missing files are both reported rather than silently resolved.
+    """
+    warnings: list[str] = []
+    if not receipts_dir or not receipts_dir.is_dir():
+        return [], warnings
+
+    paths: list[Path] = []
+    for entry in submission.get("receipts") or []:
+        filename = entry.get("filename") if isinstance(entry, dict) else entry
+        if not filename:
+            continue
+        # Basename only — a YAML value must never escape the receipts dir.
+        path = receipts_dir / Path(str(filename)).name
+        if path.is_file():
+            paths.append(path)
+        else:
+            warnings.append(
+                f"submission lists receipt `{filename}` but {path} is "
+                f"missing — it will NOT be attached."
+            )
+
+    listed = {p.name for p in paths}
+    for stray in sorted(receipts_dir.iterdir()):
+        if stray.is_file() and stray.name not in listed:
+            warnings.append(
+                f"{stray} is present but not listed in the submission — "
+                f"not attached."
+            )
+    return paths, warnings
+
+
 def compose_message(
     *,
     submission: dict,
@@ -303,11 +350,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"testing_mode=false ({testing_mode_source}) — sending to "
               f"{psl_email} (Cc {reviewer_email}).", file=sys.stderr)
 
-    receipt_paths: list[Path] = []
-    if args.receipts_dir and args.receipts_dir.is_dir():
-        receipt_paths = sorted(
-            p for p in args.receipts_dir.iterdir() if p.is_file()
-        )
+    receipt_paths, receipt_warnings = select_receipt_paths(
+        submission, args.receipts_dir
+    )
+    for warning in receipt_warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
 
     sender = _require_env("SMTP_FROM") if not args.dry_run else os.environ.get("SMTP_FROM", "<SMTP_FROM>")
     msg = compose_message(

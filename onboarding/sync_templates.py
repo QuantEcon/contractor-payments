@@ -377,7 +377,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Everything already in sync; nothing to commit.")
         return 0
 
-    subprocess.run(["git", "add", "--all", *{c.split("/")[0] for c in changed}],
+    # Stage exactly the paths we changed. Staging their top-level directories
+    # instead (`git add --all .github config`) swept up anything else the admin
+    # had in flight in the contractor repo — a half-edited CODEOWNERS, which
+    # this module deliberately does not sync, or local scratch under
+    # .github/ — into an auto-pushed commit. `--all --` still records
+    # deletions for the listed paths.
+    subprocess.run(["git", "add", "--all", "--", *sorted(changed)],
                    cwd=repo_dir, check=True)
     subprocess.run(
         ["git", "commit", "-m",

@@ -89,15 +89,31 @@ jobs:
           # Files added/changed by the merge — diff against the first parent
           # (i.e. main's HEAD before the merge). `git diff-tree` on a merge
           # commit is silent by default, hence the explicit parent compare.
-          SUBMISSION_FILE=$(git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" \
-            | grep -E '^submissions/.*\.yml$' \
-            | head -1)
-          if [ -z "$SUBMISSION_FILE" ]; then
+          SUBMISSION_FILES=$(git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" \
+            | grep -E '^submissions/.*\.yml$' || true)
+          if [ -z "$SUBMISSION_FILES" ]; then
             echo "ERROR: No submissions/*.yml found in merge commit $MERGE_SHA" >&2
             echo "--- All files changed by the merge: ---" >&2
             git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" >&2 || true
             exit 1
           fi
+          # Refuse to guess. A merge carrying more than one submission means
+          # the branch accumulated an abandoned claim (e.g. the period was
+          # corrected before merge), and the previous `head -1` silently
+          # approved whichever path sorted first — for a forward period
+          # correction, the abandoned one. Fail loudly instead: nothing is
+          # stamped, ledgered or emailed until an admin resolves it.
+          SUBMISSION_COUNT=$(printf '%s\n' "$SUBMISSION_FILES" | wc -l | tr -d ' ')
+          if [ "$SUBMISSION_COUNT" -gt 1 ]; then
+            echo "ERROR: merge $MERGE_SHA carries $SUBMISSION_COUNT submission files;" >&2
+            echo "refusing to guess which one was approved." >&2
+            printf '%s\n' "$SUBMISSION_FILES" >&2
+            echo "Fix: keep one submission per PR — revert the merge, drop the" >&2
+            echo "abandoned YAML (plus its generated_pdfs/ and receipts/ entries)," >&2
+            echo "and re-merge." >&2
+            exit 1
+          fi
+          SUBMISSION_FILE="$SUBMISSION_FILES"
           echo "submission_file=$SUBMISSION_FILE" >> "$GITHUB_OUTPUT"
           echo "Submission file: $SUBMISSION_FILE"
 

@@ -249,26 +249,54 @@ def _label(delim: str) -> str:
 #   `Date | Hours | Description` (hourly)
 #   `ID | Date | Amount | Description` (milestone)
 #   `Date | Amount | Category | Description` (reimbursement)
-# plus a few plausible hand-typed variants. A row is a header only when
-# EVERY non-empty cell is one of these labels.
+# plus the hand-typed variants people actually write. Recognising a header
+# only costs us a skipped row; failing to recognise one reports it as a
+# malformed data row, so this list errs on the generous side. Safe to extend:
+# a data row can never be mistaken for a header because its first cell is
+# always a date, ID or amount (see _looks_like_header).
 _HEADER_COLUMN_LABELS = {
+    # seeded
     "date", "day", "hours", "description", "id", "amount", "category",
+    # observed / plausible hand-typed variants
+    "note", "notes", "comment", "comments", "task", "tasks", "work",
+    "hour", "hrs", "time", "when", "desc", "details", "detail", "item",
+    "milestone", "currency", "rate", "qty", "quantity", "total", "spent",
 }
+
+# Markdown emphasis a contractor may wrap header cells in (`**Date**`).
+_EMPHASIS_CHARS = "*_`"
 
 
 def _looks_like_header(line: str, delim: str) -> bool:
-    """True only for the seeded header row (e.g. `Date | Hours | Description`):
-    every non-empty cell must be a known column label. Data rows never qualify
-    because their first cell is a date/ID/amount, not a label.
+    """True only for a header row (e.g. `Date | Hours | Description`).
 
-    Replaces the earlier keyword-substring heuristic, which silently skipped
-    malformed data rows like `bad-date | 2 | oops` and produced false
-    `/validate` successes (PLAN §10, E2E finding 2026-05-19)."""
-    cells = [c.strip().lower() for c in line.split(delim)]
+    A row is a header when it has at least two non-empty cells, its FIRST
+    cell is exactly a known column label, and at least one other cell is
+    too. Matching whole cells — not substrings — is what keeps the earlier
+    keyword-substring heuristic's bug closed: `bad-date | 2 | oops` contains
+    "date" but is not equal to it, so it is reported as the malformed data
+    row it is rather than silently skipped (PLAN §10, E2E finding
+    2026-05-19).
+
+    Requiring only the first cell plus one other to be labels — rather than
+    *every* cell — is deliberate. The all-cells rule closed the §10 bug but
+    stopped recognising header rows whose trailing column was renamed
+    (`Day | Hours | Notes`, `Date | Hours | Task`) or emphasised
+    (`**Date** | **Hours** | **Description**`). Because contractor repos call
+    the engine at `@main`, that regression would have hit every live
+    timesheet repo the moment Phase 5 merged, turning a previously accepted
+    submission into a `couldn't read a date from ...` validation failure.
+    """
+    cells = [
+        c.strip().strip(_EMPHASIS_CHARS).strip().lower()
+        for c in line.split(delim)
+    ]
     non_empty = [c for c in cells if c]
     if len(non_empty) < 2:
         return False
-    return all(c in _HEADER_COLUMN_LABELS for c in non_empty)
+    if non_empty[0] not in _HEADER_COLUMN_LABELS:
+        return False
+    return any(c in _HEADER_COLUMN_LABELS for c in non_empty[1:])
 
 
 # ─── Hourly entries parsing (`Time Entries`) ────────────────────────────────

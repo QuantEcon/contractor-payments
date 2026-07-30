@@ -6,6 +6,8 @@ these tests cover the pure plan/apply core against tmp_path fixtures.
 """
 from __future__ import annotations
 
+import subprocess
+
 import yaml
 
 from onboarding.sync_templates import (
@@ -160,3 +162,68 @@ class TestPlanAndApply:
         assert first  # everything written on first run
         second = apply_plan(repo, plan_sync(repo))
         assert second == []
+
+
+class TestCommitStagesExactPaths:
+    """`sync_templates` auto-pushes its commit, so what it stages matters. It
+    used to stage the *top-level directory* of each changed path
+    (`git add --all .github config`), which swept up anything the admin had in
+    flight in the contractor repo — including `.github/CODEOWNERS`, a file this
+    module deliberately does not sync — into that pushed commit.
+    """
+
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout
+
+    def _repo_with_history(self, tmp_path):
+        repo = _write_repo(tmp_path, contracts=[HOURLY])
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.email", "admin@example.org")
+        self._git(repo, "config", "user.name", "Admin")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "seed")
+        return repo
+
+    def test_unrelated_in_flight_edits_are_not_swept_in(self, tmp_path):
+        repo = self._repo_with_history(tmp_path)
+        (repo / ".github").mkdir(exist_ok=True)
+        codeowners = repo / ".github" / "CODEOWNERS"
+        codeowners.write_text("* @half-finished-edit\n", encoding="utf-8")
+        scratch = repo / ".github" / "scratch-notes.md"
+        scratch.write_text("local only\n", encoding="utf-8")
+
+        changed = sync_issue_templates(repo)
+        assert changed
+        subprocess.run(
+            ["git", "add", "--all", "--", *sorted(changed)],
+            cwd=repo, check=True,
+        )
+
+        staged = set(self._git(repo, "diff", "--cached", "--name-only").split())
+        assert staged == set(changed)
+        assert ".github/CODEOWNERS" not in staged
+        assert ".github/scratch-notes.md" not in staged
+
+    def test_pathspec_form_still_records_deletions(self, tmp_path):
+        """The old form staged deletions via the directory; the exact-path
+        form has to keep doing so or a removed form would linger."""
+        repo = self._repo_with_history(tmp_path)
+        sync_issue_templates(repo)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        self._git(repo, "commit", "-qm", "sync")
+
+        # Reimbursements were never enabled here; drop the hourly contract so
+        # the hourly form is deleted on the next sync.
+        (repo / "contracts" / "QE-PSL-2026-001.yml").unlink()
+        changed = sync_issue_templates(repo)
+        assert ".github/ISSUE_TEMPLATE/hourly-timesheet.yml" in changed
+
+        subprocess.run(
+            ["git", "add", "--all", "--", *sorted(changed)],
+            cwd=repo, check=True,
+        )
+        staged = self._git(repo, "diff", "--cached", "--name-status")
+        assert "D\t.github/ISSUE_TEMPLATE/hourly-timesheet.yml" in staged

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.notify_email import _effective_testing_mode
+from scripts.notify_email import _effective_testing_mode, select_receipt_paths
 
 # Sentinel: leave testing_mode out of the engine fiscal-host.yml entirely.
 _OMIT = object()
@@ -179,3 +179,72 @@ class TestComposeMessage:
             ),
         )
         assert "REVISION approved" in msg["Subject"]
+
+
+class TestSelectReceiptPaths:
+    """The approval email is the outward-facing artifact — it goes to the
+    fiscal host. It used to attach by globbing the receipts directory, which
+    is keyed by submission id and therefore reused across a resubmit: anything
+    an earlier run left behind was attached and sent, without appearing in the
+    claim PDF. Attachments now come from the submission's own `receipts` list,
+    which is what the admin approved and what the PDF renders from.
+    """
+
+    def _dir(self, tmp_path, *names):
+        d = tmp_path / "receipts" / "2026-06" / "janedoe-reimbursement-2026-06"
+        d.mkdir(parents=True)
+        for name in names:
+            (d / name).write_bytes(b"%PDF-1.4\n")
+        return d
+
+    def test_attaches_only_what_the_submission_lists(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf", "01-taxi.png", "02-hotel.pdf")
+        submission = {"receipts": [{"filename": "01-hotel.pdf"}]}
+
+        paths, warnings = select_receipt_paths(submission, d)
+
+        assert [p.name for p in paths] == ["01-hotel.pdf"]
+        # the two files left over from the earlier submit are reported, not sent
+        assert len(warnings) == 2
+        assert all("not listed in the submission" in w for w in warnings)
+
+    def test_preserves_submission_order(self, tmp_path):
+        d = self._dir(tmp_path, "01-a.pdf", "02-b.pdf", "03-c.pdf")
+        submission = {"receipts": [
+            {"filename": "03-c.pdf"},
+            {"filename": "01-a.pdf"},
+            {"filename": "02-b.pdf"},
+        ]}
+        paths, warnings = select_receipt_paths(submission, d)
+        assert [p.name for p in paths] == ["03-c.pdf", "01-a.pdf", "02-b.pdf"]
+        assert warnings == []
+
+    def test_missing_listed_file_warns_and_is_skipped(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf")
+        submission = {"receipts": [
+            {"filename": "01-hotel.pdf"},
+            {"filename": "02-gone.pdf"},
+        ]}
+        paths, warnings = select_receipt_paths(submission, d)
+        assert [p.name for p in paths] == ["01-hotel.pdf"]
+        assert any("02-gone.pdf" in w and "missing" in w for w in warnings)
+
+    def test_yaml_filename_cannot_escape_the_receipts_dir(self, tmp_path):
+        d = self._dir(tmp_path, "01-hotel.pdf")
+        (tmp_path / "secret.pdf").write_bytes(b"%PDF-1.4\n")
+        submission = {"receipts": [{"filename": "../../secret.pdf"}]}
+
+        paths, warnings = select_receipt_paths(submission, d)
+
+        assert paths == []
+        assert any("missing" in w for w in warnings)
+
+    def test_no_receipts_dir_is_tolerated(self, tmp_path):
+        assert select_receipt_paths({"receipts": []}, None) == ([], [])
+        assert select_receipt_paths({}, tmp_path / "nope") == ([], [])
+
+    def test_non_reimbursement_submission_attaches_nothing(self, tmp_path):
+        d = self._dir(tmp_path, "stray.pdf")
+        paths, warnings = select_receipt_paths({"type": "timesheet"}, d)
+        assert paths == []
+        assert any("stray.pdf" in w for w in warnings)

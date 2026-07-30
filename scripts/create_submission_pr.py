@@ -600,6 +600,75 @@ def checkout_existing_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", branch], cwd=cwd)
 
 
+# Directories the engine owns outright on a submission branch. Everything
+# under them for a given issue is generated, so a resubmit is free to
+# replace the previous run's output wholesale.
+_ARTIFACT_DIRS = ("submissions", "generated_pdfs", "receipts")
+
+
+def purge_branch_artifacts(
+    base_ref: str,
+    cwd: Optional[Path] = None,
+    *,
+    dirs: tuple[str, ...] = _ARTIFACT_DIRS,
+) -> list[Path]:
+    """Delete every engine artifact this branch added on top of `base_ref`.
+
+    Called on the update path (open PR, same issue re-submitted) after the
+    branch is checked out, before the new artifacts are written. Without it
+    a resubmit only ever *adds*: the previous run's submission YAML, PDF/PNG
+    and receipts all survive alongside the new ones, because `place_receipts`
+    merges into the receipts directory and `stage_and_commit` is only handed
+    the paths it just wrote. Three ways that bites:
+
+      * receipts are index-numbered from `01-` in issue order, so changing
+        the attachment set leaves withdrawn receipts (and duplicates of kept
+        ones under their old numbers) committed and emailed to the host;
+      * correcting the claim period writes a *second* submission YAML, and
+        process-approved.yml then approves whichever one sorts first — which
+        for a forward correction is the abandoned claim;
+      * a second same-month claim filed before the first merges collides on
+        the un-suffixed id and the PR becomes unmergeable.
+
+    Scoped to what the branch itself contributed (`base_ref...HEAD`) so
+    artifacts already merged on the base branch — the original claim behind
+    a `-vN` revision, say — are left alone. `dirs` narrows it further: only
+    purge what this run will regenerate, so `--skip-pdf` keeps the committed
+    PDF rather than dropping it. Returns the deleted paths so the caller can
+    stage the removals.
+    """
+    result = _run(
+        ["git", "diff", "--name-only", "--diff-filter=AM",
+         f"{base_ref}...HEAD", "--", *dirs],
+        cwd=cwd,
+    )
+    root = Path(cwd) if cwd else Path(".")
+    removed: list[Path] = []
+    for rel in result.stdout.split("\n"):
+        rel = rel.strip()
+        if not rel:
+            continue
+        path = root / rel
+        if path.is_file():
+            path.unlink()
+            removed.append(path)
+
+    # Prune the period/submission directories the deletions just emptied. Git
+    # does not track empty directories, so this is tidiness rather than
+    # correctness — but it keeps the working tree a faithful picture of the
+    # commit, which matters when the next step globs a receipts directory.
+    artifact_roots = {root / d for d in dirs}
+    for path in removed:
+        parent = path.parent
+        while parent not in artifact_roots and parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # not empty, or gone already
+            parent = parent.parent
+    return removed
+
+
 def stage_and_commit(
     paths: list[Path],
     issue_number: int,
@@ -614,9 +683,14 @@ def stage_and_commit(
     changes (no-op — possible when re-running on an existing branch
     where the regenerated artifacts are identical to what's already
     committed). Callers should treat False as "nothing to push".
+
+    Staged with `git add --all -- <path>` so that *removals* are recorded
+    too: on the update path `purge_branch_artifacts` deletes the previous
+    run's output, and a plain `git add <path>` of a vanished file leaves the
+    deletion unstaged — the branch would then keep both copies.
     """
-    for p in paths:
-        _run(["git", "add", str(p)], cwd=cwd)
+    if paths:
+        _run(["git", "add", "--all", "--", *(str(p) for p in paths)], cwd=cwd)
     # Has anything been staged? `git diff --cached --quiet` returns 0
     # when there are no staged diffs, non-zero otherwise.
     result = _run(["git", "diff", "--cached", "--quiet"], cwd=cwd, check=False)
@@ -901,8 +975,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     # writing any artifacts (untracked files would conflict with the
     # branch's tracked content on checkout). Stale branches without an
     # open PR are force-pushed past — they don't need a checkout.
+    purged: list[Path] = []
     if has_open_pr:
+        # Capture the default-branch tip we were checked out on before
+        # switching, so the purge below can tell "added by this branch"
+        # from "already merged on the base branch".
+        base_ref = _run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root
+        ).stdout.strip()
         checkout_existing_branch(branch, cwd=repo_root)
+        # The resubmit replaces the previous run's output rather than
+        # accumulating alongside it. See purge_branch_artifacts.
+        purge_dirs = _ARTIFACT_DIRS
+        if args.skip_pdf:
+            # Nothing will regenerate them, so leave the committed PDFs alone.
+            purge_dirs = tuple(d for d in purge_dirs if d != "generated_pdfs")
+        purged = purge_branch_artifacts(
+            base_ref, cwd=repo_root, dirs=purge_dirs
+        )
+        for path in purged:
+            print(f"Removed stale {path.relative_to(repo_root).as_posix()}")
 
     # Write the YAML.
     yaml_path = write_submission_yaml(submission, repo_root)
@@ -933,7 +1025,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # so reviewers see it without leaving the PR.
     pdf_rel: Optional[str] = None
     png_url: Optional[str] = None
-    paths_to_stage: list[Path] = [yaml_path, *receipt_paths]
+    # `purged` first so the removals are staged even when the resubmit
+    # rewrites a different period/id and never touches those paths again.
+    paths_to_stage: list[Path] = [*purged, yaml_path, *receipt_paths]
     if not args.skip_pdf:
         pdf_path = submission_pdf_path(submission, repo_root)
         png_path = submission_png_path(submission, repo_root)

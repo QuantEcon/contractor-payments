@@ -693,6 +693,67 @@ class TestHeaderHeuristicTightened:
             assert len(result.submission["entries"]) == 1
 
 
+class TestHandTypedHeaderVariants:
+    """Contractor repos call the engine at `@main`, so a change to the header
+    heuristic reaches every live timesheet repo the moment it merges. Requiring
+    EVERY cell to be a known label meant a header whose trailing column had
+    been renamed (`Day | Hours | Notes`) or emphasised was parsed as a data row
+    and reported as `couldn't read a date from ...` — a submission that had
+    been accepted the month before. The rule is now "first cell is exactly a
+    label, and at least one other is too", which recognises these while
+    keeping the §10 silent-skip bug closed (see the class above).
+    """
+
+    @pytest.mark.parametrize("header", [
+        "Date | Hours | Description",           # seeded
+        "Day | Hours | Notes",
+        "Date | Hours | Notes",
+        "Date | Hours | Task",
+        "Date | Hours | Comment",
+        "Date | Hrs | Description",
+        "Date | Time | Description",
+        "Day | Hours | Description",
+        "date | hours | description",
+        "**Date** | **Hours** | **Description**",
+        "`Date` | `Hours` | `Description`",
+        "Date|Hours|Description",
+    ])
+    def test_variant_is_recognised_as_a_header(self, header):
+        result = parse_issue(build_body(entries=(
+            f"{header}\n2025-01-06 | 3.5 | NumPy review"
+        )))
+        assert result.ok, error_messages(result)
+        assert len(result.submission["entries"]) == 1
+        assert result.submission["entries"][0]["date"] == "2025-01-06"
+
+    @pytest.mark.parametrize("row", [
+        "bad-date | 2 | oops",                  # the §10 regression case
+        "date-of-birth | 2 | oops",
+        "2025-01-06 | 3.5 | notes",             # 'notes' as a description
+        "2025-01-06 | 3.5 | date",
+    ])
+    def test_data_rows_are_never_mistaken_for_headers(self, row):
+        """A data row cannot pass: its first cell is a date, ID or amount, so
+        the exact-match test on cell one fails. Broadening the label list is
+        therefore safe."""
+        result = parse_issue(build_body(entries=(
+            f"{row}\n2025-01-06 | 3.5 | Real work"
+        )))
+        entries = (result.submission or {}).get("entries", [])
+        # Either it errored (malformed) or it was kept as data — never skipped.
+        assert not result.ok or len(entries) == 2
+
+    def test_header_only_section_still_reports_no_entries(self):
+        result = parse_issue(build_body(entries="Day | Hours | Notes"))
+        assert not result.ok
+        assert any("entr" in m.lower() for m in error_messages(result))
+
+    def test_reimbursement_header_variant_recognised(self):
+        from scripts.parse_issue import _looks_like_header
+        assert _looks_like_header("Date | Amount | Category | Notes", "|")
+        assert not _looks_like_header("2026-06-03 | 184.50 | travel | Flight", "|")
+
+
 # ─── Reimbursement Claim parser (§4.7, Phase 5) ─────────────────────────────
 
 _RECEIPT_PNG = "https://github.com/user-attachments/assets/0f1e2d3c-4b5a-6789-abcd-ef0123456789"
