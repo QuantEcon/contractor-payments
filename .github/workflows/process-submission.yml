@@ -58,6 +58,17 @@ on:
         type: string
         default: "submit"
 
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line, or the
+          pipeline definition and the code it drives come from different
+          commits. Optional, defaulting to 'main': a caller that pins `@main`
+          and omits this gets exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
+
 jobs:
   process:
     runs-on: ubuntu-latest
@@ -72,10 +83,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Run the scripts from the same engine commit as this workflow file.
+      #
+      # `actions/checkout` with no `ref:` takes the engine's default branch, so
+      # a caller pinned to `@some-branch` got that branch's workflow YAML
+      # driving `main`'s scripts. The mismatch stays invisible until the YAML
+      # passes a flag the scripts do not have.
+      #
+      # The ref has to come from the caller: there is no context value for it.
+      # `github.job_workflow_ref` and `github.job_workflow_sha` both read as
+      # EMPTY here (verified on real runs), and `github.workflow_ref` /
+      # `github.workflow_sha` describe the *calling* workflow in the contractor
+      # repo, not this one.
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Set up Python

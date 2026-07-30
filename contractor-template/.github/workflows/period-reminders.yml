@@ -33,4 +33,10 @@ jobs:
       issues: write
     with:
       dry_run: ${{ inputs.dry_run || false }}
+      # Must match the `@ref` on the `uses:` line above. The engine checks
+      # its own scripts out at this ref, and there is no context value that
+      # would let it derive one — so pinning the workflow without pinning
+      # this runs a different commit's code. Keep the two in step; the
+      # engine's tests/test_workflows.py asserts they agree.
+      engine_ref: main
     secrets: inherit
