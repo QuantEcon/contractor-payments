@@ -82,7 +82,38 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          # Pin the scripts to the same commit as THIS workflow file.
+          # Without a ref, checkout takes the engine's default branch, so a
+          # caller pinned to `@some-branch` got that branch's workflow YAML
+          # driving `main`'s scripts. That mismatch is invisible until the
+          # YAML passes a flag the scripts don't have yet — which is exactly
+          # how it surfaced: `parse_issue.py: error: unrecognized arguments:
+          # --reimbursements`. `job_workflow_sha` is the reusable workflow's
+          # own commit, so the two can no longer drift.
+          ref: ${{ github.job_workflow_sha }}
           path: engine
+
+      - name: Verify the engine checkout matches this workflow
+        env:
+          EXPECTED_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          # An empty `ref:` makes checkout silently take the default branch,
+          # which is the very failure this pin exists to prevent — so treat an
+          # unavailable job_workflow_sha as fatal rather than as "use main".
+          if [ -z "$EXPECTED_SHA" ]; then
+            echo "ERROR: github.job_workflow_sha is empty, so the engine" >&2
+            echo "checkout above silently fell back to the default branch." >&2
+            echo "The scripts running may not match this workflow." >&2
+            exit 1
+          fi
+          ACTUAL_SHA=$(git -C engine rev-parse HEAD)
+          echo "engine scripts at ${ACTUAL_SHA} (workflow ${EXPECTED_SHA})"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: engine checkout is ${ACTUAL_SHA} but this workflow is" >&2
+            echo "${EXPECTED_SHA}. Refusing to run scripts from a different" >&2
+            echo "commit than the pipeline definition." >&2
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,19 +148,34 @@ jobs:
         env:
           PYTHONPATH: engine
         run: |
+          PARSE_RC=0
           python -m scripts.parse_issue \
             --body-file /tmp/issue_body.md \
             --output-json /tmp/submission.json \
             --output-errors-json /tmp/errors.json \
             --reimbursements config/reimbursements.yml \
-            || true
+            || PARSE_RC=$?
           if [ -f /tmp/submission.json ]; then
             echo "parse_ok=true" >> "$GITHUB_OUTPUT"
             TYPE=$(python -c "import json; print(json.load(open('/tmp/submission.json')).get('type', ''))")
             echo "type=$TYPE" >> "$GITHUB_OUTPUT"
-          else
+          elif [ -f /tmp/errors.json ]; then
+            # The parser ran and rejected the body: a data error the
+            # contractor can fix. Stay green so the error-comment steps run.
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
             echo "type=" >> "$GITHUB_OUTPUT"
+          else
+            # Neither artifact exists, so the parser never got far enough to
+            # judge the body — bad flags, an import error, a missing config.
+            # That is an engine fault, and it used to be reported to the
+            # contractor as "your submission needs a fix" while the
+            # error-comment step itself crashed on the absent errors.json.
+            # Fail instead, so the pipeline-failure comment explains it is not
+            # their text.
+            echo "ERROR: scripts.parse_issue exited ${PARSE_RC} without writing" >&2
+            echo "/tmp/submission.json or /tmp/errors.json. Treating this as an" >&2
+            echo "engine failure, not a submission error." >&2
+            exit 1
           fi
 
       # ─── /validate path ───────────────────────────────────────────────────

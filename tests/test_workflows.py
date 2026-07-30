@@ -184,3 +184,63 @@ class TestTypstPinIsConsistent:
                     f"{name} pins Typst as `{version}`; use an exact "
                     f"MAJOR.MINOR.PATCH so renders are reproducible."
                 )
+
+
+class TestEngineCheckoutIsPinnedToTheWorkflow:
+    """Every reusable workflow must check the engine out at its OWN commit.
+
+    `actions/checkout` with no `ref:` takes the repository's default branch, so
+    a caller pinned to `@some-branch` got that branch's workflow YAML driving
+    `main`'s scripts. The mismatch is invisible until the YAML passes a flag
+    the scripts don't have — which is how it surfaced on the test repo:
+    `parse_issue.py: error: unrecognized arguments: --reimbursements`.
+
+    `github.job_workflow_sha` is the reusable workflow file's own commit, so
+    pinning to it makes the pipeline definition and the code it drives
+    inseparable.
+    """
+
+    PIN = "${{ github.job_workflow_sha }}"
+
+    def _engine_checkouts(self, path):
+        return [
+            step for step in _steps(_load(path))
+            if (step.get("uses") or "").startswith("actions/checkout")
+            and (step.get("with") or {}).get("repository")
+               == "QuantEcon/contractor-payments"
+        ]
+
+    @pytest.mark.parametrize("path", ENGINE_WORKFLOWS, ids=lambda p: p.name)
+    def test_engine_checkout_is_pinned(self, path):
+        workflow = _load(path)
+        # Only reusable workflows have a job_workflow_sha to pin to.
+        if "workflow_call" not in (workflow.get("on") or workflow.get(True) or {}):
+            pytest.skip("not a reusable workflow")
+        checkouts = self._engine_checkouts(path)
+        assert checkouts, f"{path.name}: no engine checkout found"
+        for step in checkouts:
+            ref = (step.get("with") or {}).get("ref")
+            assert ref == self.PIN, (
+                f"{path.name}: the engine checkout uses ref={ref!r}. It must be "
+                f"{self.PIN!r}, or the scripts can come from a different commit "
+                f"than this workflow."
+            )
+
+    @pytest.mark.parametrize("path", ENGINE_WORKFLOWS, ids=lambda p: p.name)
+    def test_pinned_checkout_is_verified_at_runtime(self, path):
+        """An empty `job_workflow_sha` would make `ref:` empty, and checkout
+        would silently fall back to the default branch — the exact failure the
+        pin prevents. The workflows that write to a contractor repo assert the
+        checked-out SHA rather than trusting it."""
+        workflow = _load(path)
+        if "workflow_call" not in (workflow.get("on") or workflow.get(True) or {}):
+            pytest.skip("not a reusable workflow")
+        if not self._engine_checkouts(path):
+            pytest.skip("no engine checkout")
+        if path.name == "send-reminders.yml":
+            pytest.skip("read-only reminder pass; no artifacts written")
+        runs = " ".join(s.get("run") or "" for s in _steps(workflow))
+        assert "rev-parse HEAD" in runs and "EXPECTED_SHA" in runs, (
+            f"{path.name}: pins the engine checkout but never verifies it "
+            f"resolved, so an empty job_workflow_sha would pass silently."
+        )

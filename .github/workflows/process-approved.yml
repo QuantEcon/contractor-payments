@@ -77,7 +77,33 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          # Same commit as this workflow file — see the note in
+          # process-submission.yml. Matters more here: this is the workflow
+          # that stamps approval, writes the ledger and emails the fiscal
+          # host, so the scripts doing that must be the ones reviewed
+          # alongside this YAML.
+          ref: ${{ github.job_workflow_sha }}
           path: engine
+
+      - name: Verify the engine checkout matches this workflow
+        env:
+          EXPECTED_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          # See process-submission.yml. Fatal rather than best-effort: this
+          # workflow emails the fiscal host, so running scripts from an
+          # unknown commit is not an acceptable degraded mode.
+          if [ -z "$EXPECTED_SHA" ]; then
+            echo "ERROR: github.job_workflow_sha is empty, so the engine" >&2
+            echo "checkout silently fell back to the default branch." >&2
+            exit 1
+          fi
+          ACTUAL_SHA=$(git -C engine rev-parse HEAD)
+          echo "engine scripts at ${ACTUAL_SHA} (workflow ${EXPECTED_SHA})"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: engine checkout is ${ACTUAL_SHA} but this workflow is" >&2
+            echo "${EXPECTED_SHA}." >&2
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
