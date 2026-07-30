@@ -660,14 +660,34 @@ def _parse_expense_entries(
 _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)\)")
 _URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
 
+# One path segment of an attachment URL. Deliberately an allowlist, and
+# anchored end-to-end below, because these URLs are fetched with the repo
+# token: a prefix-only match would accept
+# `…/user-attachments/assets/../../<anything>` and — urllib sends the path
+# unnormalised, GitHub's frontend resolves the dot segments — aim that
+# authenticated request at an arbitrary github.com path. Blacklisting `/../`
+# is not enough (`%2e%2e/` resolves too), so instead: a segment may not begin
+# with `.` (kills the `.` and `..` segments themselves) and percent-escapes of
+# `.`, `/` and `\` are excluded (kills the encoded forms). Other escapes stay
+# allowed — GitHub does emit them in attachment filenames.
+_PCT = r"%(?!2[eEfF]|5[cC])[0-9A-Fa-f]{2}"
+_SEG = rf"(?:[A-Za-z0-9_~+-]|{_PCT})(?:[A-Za-z0-9._~+-]|{_PCT})*"
+# `private-user-images` URLs carry a `?jwt=…`. Deliberately unconstrained, and
+# safe to leave that way: the traversal this regex exists to block lives in the
+# *path*, and a query string cannot reintroduce it — `urllib.request.Request`
+# drops the fragment from `.selector`, and everything after `?` is not a path
+# segment. Don't copy this looseness into the segment patterns above.
+_QUERY = r"(?:[?#]\S*)?"
+
 # GitHub-hosted attachment URL shapes (current `user-attachments` and the
 # legacy per-repo `/files/` + image-CDN forms).
 _ATTACHMENT_URL_RE = re.compile(
-    r"^https://(?:"
-    r"github\.com/user-attachments/(?:assets|files)/"
-    r"|github\.com/[^/]+/[^/]+/files/\d+/"
-    r"|(?:private-)?user-images\.githubusercontent\.com/"
-    r")"
+    rf"^https://(?:"
+    rf"github\.com/user-attachments/assets/{_SEG}"
+    rf"|github\.com/user-attachments/files/\d+/{_SEG}"
+    rf"|github\.com/{_SEG}/{_SEG}/files/\d+/{_SEG}"
+    rf"|(?:private-)?user-images\.githubusercontent\.com/{_SEG}(?:/{_SEG})*"
+    rf"){_QUERY}\Z"
 )
 
 

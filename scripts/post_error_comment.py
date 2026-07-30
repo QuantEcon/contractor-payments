@@ -34,19 +34,36 @@ DEFAULT_LABEL = "parse-error"
 def render_error_comment(
     errors: list[dict],
     warnings: Optional[list[dict]] = None,
+    *,
+    parse_failed: bool = True,
 ) -> str:
-    """Render a list of parser errors (and optional warnings) into a markdown
-    comment that ends with the sentinel marker.
+    """Render a list of errors (and optional warnings) into a markdown comment
+    that ends with the sentinel marker.
 
     Each error is a dict with `message` (str) and optional `line` (int).
     Each warning is a dict with `message` (str).
+
+    `parse_failed` selects the framing. True is the original case: the body
+    could not be parsed, so the errors are line-specific and editing the rows
+    is the fix. False is for failures that happen *after* a clean parse — a
+    claim too long to render, say — where "I couldn't parse this submission"
+    would be a lie that sends the contractor hunting for a syntax error that
+    does not exist.
     """
     warnings = warnings or []
 
     lines: list[str] = []
-    lines.append("🤖 **Submission needs a fix**")
-    lines.append("")
-    lines.append("I couldn't parse this submission. Here's what I found:")
+    if parse_failed:
+        lines.append("🤖 **Submission needs a fix**")
+        lines.append("")
+        lines.append("I couldn't parse this submission. Here's what I found:")
+    else:
+        lines.append("🤖 **Submission couldn't be filed**")
+        lines.append("")
+        lines.append(
+            "The submission itself is fine — I read it without any problem — "
+            "but I couldn't turn it into a document:"
+        )
     lines.append("")
 
     for err in errors:
@@ -58,8 +75,16 @@ def render_error_comment(
             lines.append(f"- {msg}")
 
     lines.append("")
-    lines.append("To fix, **edit this issue** (click the ⋯ menu → Edit) and")
-    lines.append("update those lines. I'll re-check automatically when you save.")
+    # Editing the issue does NOT re-trigger anything: the caller workflow
+    # fires on `issues: [labeled]` and `issue_comment: [created]` only, so
+    # promising an automatic re-check (as this comment used to) leaves the
+    # contractor waiting for a run that never starts.
+    if parse_failed:
+        lines.append("To fix, **edit this issue** (click the ⋯ menu → Edit) to")
+        lines.append("update those lines, then comment `/validate` to re-check.")
+    else:
+        lines.append("Adjust the submission, then comment `/validate` to re-check")
+        lines.append("(or re-apply the `submit` label to file it).")
 
     if warnings:
         lines.append("")
@@ -169,10 +194,12 @@ def post_or_update(
     errors: list[dict],
     warnings: list[dict],
     label: str,
+    *,
+    parse_failed: bool = True,
 ) -> None:
     if not errors:
         raise ValueError("post_or_update called with no errors — nothing to report")
-    body = render_error_comment(errors, warnings)
+    body = render_error_comment(errors, warnings, parse_failed=parse_failed)
     existing = find_existing_comment_id(repo, issue)
     if existing is not None:
         update_comment(repo, existing, body)

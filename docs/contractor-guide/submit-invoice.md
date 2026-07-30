@@ -92,8 +92,13 @@ ID | Date | Amount | Description
 
 Things to know:
 
-- **Keep the header row** (`ID | Date | Amount | Description`). The
-  parser uses it to recognise the entries table.
+- **The header row is optional but recommended.** What identifies the
+  entries table is the **Milestone Entries** heading, not the header row
+  — a header row is just skipped when its columns read as labels
+  (`ID | Date | Amount | Description`, and common renames, are all
+  recognised). Keep the seeded row anyway: it's a format reminder, and a
+  header the parser *doesn't* recognise (a translated or unusual column
+  name) is read as a data row and reported as malformed.
 - **One row per milestone**. Usually a single row — one milestone
   delivered, one row.
 - **The amount must match the contract's `amount` for that milestone**.

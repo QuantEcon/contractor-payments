@@ -22,10 +22,13 @@ administrator.)
 - **One row per receipt line, receipts attached.** Each expense row
   should be backed by a receipt file dragged into the form's
   **Receipts** box (PDF, PNG, or JPG).
-- **Categories come from your repo's allowed list.** The form shows the
-  list; the parser rejects anything else. The list lives in
-  `config/reimbursements.yml` in your repo — ask your administrator if
-  a category you need is missing.
+- **Categories come from your repo's allowed list** — when your repo has
+  one. The form's reminder block at the top shows the list, and the
+  parser rejects anything not on it. If that block instead says your repo
+  doesn't restrict categories, any short descriptive category is
+  accepted. Either way the setting lives in `config/reimbursements.yml`
+  in your repo — ask your administrator if a category you need is
+  missing.
 - **Same-day rows are fine.** Flight + hotel + dinner on one date is
   the normal case (unlike timesheets, which allow one row per day).
 - **Dates outside the claim month are allowed** for trips that span a
@@ -51,9 +54,11 @@ Fill in the form:
   2026-06-01 | 62.35 | meals | Conference dinner
   ```
 
-  Keep the header row in place. Amounts are plain numbers — no currency
-  symbols, the Currency dropdown covers that. Descriptions may contain
-  `|`.
+  The header row is optional but recommended — the **Expense Entries**
+  heading is what identifies the table, and a header row whose columns
+  read as labels is simply skipped, so keep the seeded one as a format
+  reminder. Amounts are plain numbers — no currency symbols, the
+  Currency dropdown covers that. Descriptions may contain `|`.
 
 - **Currency** — the single currency for every row above.
 - **Total** — the sum of your rows. The parser cross-checks this

@@ -28,6 +28,12 @@ Used three ways:
     creates the pinned "Running ledger — Reimbursements" issue and writes
     its number into config/reimbursements.yml.
 
+All three paths validate config/reimbursements.yml's shape first (see
+`validate_reimbursements_config`): a config the engine can only read
+ambiguously — a non-list `allowed_categories`, an unsubstituted placeholder —
+stops the sync with an explanation instead of quietly shipping an allowlist
+that rejects every claim.
+
 The caller workflow files (.github/workflows/) carry no substitutions and
 are synced verbatim from contractor-template/ so per-repo plumbing tracks
 the engine (e.g. the `reimbursement` label gate added in Phase 5).
@@ -35,13 +41,14 @@ the engine (e.g. the `reimbursement` label gate added in Phase 5).
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from string import Template
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -69,6 +76,91 @@ WORKFLOW_FILES = (
     ".github/workflows/period-reminders.yml",
 )
 
+REIMBURSEMENT_LEDGER_TITLE = "📒 Running ledger — Reimbursements"
+
+
+# ─── Reimbursement config validation ────────────────────────────────────────
+
+class ReimbursementConfigError(ValueError):
+    """`config/reimbursements.yml` has a shape the engine will not guess at.
+
+    Raised at sync/onboarding time — while the admin is still at the keyboard —
+    rather than letting a malformed config reach a contractor's claim weeks
+    later, where the symptom is a baffling validation failure.
+    """
+
+
+def validate_reimbursements_config(config: dict, path: Path) -> None:
+    """Reject reimbursement configs whose shape silently breaks the parser.
+
+    Three failure modes are worth a loud error here:
+
+      - **Unsubstituted template literals.** `project: $REIMBURSEMENT_PROJECT`
+        and friends are truthy strings, so every downstream truthiness test
+        passes and the placeholder text ends up on a claim PDF (or, for
+        `ledger_issue`, makes this module believe the ledger is already wired).
+      - **`allowed_categories` that isn't a list.** `allowed_categories:
+        travel, meals` — forgetting the brackets — parses as the *string*
+        `"travel, meals"`, and `parse_issue`'s membership test then compares
+        each claim's category against that one string, rejecting every real
+        category.
+      - **An explicitly empty `allowed_categories`.** `parse_issue` guards the
+        check with `if allowed_categories:`, so `[]` means "no restriction" —
+        the exact opposite of how it reads to whoever edits the file. "Reject
+        every category" is never a useful intent, so we refuse to pick a
+        reading: omit the key for no restriction, list categories to restrict.
+    """
+    for key in ("project", "allowed_categories", "ledger_issue"):
+        value = config.get(key)
+        if isinstance(value, str) and value.startswith("$"):
+            raise ReimbursementConfigError(
+                f"{path}: `{key}` still holds the template placeholder "
+                f"`{value}`. This file is seeded from "
+                f"contractor-template/config/reimbursements.yml and its "
+                f"placeholders must be filled in — set a real value "
+                f"(`ledger_issue: null` before the ledger issue exists)."
+            )
+
+    if "allowed_categories" in config:
+        categories = config["allowed_categories"]
+        if not isinstance(categories, list):
+            raise ReimbursementConfigError(
+                f"{path}: `allowed_categories` must be a YAML list, but it "
+                f"parsed as {type(categories).__name__} "
+                f"({categories!r}). Write it as a list:\n"
+                f"    allowed_categories: [travel, meals]\n"
+                f"(a block list with `- travel` per line works too). A bare "
+                f"comma-separated string is one string, and the category "
+                f"check would then reject every claim."
+            )
+        if not categories:
+            raise ReimbursementConfigError(
+                f"{path}: `allowed_categories` is an empty list, which is "
+                f"ambiguous — the parser reads an empty list as 'no category "
+                f"restriction', not 'reject every category'. To accept any "
+                f"category, delete the `allowed_categories` key; to restrict, "
+                f"list the categories: allowed_categories: [travel, meals]."
+            )
+        bad = [c for c in categories
+               if not isinstance(c, str) or not c.strip()]
+        if bad:
+            raise ReimbursementConfigError(
+                f"{path}: `allowed_categories` contains {bad!r} — every entry "
+                f"must be a non-empty category name (a dangling `-` in a "
+                f"block list produces a null entry)."
+            )
+
+    ledger_issue = config.get("ledger_issue")
+    # `bool` is an `int` subclass, so `ledger_issue: yes` would slip through.
+    if ledger_issue is not None and (
+        isinstance(ledger_issue, bool) or not isinstance(ledger_issue, int)
+    ):
+        raise ReimbursementConfigError(
+            f"{path}: `ledger_issue` must be the pinned ledger issue's number "
+            f"or null, not {ledger_issue!r}. Use `ledger_issue: null` and run "
+            f"`sync_templates.py --init-reimbursement-ledger` to wire it."
+        )
+
 
 # ─── Repo state (pure) ──────────────────────────────────────────────────────
 
@@ -91,6 +183,9 @@ def load_repo_state(repo_dir: Path) -> tuple[list[dict], Optional[dict]]:
         reimbursements = yaml.safe_load(
             reimbursements_path.read_text(encoding="utf-8")
         ) or {}
+        # Every entry point (retrofit CLI, onboarding, ledger init) comes
+        # through here, so this is the one gate that sees every config edit.
+        validate_reimbursements_config(reimbursements, reimbursements_path)
     return contracts, reimbursements
 
 
@@ -132,9 +227,17 @@ def _milestone_reminder(contracts: list[dict]) -> str:
 
 
 def _categories_reminder(reimbursements: Optional[dict]) -> str:
+    """Reminder bullets for the claim form's allowed-category block.
+
+    No `allowed_categories` key means no restriction (see
+    `validate_reimbursements_config` — an empty list is a config error, so the
+    only way to land here is by omitting the key). Say that plainly: the old
+    "ask the admin" text told the contractor to chase a restriction that isn't
+    being enforced."""
     categories = (reimbursements or {}).get("allowed_categories") or []
     if not categories:
-        return "        - _(no categories configured — ask the admin)_"
+        return ("        - _(this repo doesn't restrict categories — use a "
+                "short, descriptive one)_")
     return "\n".join(f"        - `{c}`" for c in categories)
 
 
@@ -238,10 +341,23 @@ def sync_issue_templates(repo_dir: Path) -> list[str]:
 # ─── Pinned reimbursements ledger issue ─────────────────────────────────────
 
 def open_pinned_issue(repo: str, title: str, body: str, *,
-                      dry_run: bool) -> Optional[int]:
+                      dry_run: bool,
+                      on_created: Optional[Callable[[int], None]] = None,
+                      ) -> Optional[int]:
     """Create a pinned + locked issue with the `ledger` label. Returns the
     issue number, or None under dry-run. (Generalised from
-    new-contractor.py's contract-ledger variant.)"""
+    new-contractor.py's contract-ledger variant.)
+
+    `on_created` is called with the issue number the moment the issue exists,
+    *before* the pin/lock calls — that's the caller's chance to record the
+    number durably (e.g. write it into a config) so a later failure can't
+    orphan the issue and make a retry create a second one.
+
+    Pinning and locking are deliberately best-effort: GitHub caps a repo at
+    three pinned issues, and each contract ledger already consumes one, so the
+    cap is reachable in normal use. Losing the pin is cosmetic — the issue
+    itself is the record — so we warn loudly with the manual command rather
+    than abort a flow that has already created (and recorded) the issue."""
     if dry_run:
         print(f"  [dry-run] gh issue create --title \"{title}\" --label ledger")
         print("  [dry-run] gh issue pin/lock <N>")
@@ -268,37 +384,124 @@ def open_pinned_issue(repo: str, title: str, body: str, *,
               file=sys.stderr)
         return None
     n = int(match.group(1))
-    subprocess.run(["gh", "issue", "pin", str(n), "--repo", repo], check=True)
-    subprocess.run(["gh", "issue", "lock", str(n), "--repo", repo], check=True)
+    if on_created is not None:
+        on_created(n)
+    for verb in ("pin", "lock"):
+        r = subprocess.run(["gh", "issue", verb, str(n), "--repo", repo],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"WARNING: couldn't {verb} issue #{n} in {repo} "
+                  f"({r.stderr.strip() or 'gh failed'}). The issue exists and "
+                  f"is recorded; run `gh issue {verb} {n} --repo {repo}` by "
+                  f"hand (GitHub allows at most 3 pinned issues per repo).",
+                  file=sys.stderr)
     return n
+
+
+def find_ledger_issue(repo: str, title: str = REIMBURSEMENT_LEDGER_TITLE,
+                      ) -> Optional[int]:
+    """Number of an existing open `ledger`-labelled issue with `title`, if any.
+
+    Recovers from a half-finished init: before the config write moved ahead of
+    the pin/lock calls, a failure there left an orphan ledger issue that every
+    retry duplicated. Returns None when nothing matches or when `gh` can't
+    answer — the caller then creates one, which is the pre-existing behaviour."""
+    r = subprocess.run(
+        ["gh", "issue", "list", "--repo", repo, "--label", "ledger",
+         "--state", "open", "--limit", "100", "--json", "number,title"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(f"WARNING: couldn't list existing ledger issues in {repo} "
+              f"({r.stderr.strip() or 'gh failed'}); proceeding as if none "
+              f"exist.", file=sys.stderr)
+        return None
+    try:
+        issues = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        # Returning None here means "no existing ledger issue", and the caller
+        # acts on that by creating one — so swallowing this silently is how a
+        # duplicate pinned ledger gets made, the exact thing this lookup is
+        # here to prevent. Warn like the returncode branch above.
+        print(f"WARNING: could not parse `gh issue list` output for {repo} "
+              f"as JSON; treating as 'no ledger issue found'. If one already "
+              f"exists, this will create a duplicate.", file=sys.stderr)
+        return None
+    numbers = sorted(i["number"] for i in issues if i.get("title") == title)
+    if not numbers:
+        return None
+    if len(numbers) > 1:
+        print(f"WARNING: {repo} has {len(numbers)} open issues titled "
+              f"\"{title}\" (#{', #'.join(str(n) for n in numbers)}) — reusing "
+              f"the oldest; close the duplicates by hand.", file=sys.stderr)
+    return numbers[0]
+
+
+def write_ledger_issue(path: Path, issue_number: int) -> None:
+    """Set `ledger_issue:` in an existing reimbursements config, in place.
+
+    A targeted line rewrite rather than a `yaml.safe_dump` round-trip: the
+    seeded file's comments explain each key (and which tool writes it), and
+    dumping the parsed dict back stripped every one of them."""
+    text = path.read_text(encoding="utf-8")
+    # `(?m)^ledger_issue:` — column 0 only, so a commented-out or nested
+    # occurrence is left alone. `.*$` also takes any trailing comment on that
+    # line, which is intended: a hand-added "# wired by X" note would be stale
+    # once we've rewritten the value. (The shipped template carries no such
+    # comment — its explanation sits in the header block.)
+    new_text, count = re.subn(
+        r"(?m)^ledger_issue:.*$", f"ledger_issue: {issue_number}", text, count=1,
+    )
+    if count == 0:
+        # Hand-written config without the key — append rather than lose the wire.
+        sep = "" if text.endswith("\n") or not text else "\n"
+        new_text = f"{text}{sep}ledger_issue: {issue_number}\n"
+    path.write_text(new_text, encoding="utf-8")
 
 
 def init_reimbursement_ledger(repo_dir: Path, repo: str, *,
                               dry_run: bool) -> Optional[int]:
     """Create the pinned reimbursements ledger issue and write its number
     into config/reimbursements.yml. No-op (with a warning) when the config
-    is absent or the issue is already wired."""
+    is absent or the issue is already wired.
+
+    Safe to re-run. The config write happens the moment the issue exists
+    (before pin/lock), and an already-open ledger issue is adopted rather than
+    duplicated — a retry after a mid-flight failure converges instead of
+    leaving another orphan behind."""
     reimbursements_path = repo_dir / "config" / "reimbursements.yml"
     if not reimbursements_path.exists():
         print("WARN: config/reimbursements.yml not found — nothing to init.",
               file=sys.stderr)
         return None
     config = yaml.safe_load(reimbursements_path.read_text(encoding="utf-8")) or {}
+    # Catches the unsubstituted `$REIMBURSEMENT_LEDGER_ISSUE` literal, which is
+    # truthy and used to report the ledger as already wired.
+    validate_reimbursements_config(config, reimbursements_path)
     if config.get("ledger_issue"):
         print(f"Reimbursements ledger issue already wired "
               f"(#{config['ledger_issue']}); nothing to do.")
         return None
 
+    if not dry_run:
+        existing = find_ledger_issue(repo)
+        if existing is not None:
+            print(f"Reusing existing ledger issue #{existing} in {repo} "
+                  f"(left unwired by an earlier run).")
+            write_ledger_issue(reimbursements_path, existing)
+            print(f"Wired ledger_issue: {existing} into "
+                  f"config/reimbursements.yml")
+            return existing
+
     body = render_reimbursement_body(empty_ledger(ledger_type="reimbursement"), config)
     issue_number = open_pinned_issue(
-        repo, "📒 Running ledger — Reimbursements", body, dry_run=dry_run,
+        repo, REIMBURSEMENT_LEDGER_TITLE, body, dry_run=dry_run,
+        # Record before pin/lock: an orphan issue is worse than an unpinned one.
+        on_created=lambda n: write_ledger_issue(reimbursements_path, n),
     )
     if issue_number is None:
         return None
 
-    config["ledger_issue"] = issue_number
-    with reimbursements_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
     print(f"Wired ledger_issue: {issue_number} into config/reimbursements.yml")
     return issue_number
 
@@ -338,7 +541,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"ERROR: {repo_dir} is not a git checkout.", file=sys.stderr)
         return 1
 
-    plan = plan_sync(repo_dir)
+    try:
+        plan = plan_sync(repo_dir)
+    except ReimbursementConfigError as exc:
+        # Config shape errors are the admin's typo, not a bug — a traceback
+        # would bury the fix instructions the message carries.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(f"Sync plan for {repo_dir.name}:")
     for relpath, action, _ in plan:
         marker = {"write": "✏️ ", "delete": "🗑️ ", "unchanged": "  "}[action]

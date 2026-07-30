@@ -23,7 +23,13 @@ name: Process submission (reusable)
 # against the engine checkout, while paths into the working tree refer to
 # the contractor repo's files.
 #
-# See PLAN.md §8 Phase 3a (reusable workflow shape) + Phase 3c (mode + /validate).
+# Failure gating: data errors (unparseable body, unfetchable receipt) are
+# carried as step *outputs*, so the run stays green and the contractor gets
+# the "needs a fix" comment. Anything else — a crash in Typst, `gh`, or a
+# script — is a step failure, and the two steps at the bottom of the job
+# (`always()` label removal + `failure()` comment) make sure /submit still
+# says something and can still be retried. See PLAN.md §8 Phase 3a
+# (reusable workflow shape) + Phase 3c (mode + /validate).
 
 on:
   workflow_call:
@@ -130,31 +136,36 @@ jobs:
       # Dry-run parser pass; post a sentinel-marked result comment, no PR.
 
       - name: Post validate-success comment
+        id: validate_success
         if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true' && steps.parse.outputs.type != 'reimbursement'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_AUTHOR: ${{ inputs.issue_author }}
         run: |
           CONTRACT_ID=$(python -c "import json; print(json.load(open('/tmp/submission.json'))['contract_id'])")
           python -m scripts.post_validate_result success \
             --submission-file /tmp/submission.json \
             --contract-file "contracts/${CONTRACT_ID}.yml" \
-            --submitter "${{ inputs.issue_author }}" \
+            --submitter "$ISSUE_AUTHOR" \
             --issue "${{ inputs.issue_number }}"
 
       - name: Post validate-success comment (reimbursement)
+        id: validate_success_reimbursement
         if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'true' && steps.parse.outputs.type == 'reimbursement'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_AUTHOR: ${{ inputs.issue_author }}
         run: |
           python -m scripts.post_validate_result success \
             --submission-file /tmp/submission.json \
             --reimbursements-file config/reimbursements.yml \
-            --submitter "${{ inputs.issue_author }}" \
+            --submitter "$ISSUE_AUTHOR" \
             --issue "${{ inputs.issue_number }}"
 
       - name: Post validate-error comment
+        id: validate_error
         if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -207,25 +218,35 @@ jobs:
           fi
 
       - name: Create submission PR
+        id: create_pr
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          # Contractor-authored strings reach the shell via env only — an
+          # issue title of `"; curl …` must be an odd PR title, not a command.
+          # (`issue_body` already used this pattern; title/author/supersedes
+          # were the stragglers.)
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_AUTHOR: ${{ inputs.issue_author }}
+          SUPERSEDES: ${{ steps.revision.outputs.supersedes }}
         run: |
-          SUPERSEDES_ARG=""
-          if [ -n "${{ steps.revision.outputs.supersedes }}" ]; then
-            SUPERSEDES_ARG="--supersedes ${{ steps.revision.outputs.supersedes }}"
+          # Array, not a bare $SUPERSEDES_ARG string: keeps the flag absent
+          # when there is nothing to supersede without re-splitting the value.
+          SUPERSEDES_ARGS=()
+          if [ -n "$SUPERSEDES" ]; then
+            SUPERSEDES_ARGS=(--supersedes "$SUPERSEDES")
           fi
           python -m scripts.create_submission_pr \
             --submission-file /tmp/submission.json \
             --errors-file /tmp/errors.json \
             --issue-number "${{ inputs.issue_number }}" \
-            --issue-author "${{ inputs.issue_author }}" \
-            --issue-title "${{ inputs.issue_title }}" \
+            --issue-author "$ISSUE_AUTHOR" \
+            --issue-title "$ISSUE_TITLE" \
             --templates-dir engine/templates \
             --receipts-manifest /tmp/receipts_manifest.json \
             --receipts-staging-dir /tmp/receipts \
-            $SUPERSEDES_ARG
+            "${SUPERSEDES_ARGS[@]}"
 
       - name: Clear prior submit-error comment
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
@@ -246,6 +267,7 @@ jobs:
             --issue "${{ inputs.issue_number }}"
 
       - name: Close and lock the issue
+        id: close_issue
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true' && steps.fetch_receipts.outputs.fetch_ok != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -271,7 +293,12 @@ jobs:
           gh issue lock "${{ inputs.issue_number }}" --reason resolved \
             || echo "Issue lock failed (may already be locked); continuing."
 
+      # Data errors the contractor can fix themselves: the parser rejected the
+      # body, or a receipt attachment could not be fetched. Both are captured
+      # as outputs rather than step failures, so this step's implicit
+      # `success()` still holds and the comment posts.
       - name: Post submit-error comment (on parse or receipt-fetch failure)
+        id: error_comment
         if: inputs.mode == 'submit' && (steps.parse.outputs.parse_ok == 'false' || steps.fetch_receipts.outputs.fetch_ok == 'false')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -281,11 +308,101 @@ jobs:
             --errors-file /tmp/errors.json \
             --issue "${{ inputs.issue_number }}"
 
-      # ─── Always (submit mode): remove `submit` label so re-applying re-triggers
+      # ─── Genuinely always (submit mode) ───────────────────────────────────
+      # `always()` — not `success()`, not `!cancelled()`. Removing the label is
+      # the only way to retry: the caller fires on `labeled`, so re-applying a
+      # label that is still applied is a no-op. Leaving it behind on a failed
+      # (or cancelled) run would strand the contractor. Nothing downstream
+      # depends on this step, so running it after a failure is free — and it
+      # runs BEFORE the failure comment below, which tells the contractor the
+      # label has been removed.
       - name: Remove `submit` label
-        if: inputs.mode == 'submit'
+        if: ${{ always() && inputs.mode == 'submit' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue edit "${{ inputs.issue_number }}" --remove-label submit \
             || echo "submit label not present; continuing."
+
+      # ─── Failure path ─────────────────────────────────────────────────────
+      # Everything above carries an implicit `success()`, so a failure that is
+      # NOT a data error — Typst render crash, `gh` API error, PR creation
+      # refused, a missing config file — used to skip the error comment too:
+      # /submit went completely silent right after /validate had said "ready
+      # to submit". This step is the loud fallback. It reports what did and
+      # did not happen; it never claims the submission was filed.
+      #
+      # `failure()`, not `always()`: only when a step above actually failed
+      # (a cancelled run is an admin action, not a pipeline fault).
+      - name: Post pipeline-failure comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          MODE: ${{ inputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          O_PARSE: ${{ steps.parse.outcome }}
+          O_VALIDATE: ${{ steps.validate_success.outcome }}
+          O_VALIDATE_REIMB: ${{ steps.validate_success_reimbursement.outcome }}
+          O_VALIDATE_ERROR: ${{ steps.validate_error.outcome }}
+          O_REVISION: ${{ steps.revision.outcome }}
+          O_FETCH: ${{ steps.fetch_receipts.outcome }}
+          O_CREATE_PR: ${{ steps.create_pr.outcome }}
+          O_CLOSE: ${{ steps.close_issue.outcome }}
+          O_ERROR_COMMENT: ${{ steps.error_comment.outcome }}
+        run: |
+          # If create_submission_pr already posted a specific comment (a claim
+          # too long to render, say) it leaves this marker behind. Staying quiet
+          # matters: the generic text below asserts the submission text is fine,
+          # which would flatly contradict the specific comment sitting above it.
+          if [ -f /tmp/contractor_notified ]; then
+            echo "Contractor already has a specific comment on #${ISSUE_NUMBER}; not adding a generic one."
+            exit 0
+          fi
+
+          # First failing stage wins; anything before `parse` (checkout,
+          # Python, Typst install) leaves every outcome empty/skipped, hence
+          # the setup fallback.
+          STAGE="workflow setup (checkout / Python / Typst install)"
+          for CANDIDATE in \
+            "$O_PARSE|parsing the submission" \
+            "$O_VALIDATE|posting the /validate result" \
+            "$O_VALIDATE_REIMB|posting the /validate result" \
+            "$O_VALIDATE_ERROR|posting the /validate errors" \
+            "$O_REVISION|detecting the revision target" \
+            "$O_FETCH|fetching the receipt attachments" \
+            "$O_CREATE_PR|rendering the PDF and opening the submission PR" \
+            "$O_CLOSE|closing and locking this issue" \
+            "$O_ERROR_COMMENT|posting the submission-error comment"; do
+            if [ "${CANDIDATE%%|*}" = "failure" ]; then
+              STAGE="${CANDIDATE#*|}"
+              break
+            fi
+          done
+
+          if [ "$MODE" = "validate" ]; then
+            HEADLINE='`/validate` failed before it could report a result.'
+            OUTCOME='Nothing was changed. Re-run `/validate` once the cause below is fixed.'
+          elif [ "$O_CREATE_PR" = "success" ]; then
+            # PR exists — the contractor must NOT re-submit, or we get a
+            # second branch for the same issue.
+            HEADLINE='`/submit` failed **after** the submission PR was created.'
+            OUTCOME='The PR exists and carries your submission, but the follow-up housekeeping (clearing old comments, closing/locking this issue) did not finish. **Do not re-submit** — an admin will pick this up from the run log.'
+          else
+            HEADLINE='`/submit` failed — **nothing was filed.**'
+            OUTCOME='No submission PR was created. The `submit` label has been removed, so re-applying it retries the run once the cause below is fixed.'
+          fi
+
+          {
+            printf '> [!WARNING]\n'
+            printf '> %s\n\n' "$HEADLINE"
+            printf 'This is not a problem with the text of your submission (a bad submission comes back as a "needs a fix" comment listing the lines). The run broke at this stage: **%s**.\n\n' "$STAGE"
+            printf '%s\n\n' "$OUTCOME"
+            printf 'Run log (admins): %s\n' "$RUN_URL"
+          } > /tmp/pipeline_failure.md
+
+          # Tolerated: the job is already red, and a locked issue must not
+          # turn a reportable failure into an unreportable one.
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file /tmp/pipeline_failure.md \
+            || echo "WARN: could not post the failure comment on issue #${ISSUE_NUMBER} (locked?)."

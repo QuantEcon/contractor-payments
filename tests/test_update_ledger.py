@@ -363,6 +363,42 @@ class TestRounding:
         out = append_submission(MILESTONE_SUBMISSION, ledger)
         assert isinstance(out["totals"]["amount_to_date"], int)
 
+    def test_milestone_amount_to_date_rounded_to_two_places(self):
+        """Same class of drift on the milestone path (JPY milestones are ints
+        and immune, but the contract type isn't currency-locked)."""
+        usd = {
+            **MILESTONE_SUBMISSION,
+            "totals": {"amount": 0.1, "currency": "USD"},
+        }
+        ledger = _empty_ledger(usd)
+        ledger = append_submission(usd, ledger)
+        out = append_submission(
+            {**usd, "submission_id": "mmcky-invoice-2025-12",
+             "totals": {"amount": 0.2, "currency": "USD"}},
+            ledger,
+        )
+        assert repr(out["totals"]["amount_to_date"]) == "0.3"
+
+    def test_amount_to_date_rounded_to_two_places(self):
+        """Float accumulation must not leak into the committed YAML: 0.1+0.2
+        style drift would store `305.21999999999997` where the pinned issue
+        renders `305.22`."""
+        sub1 = {
+            **HOURLY_SUBMISSION,
+            "totals": {"hours": 1.0, "rate": 0.1, "amount": 0.1, "currency": "AUD"},
+        }
+        sub2 = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-05",
+            "totals": {"hours": 1.0, "rate": 0.2, "amount": 0.2, "currency": "AUD"},
+        }
+        ledger = _empty_ledger(sub1)
+        ledger = append_submission(sub1, ledger)
+        out = append_submission(sub2, ledger)
+        # repr, not ==: 0.30000000000000004 == 0.3 is False, but the point is
+        # that the *stored* value is clean, so assert on the serialised form.
+        assert repr(out["totals"]["amount_to_date"]) == "0.3"
+
     def test_hours_to_date_rounded_to_two_places(self):
         # Slight float imprecision shouldn't propagate as 14.499999999.
         sub1 = {
@@ -471,6 +507,32 @@ class TestAppendReimbursement:
         ledger = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
         with pytest.raises(ValueError, match="already in the ledger"):
             append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+
+    def test_bucket_amount_rounded_to_two_places(self):
+        """The reimbursement ledger is the only one that accumulates across a
+        contractor's whole history, so float drift shows up here first. Each
+        bucket must be clean before it's dumped to the committed YAML."""
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        amounts = [45.67, 12.03, 8.99, 101.5, 33.33, 7.7, 96.0]  # sums to 305.22
+        for i, amount in enumerate(amounts):
+            claim = {
+                **REIMBURSEMENT_SUBMISSION,
+                "submission_id": f"janedoe-reimbursement-2026-{i:02d}",
+                "totals": {"amount": amount, "currency": "AUD"},
+            }
+            ledger = append_submission(claim, ledger)
+        bucket = ledger["totals"]["AUD"]
+        assert bucket["claims_count"] == 7
+        # Raw accumulation gives 305.21999999999997 — assert on the repr so a
+        # regression can't hide behind float ==.
+        assert repr(bucket["amount_to_date"]) == "305.22"
+
+    def test_jpy_bucket_stays_int(self):
+        """Rounding must not turn zero-decimal currencies into `12300.0` in
+        the YAML — `round(int, 2)` returns an int."""
+        ledger = _empty_ledger(REIMBURSEMENT_SUBMISSION)
+        updated = append_submission(REIMBURSEMENT_SUBMISSION, ledger)
+        assert isinstance(updated["totals"]["JPY"]["amount_to_date"], int)
 
     def test_type_mismatch_against_hourly_ledger_raises(self):
         hourly_ledger = _empty_ledger(HOURLY_SUBMISSION)

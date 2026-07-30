@@ -13,9 +13,21 @@
 # PSL knows which cost centre to bill.
 project: $REIMBURSEMENT_PROJECT
 
-# The parser rejects line-item categories not in this list.
+# Line-item categories the parser accepts (case-insensitive); anything else
+# fails validation on the contractor's claim.
+#
+# Must be a YAML **list**. `allowed_categories: travel, meals` (no brackets)
+# is a single string, not a list — sync_templates.py rejects that shape rather
+# than let it become an allowlist that refuses every real category.
+#
+# To accept ANY category, delete this key entirely. An empty list is a
+# configuration error, NOT "reject everything" — the parser skips the check
+# when the list is empty, so the two readings contradict each other and
+# sync_templates.py refuses to guess.
 allowed_categories: $REIMBURSEMENT_CATEGORIES
 
 # Pinned "Running ledger — Reimbursements" issue number (auto-updated on
-# each approval). Written by onboarding / sync_templates.
+# each approval). Written by onboarding / sync_templates; must be an issue
+# number or `null` (an unsubstituted placeholder here reads as "already
+# wired" and silently skips the ledger, so it is rejected).
 ledger_issue: $REIMBURSEMENT_LEDGER_ISSUE

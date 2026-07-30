@@ -57,8 +57,8 @@ def _add_display_strings(data: dict) -> dict:
     Adds (hourly):
       - entries[].hours_display          e.g. "3.5", "5.0"
       - totals.hours_display             e.g. "12.5"
-      - totals.rate_amount_display       e.g. "50.00", "5000"   (no currency)
-      - totals.amount_amount_display     e.g. "625.00", "42500" (no currency)
+      - totals.rate_amount_display       e.g. "50.00", "5,000"   (no currency)
+      - totals.amount_amount_display     e.g. "625.00", "42,500" (no currency)
 
     Adds (milestone invoice):
       - entries[].amount_display         e.g. "77,000", "45.50"
@@ -71,8 +71,13 @@ def _add_display_strings(data: dict) -> dict:
     currency = totals.get("currency", "")
 
     def fmt_money(value: float) -> str:
+        # JPY has no minor units, so no decimals — but it *does* use thousands
+        # separators, same as AUD/USD. Keep this in lockstep with
+        # `update_ledger_issue._fmt_amount` / `notify_email._fmt_amount` so a
+        # claim's amount reads identically on the PDF, the pinned ledger issue
+        # and the fiscal-host email.
         if currency.upper() == "JPY":
-            return str(int(round(value)))
+            return f"{int(round(value)):,}"
         return f"{value:,.2f}"
 
     out = dict(data)
@@ -197,9 +202,15 @@ def _run_typst(staged_typ: Path, output_path: Path, fmt: str, ppi: Optional[int]
         if result.returncode != 0:
             sys.stderr.write(result.stdout)
             sys.stderr.write(result.stderr)
+            # Carry typst's own diagnostic in the exception, not just in the
+            # log: callers branch on *why* a render failed (a multi-page export
+            # refusal is the contractor's overflow to fix, a missing font is
+            # not), and an exit code alone can't distinguish them.
+            detail = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(
                 f"typst compile failed with exit code {result.returncode}. "
                 f"Working dir kept for inspection: {work_dir}"
+                + (f"\ntypst said: {detail}" if detail else "")
             )
     finally:
         if output_path.exists():

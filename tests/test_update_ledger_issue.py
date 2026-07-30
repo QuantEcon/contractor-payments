@@ -356,3 +356,38 @@ class TestRenderReimbursementBody:
         from scripts.update_ledger_issue import render_body
         body = render_body(_reimbursement_ledger_with(_claim()), {})
         assert "Reimbursements" in body
+
+    def test_config_project_renders_in_header(self):
+        """The config's `project` is the current funding code — the only thing
+        an empty ledger can say about the arrangement."""
+        from scripts.update_ledger_issue import render_reimbursement_body
+        body = render_reimbursement_body(
+            {"type": "reimbursement", "claims": [], "totals": {}},
+            {"project": "CHOW", "ledger_issue": 12},
+        )
+        assert "**Funding project:** `CHOW`" in body
+
+    def test_no_config_project_omits_header_line(self):
+        from scripts.update_ledger_issue import render_reimbursement_body
+        body = render_reimbursement_body(
+            {"type": "reimbursement", "claims": [], "totals": {}}, {},
+        )
+        assert "Funding project" not in body
+
+    def test_render_body_never_forwards_contract_into_config_slot(self):
+        """Regression guard for the type trap: a contract dict also carries a
+        `project` key, so dispatching it into the reimbursements-config slot
+        would render the *contract's* funding code as the reimbursement
+        arrangement's."""
+        from scripts.update_ledger_issue import render_body
+        contract = {**CONTRACT_HOURLY, "project": "WRONG-CODE"}
+        body = render_body(_reimbursement_ledger_with(_claim()), contract)
+        assert "WRONG-CODE" not in body
+        assert "Funding project" not in body
+        # ...and the config, when actually supplied, does come through.
+        body = render_body(
+            _reimbursement_ledger_with(_claim()), contract,
+            reimbursements_config={"project": "CHOW"},
+        )
+        assert "**Funding project:** `CHOW`" in body
+        assert "WRONG-CODE" not in body

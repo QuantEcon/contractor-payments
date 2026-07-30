@@ -55,7 +55,9 @@ the most recent completed period. No edits, no errors.
    preview, opens a PR with the PNG embedded inline, **closes and
    locks the originating issue** with a handoff comment linking to the
    PR (e.g. *"Submission filed — see #32..."*), and removes the
-   `submit` label if applied.
+   `submit` label if applied. The label is removed even when the run
+   fails, so re-applying it always retries; a failed run also posts a
+   comment saying what broke (see §6).
 6. Admin reviews the PR (visual PDF check via the PNG, sanity-check
    amounts/period/contract).
 7. Admin approves + merges the PR.
@@ -71,7 +73,9 @@ the most recent completed period. No edits, no errors.
      `templates/fiscal-host.yml` (which stays `true` as fail-safe).
    - Posts an audit comment on **both** the original submission issue
      and the merged PR.
-   - Applies the `processed` label to the PR.
+   - Applies the `processed` label to the PR — only when every step
+     above succeeded, so an unlabelled merged PR means "needs an
+     admin" (see §6).
    - Auto-deletes the submission branch.
 
 **Reminders.** On the 1st of each month, `period-reminders.yml` fires
@@ -370,24 +374,49 @@ closes the PR without merging.
 
 ## 6. Workflow failure mid-pipeline
 
-**Situation.** `process-approved.yml` fails on one of its seven steps.
+**Situation.** `process-approved.yml` fails on one of its pipeline steps.
 Most common causes:
 
 - SMTP outage / credential rotation (email step fails).
 - Transient `gh` API rate limit.
-- A `git push` collision (unlikely, but possible if two
-  approvals run within seconds).
+- A `git push` collision when two approvals merge within seconds of
+  each other. The commit-back step now handles this itself: on a
+  rejected push it fetches, rebases onto the new `main` and retries,
+  up to five attempts. It only gives up if the rebase *conflicts* —
+  i.e. both approvals appended to the same ledger file at the same
+  spot — and a plain "Re-run failed jobs" fixes that, because the
+  re-run appends to the settled `main`.
 
 **What happens (current behaviour).**
 
-Steps run in order: `finalize_approval` → `update_ledger` → commit →
-`update_ledger_issue` → `notify_email` → `notify_comment` → apply
+Steps run in order: locate the submission YAML → resolve the
+originating issue → `finalize_approval` → `update_ledger` → commit +
+push to `main` → `update_ledger_issue` → `notify_email` →
+`notify_comment` → superseded-PR cross-comment → apply the `processed`
 label.
 
-If step N fails, steps N+1..7 are skipped. The state at that point is
-inconsistent: e.g. if `notify_email` fails, the ledger has been
-updated and committed, the pinned issue is refreshed, but no email
-was sent and no audit comment was posted.
+If step N fails, later steps are skipped — with two deliberate
+exceptions that make the failure visible instead of silent:
+
+- **The audit comment still posts** as long as the submission was
+  located, stamped, ledgered and pushed. So an email failure yields an
+  audit comment whose email line reads `📧 Email: ⚠️ not sent — see
+  workflow logs` rather than no comment at all.
+- **A final `failure()` step posts a per-step outcome table** on the
+  merged PR and (if resolvable) the originating issue, naming the
+  failed step and linking the run log. It never reports success it
+  cannot see, and it states plainly whether the approval email went
+  out.
+
+The **`processed` label is applied only on a fully green run** — so
+"merged submission PR with no `processed` label" is exactly the list of
+runs that need an admin.
+
+The state at the failure point is still inconsistent, and that part is
+unchanged: e.g. if `notify_email` fails, the ledger has been updated
+and committed and the pinned issue is refreshed, but no email was
+sent. What changed is that you now find out on the PR and the issue,
+not only by opening the Actions tab.
 
 > **Dev note — gap: no targeted re-run path.**
 > The whole workflow is wired to fire on `pull_request.merged`. If it
@@ -412,17 +441,23 @@ was sent and no audit comment was posted.
 
 **Admin actions.**
 
-1. Inspect the failed run in the Actions UI; identify which step
-   failed.
+1. Read the failure comment the workflow posted on the merged PR: its
+   table already says which step failed, what ran before it, and
+   whether the approval email went out. Open the linked run for the
+   actual traceback.
 2. **If the failure was after the ledger commit** (i.e. ledger is
-   updated, pinned issue is refreshed, but email/comment didn't fire):
+   updated and pushed, but the email and/or the pinned issue didn't
+   fire):
    - Re-run `notify_email` and `notify_comment` locally with the
-     paths from the failed PR.
-   - Apply the `processed` label manually via `gh pr edit`.
-3. **If the failure was at or before the ledger commit**: the workflow
-   can probably be re-run from the Actions UI ("Re-run failed jobs")
-   if the underlying cause (e.g. transient API error) is gone. If
-   not, fix the cause first.
+     paths from the failed PR. Do **not** re-run the whole workflow —
+     `update_ledger` raises on the now-duplicate `submission_id`.
+   - Apply the `processed` label manually via `gh pr edit` once the
+     email is out.
+3. **If the failure was at or before the ledger commit**: nothing was
+   pushed, so "Re-run failed jobs" from the Actions UI is the right
+   move once the underlying cause (transient API error, push
+   contention, branch protection) is gone. If not, fix the cause
+   first.
 
 ### Known failure mode — bot push rejected by branch protection
 
@@ -447,6 +482,13 @@ Actions integration must be part of the ruleset source or owner
 organization". An org admin sets this up once on `QuantEcon`
 targeting `contractor-*` repos; new contractor repos inherit it
 automatically.
+
+Note the shape of the log: the commit-back step retries a rejected
+push five times (fetch + rebase between attempts, since the usual
+cause of rejection is a concurrent approval, not protection), so a
+protection rejection shows up as five identical `GH006` blocks before
+the step gives up. That is the expected output, not five separate
+faults.
 
 **Recovery if it fires:** re-run the workflow ("Re-run failed jobs")
 after removing/correcting the protection. The pipeline is
@@ -550,6 +592,14 @@ when the workflow tries to add a file that conflicts.
 > to check open PRs as well as committed state when computing the
 > `-vN` suffix. Defer until observed.
 
+**Concurrent *approvals* are a different (and now handled) case.**
+Merging two submission PRs seconds apart — routine from Phase 5, where
+one repo files timesheets, invoices and reimbursement claims against a
+shared `ledger/` — used to mean the second run's push to `main` was
+rejected and, because everything downstream was `success()`-gated, its
+approval email was silently dropped. `process-approved.yml` now
+fetches, rebases and retries the push (§6).
+
 **Admin actions.**
 
 - If it happens: close one of the two PRs (Scenario 5) and tell the
@@ -598,10 +648,13 @@ when the workflow tries to add a file that conflicts.
 
 **Email size failure.** The approval email attaches the claim PDF plus
 every receipt. Gmail rejects sends over ~25 MB; an oversized claim
-fails at SMTP *after* merge and shows up as "Email: ⚠️ not sent" in the
-audit comment (everything else — ledger, PDFs, receipts in git —
-completed). Recovery: download the approved PDF + receipts from the
-repo and forward them to PSL manually; no re-merge needed.
+fails at SMTP *after* merge. Three signals, all of them intentional:
+the audit comment reads `📧 Email: ⚠️ not sent — see workflow logs`
+(everything else — ledger, PDFs, receipts in git — completed), a
+second comment names the failed step, and the run is red with no
+`processed` label. Recovery: download the approved PDF + receipts from
+the repo, forward them to PSL manually, then apply `processed` by hand.
+No re-merge and no ledger surgery needed — see §6.
 
 **Receipts are immutable evidence.** Revisions re-fetch and re-commit
 receipts under the `-vN` claim's own directory; the original claim's
@@ -775,7 +828,7 @@ push step currently runs as `github-actions[bot]` with the auto-issued
      with:
        token: ${{ steps.engine_token.outputs.token }}
        ref: main
-       fetch-depth: 2
+       fetch-depth: 0   # must stay 0 — see the comment in the workflow
    ```
 
    ```yaml

@@ -171,6 +171,21 @@ class TestComposeMessage:
         assert "Project:" not in body
         assert "Attached: the approved invoice PDF." in body
 
+    def test_unexpected_suffix_is_generic_and_reported(self, tmp_path, capsys):
+        # fetch_receipts stages receipts under the extension implied by their
+        # magic bytes, so an unrecognised suffix means something upstream
+        # changed. Attach it as generic binary and say so — never guess a type
+        # for a file the fiscal host is about to receive.
+        msg = self._compose(tmp_path, receipts=("01-scan.tiff",))
+        attachment = list(msg.iter_attachments())[-1]
+        assert attachment.get_content_type() == "application/octet-stream"
+        assert "unexpected extension" in capsys.readouterr().err
+
+    def test_jpg_and_jpeg_both_map_to_image_jpeg(self, tmp_path):
+        msg = self._compose(tmp_path, receipts=("01-a.jpg", "02-b.jpeg"))
+        types = [a.get_content_type() for a in msg.iter_attachments()][1:]
+        assert types == ["image/jpeg", "image/jpeg"]
+
     def test_revision_marker_in_subject(self, tmp_path):
         msg = self._compose(
             tmp_path,

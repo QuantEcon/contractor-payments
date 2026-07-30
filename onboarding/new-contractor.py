@@ -40,6 +40,7 @@ from scripts.setup_labels import LABELS as WORKFLOW_LABELS, create_label  # noqa
 from scripts.update_ledger import empty_ledger  # noqa: E402
 from scripts.update_ledger_issue import render_body  # noqa: E402
 from onboarding.sync_templates import (  # noqa: E402
+    ReimbursementConfigError,
     init_reimbursement_ledger,
     open_pinned_issue,
     sync_issue_templates,
@@ -498,9 +499,13 @@ def resolve_inputs(args: argparse.Namespace) -> Inputs:
                 f"Allowed expense categories (comma-separated) "
                 f"[{default_categories}]: "
             ).strip()
+            # Fall back to the defaults when the answer yields nothing usable,
+            # not just when it's empty: `,,,` splits to zero real categories,
+            # and an empty allowed_categories list is a config error the engine
+            # refuses to guess at (see validate_reimbursements_config).
+            typed = [c.strip() for c in raw.split(",") if c.strip()]
             reimbursement_categories = (
-                [c.strip() for c in raw.split(",") if c.strip()]
-                if raw else list(DEFAULT_REIMBURSEMENT_CATEGORIES)
+                typed or list(DEFAULT_REIMBURSEMENT_CATEGORIES)
             )
         else:
             reimbursement_categories = list(DEFAULT_REIMBURSEMENT_CATEGORIES)
@@ -924,6 +929,9 @@ def execute(inputs: Inputs, *, dry_run: bool) -> Optional[str]:
     if dry_run:
         print("  [dry-run] sync issue templates (presence rule) from repo state")
     else:
+        # Raises ReimbursementConfigError on a malformed config — deliberately
+        # not caught here: `execute` returns the repo URL, so it has no way to
+        # signal failure. main() catches it and reports how to resume.
         changed = sync_issue_templates(clone_dir)
         for rel in changed:
             print(f"  synced {rel}")
@@ -1039,7 +1047,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("Aborted.")
             return 1
 
-    url = execute(inputs, dry_run=args.dry_run)
+    try:
+        url = execute(inputs, dry_run=args.dry_run)
+    except ReimbursementConfigError as exc:
+        # By this point the GitHub repo exists and has been cloned, so a raw
+        # traceback reads as "onboarding exploded" when it is really one bad
+        # field. Say what to fix and how to resume without redoing the repo.
+        clone_dir = CLONES_DIR / f"contractor-{inputs.handle}"
+        print(f"\nERROR: {exc}", file=sys.stderr)
+        print(
+            f"\nThe repo was created and cloned to {clone_dir}, but its issue "
+            f"forms were not generated. Fix the field named above in "
+            f"{clone_dir}/config/reimbursements.yml, then finish with:\n"
+            f"  python onboarding/sync_templates.py --repo-dir {clone_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.dry_run:
         print("\n[dry-run complete — no side effects performed]")
     else:

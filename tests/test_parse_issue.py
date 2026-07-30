@@ -10,6 +10,7 @@ import pytest
 from scripts.parse_issue import (
     ParseError,
     ParseResult,
+    _ATTACHMENT_URL_RE,
     _detect_delimiter,
     _parse_date,
     _parse_hours,
@@ -1038,3 +1039,81 @@ class TestReimbursementTypeDetection:
         result = parse_issue(build_reimbursement_body())
         assert result.ok, error_messages(result)
         assert not any("Contract" in m for m in error_messages(result))
+
+
+# ─── Attachment-URL allowlist (M2 hardening) ────────────────────────────────
+
+# Receipt URLs are fetched with the repo token, so the pattern is an anchored
+# allowlist: a prefix-only match let a crafted `assets/../../<path>` URL point
+# that authenticated fetch anywhere on github.com.
+class TestAttachmentUrlAllowlist:
+    # Every attachment URL shape that appears anywhere in this repo (fixtures,
+    # sibling tests, docs) plus the query-string forms GitHub emits.
+    LEGITIMATE = [
+        _RECEIPT_PNG,
+        _RECEIPT_PDF,
+        "https://github.com/user-attachments/assets/aaaabbbb-cccc-dddd-eeee-ffff00001111",
+        "https://github.com/user-attachments/assets/aaa",
+        "https://github.com/user-attachments/files/1/h.pdf",
+        "https://github.com/user-attachments/files/2/receipt.docx",
+        # GitHub turns spaces in uploaded filenames into dots.
+        "https://github.com/user-attachments/files/16062340/Screenshot.2024-06-27.at.11.00.00.AM.png",
+        # …and percent-escapes anything it cannot fold, so escapes must pass.
+        "https://github.com/user-attachments/files/12345/receipt%20scan.pdf",
+        "https://github.com/user-attachments/files/12345/facture_n%C2%B012.pdf",
+        # Legacy per-repo `/files/` form.
+        "https://github.com/QuantEcon/contractor-x/files/999/old.pdf",
+        # Image-CDN forms; the private one carries a signed `?jwt=`.
+        "https://user-images.githubusercontent.com/1234567/89012345-abcdef00-1234.png",
+        "https://private-user-images.githubusercontent.com/1234567/3012345-aa11bb22.png"
+        "?jwt=eyJhbGciOiJIUzI1NiJ9.abc-_123",
+    ]
+
+    # Dot segments, their percent-encoded twins (a `'/../' in url` check misses
+    # these — GitHub resolves them all the same), and host lookalikes.
+    TRAVERSALS = [
+        "https://github.com/user-attachments/assets/../../QuantEcon/private/raw/main/secret",
+        "https://github.com/user-attachments/assets/%2e%2e/%2e%2e/QuantEcon/private",
+        "https://github.com/user-attachments/assets/..%2f..%2fQuantEcon/private",
+        "https://github.com/user-attachments/files/1/../../../QuantEcon/private",
+        "https://github.com/user-attachments/files/1/..%2F..%2Fsecret",
+        "https://github.com/QuantEcon/x/files/1/%2E%2E/%2E%2E/secret",
+        "https://user-images.githubusercontent.com/1/../../QuantEcon/private",
+        "https://private-user-images.githubusercontent.com/1/%2e%2e/x.png?jwt=a",
+        "https://github.com/user-attachments/assets/a%5c..%5cb",
+        "https://evil.example.com/github.com/user-attachments/assets/x",
+        "https://github.com.evil.example.com/user-attachments/assets/x",
+        "https://github.com/user-attachments/other/1/x.pdf",
+        "https://github.com/user-attachments/assets/",
+    ]
+
+    def test_legitimate_urls_all_accepted(self):
+        for url in self.LEGITIMATE:
+            assert _ATTACHMENT_URL_RE.match(url), url
+
+    def test_traversals_and_lookalikes_all_rejected(self):
+        for url in self.TRAVERSALS:
+            assert not _ATTACHMENT_URL_RE.match(url), url
+
+    def test_legitimate_urls_survive_the_parser(self):
+        # Not just the regex: the whole claim must parse with these attached.
+        body = build_reimbursement_body(receipts="\n".join(
+            f"[r{i}.pdf]({url})" for i, url in enumerate(self.LEGITIMATE)
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert [r["url"] for r in result.submission["receipts"]] == self.LEGITIMATE
+        assert not result.warnings
+
+    def test_encoded_traversal_is_skipped_with_a_warning(self):
+        # A percent-encoded traversal must land in the "not a GitHub
+        # attachment" branch, not in the receipt list.
+        attack = "https://github.com/user-attachments/assets/%2e%2e/%2e%2e/QuantEcon/private"
+        body = build_reimbursement_body(receipts=(
+            f"![a.png]({_RECEIPT_PNG})\n"
+            f"[receipt.pdf]({attack})"
+        ))
+        result = parse_issue(body)
+        assert result.ok, error_messages(result)
+        assert [r["url"] for r in result.submission["receipts"]] == [_RECEIPT_PNG]
+        assert any("not a GitHub attachment" in w.message for w in result.warnings)

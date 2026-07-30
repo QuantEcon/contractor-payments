@@ -62,8 +62,14 @@ Date | Hours | Description
 
 Things to know:
 
-- **Keep the header row** (`Date | Hours | Description`). The parser uses
-  it to recognise the entries table.
+- **The header row is optional but recommended.** What identifies the
+  entries table is the **Time Entries** heading, not the header row — a
+  header row is just skipped when its columns read as labels
+  (`Date | Hours | Description`, and common renames like
+  `Day | Hours | Notes`, are all recognised). Keep the seeded row anyway:
+  it's a format reminder, and a header the parser *doesn't* recognise
+  (a translated or unusual column name) is read as a data row and
+  reported as malformed.
 - **Hours can be fractional** (`3.5`, `0.25`). The unit is hours, not
   minutes.
 - **Descriptions can contain anything**, including pipes. The parser

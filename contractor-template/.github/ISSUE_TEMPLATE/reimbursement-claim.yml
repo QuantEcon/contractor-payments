@@ -92,13 +92,19 @@ $REIMBURSEMENT_CATEGORIES_REMINDER
         Several rows may share a date (flight + hotel on the same day is
         normal). Dates outside the claim month are allowed for trips that
         span a month boundary — the admin sees a note and reviews.
-        Amounts are plain numbers (no currency symbols); the category
-        must be one of the allowed list above. The parser splits on the
+        Amounts are plain numbers (no currency symbols). If a list of
+        allowed categories is shown above, the category must be one of
+        them; if not, any category is accepted. The parser splits on the
         first three `|`, so descriptions may contain `|`.
 
-        **Keep the `Date | Amount | Category | Description` header row
-        in place** — the parser uses it to recognise this as the
-        entries table.
+        **The header row is optional but recommended.** This section's
+        **Expense Entries** heading is what marks it as the entries
+        table, not the header row — a header row is simply skipped when
+        its columns read as labels (`Date | Amount | Category |
+        Description`, and common renames, are all recognised). Keeping
+        the seeded one is still the safest choice: it's a format
+        reminder, and a header the parser doesn't recognise is read as a
+        data row and reported as malformed.
       value: |
         Date | Amount | Category | Description
         2026-06-03 | 184.50 | travel | Example entry — replace or extend with your own rows

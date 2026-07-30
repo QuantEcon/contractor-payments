@@ -119,12 +119,36 @@ def _require_env(name: str) -> str:
 
 
 # Receipt attachment MIME types by extension (fetch_receipts.py allowlist).
+# fetch_receipts canonicalises `.jpeg` to `.jpg` and so never stages one; the
+# entry stays for hand-added or legacy committed receipts.
 _RECEIPT_MIME = {
     ".pdf": ("application", "pdf"),
     ".png": ("image", "png"),
     ".jpg": ("image", "jpeg"),
     ".jpeg": ("image", "jpeg"),
 }
+
+
+def _receipt_mime(path: Path) -> tuple[str, str]:
+    """MIME type for a receipt attachment, from its extension.
+
+    Trusting the extension is sound only because `fetch_receipts` stores
+    receipts under the extension implied by their *magic bytes*, so the
+    suffix reflects the content rather than the name the contractor uploaded.
+    An unrecognised suffix is therefore unexpected: fall back to the generic
+    binary type and say so, rather than guessing (mimetypes.guess_type would
+    cheerfully label anything) — this email goes to the fiscal host, and a
+    file must never arrive labelled as something it isn't.
+    """
+    mime = _RECEIPT_MIME.get(path.suffix.lower())
+    if mime is None:
+        print(
+            f"WARNING: receipt {path.name} has an unexpected extension "
+            f"`{path.suffix}` — attaching it as application/octet-stream.",
+            file=sys.stderr,
+        )
+        return ("application", "octet-stream")
+    return mime
 
 
 def select_receipt_paths(
@@ -263,9 +287,7 @@ def compose_message(
 
     # Receipt attachments (reimbursement claims).
     for receipt_path in receipt_paths:
-        maintype, subtype = _RECEIPT_MIME.get(
-            receipt_path.suffix.lower(), ("application", "octet-stream")
-        )
+        maintype, subtype = _receipt_mime(receipt_path)
         with open(receipt_path, "rb") as f:
             msg.add_attachment(
                 f.read(),

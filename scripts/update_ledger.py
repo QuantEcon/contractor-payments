@@ -267,6 +267,13 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
     including the count. Net effect of a revision: replace one entry's
     amount with another's; counts stay the same when revising one entry
     with one entry.
+
+    Every money total is rounded to 2dp before it lands in the ledger dict,
+    because this dict is dumped straight to the committed YAML audit record:
+    without it, summing floats writes `305.21999999999997` where the pinned
+    issue (which formats on the way out) says `305.22`. Rounding here keeps
+    the stored artifact and the rendered view in agreement. `round(int, 2)`
+    returns an `int`, so zero-decimal currencies (JPY) stay integral in YAML.
     """
     active_items = [item for item in items if item.get("status") != "superseded"]
     if ledger["type"] == "hourly":
@@ -274,7 +281,7 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
         total_amount = sum(item["amount"] for item in active_items)
         ledger["totals"] = {
             "hours_to_date": round(total_hours, 2),
-            "amount_to_date": total_amount,
+            "amount_to_date": round(total_amount, 2),
             "submissions_count": len(active_items),
         }
     elif ledger["type"] == "reimbursement":
@@ -286,11 +293,13 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
             )
             bucket["amount_to_date"] += item["amount"]
             bucket["claims_count"] += 1
+        for bucket in totals.values():
+            bucket["amount_to_date"] = round(bucket["amount_to_date"], 2)
         ledger["totals"] = dict(sorted(totals.items()))
     else:
         total_amount = sum(item["amount"] for item in active_items)
         ledger["totals"] = {
-            "amount_to_date": total_amount,
+            "amount_to_date": round(total_amount, 2),
             "claims_count": len(active_items),
         }
 

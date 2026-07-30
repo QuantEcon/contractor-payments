@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from scripts import post_error_comment
 from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_submission_png
 from scripts.parse_issue import cross_check_milestone_ids
 
@@ -166,6 +167,42 @@ def format_currency_amount(amount: float, currency: str) -> float | int:
     if currency.upper() == "JPY":
         return int(round(amount))
     return round(amount, 2)
+
+
+def rounding_drift_warning(submission: dict) -> Optional[dict]:
+    """Warn when the per-line rounded amounts no longer add up to the stored
+    total, or None when they do.
+
+    The stored total is the one the parser cross-checked against the figure
+    the contractor confirmed on the issue, so it is deliberately *not*
+    re-derived from the rounded lines (see `enrich_reimbursement`). In a
+    currency with no minor units that leaves a gap when a line carries
+    sub-unit precision: 100.5 + 100.5 JPY confirms as 201, but the rows print
+    as 100 and 100. Rather than silently ship a document whose rows don't sum
+    to its total, say so on the PR body where the admin decides. Non-blocking
+    by design — the total being paid is still the confirmed one, and blocking
+    here would fail the run with no way to tell the contractor why (the
+    `/validate` path enriches through the same code).
+    """
+    totals = submission.get("totals", {})
+    stored_total = totals.get("amount")
+    currency = totals.get("currency")
+    entries = submission.get("entries", [])
+    if stored_total is None or not currency:
+        return None
+    if not entries or any("amount" not in e for e in entries):
+        # Timesheets carry hours per line, not amounts — nothing to add up.
+        return None
+    line_sum = format_currency_amount(sum(e["amount"] for e in entries), currency)
+    if line_sum == stored_total:
+        return None
+    return {"message": (
+        f"the line items add up to {line_sum} {currency} but the confirmed "
+        f"total is {stored_total} {currency} — {currency} has no minor units, "
+        f"so amounts with decimals get rounded per line. The confirmed total "
+        f"is what will be paid; re-file with whole-{currency} amounts if the "
+        f"rows should match it exactly."
+    )}
 
 
 def enrich_submission(
@@ -339,12 +376,17 @@ def enrich_reimbursement(
 
     currency = submission["totals"]["currency"]
     entries = sorted(submission["entries"], key=lambda e: e["date"])
+    # Round the total the parser already cross-checked against the Total the
+    # contractor typed on the issue — not the sum of the per-line rounded
+    # amounts. Summing the rounded lines (which is what this did) let JPY's
+    # no-minor-units rounding move the total *after* validation, so the figure
+    # stored, rendered on the PDF and emailed to the fiscal host could differ
+    # from the one the contractor confirmed. The validated total is the total
+    # that gets paid; `rounding_drift_warning` surfaces any residual gap
+    # between it and the printed rows.
+    total_amount = format_currency_amount(submission["totals"]["amount"], currency)
     for e in entries:
         e["amount"] = format_currency_amount(e["amount"], currency)
-    total_amount = format_currency_amount(
-        sum(e["amount"] for e in entries),
-        currency,
-    )
 
     if receipts_manifest:
         receipts = [
@@ -749,6 +791,71 @@ def open_pr(
         body_path.unlink(missing_ok=True)
 
 
+def update_pr_body(pr_number: int, body: str, cwd: Optional[Path] = None) -> bool:
+    """Rewrite an open PR's description. Returns True on success.
+
+    The push updates a PR's *commits*, never its body, so on the resubmit path
+    the body kept describing the first submission — stale total, stale period,
+    stale line items, stale receipt list — while the YAML and PDF underneath it
+    moved on. That body is the admin's approval decision surface, so it has to
+    track the branch.
+
+    Deliberately non-fatal: by the time this runs the submission is already
+    committed and pushed, and losing the submission over a failed `gh` call
+    would be far worse than an out-of-date description. The caller warns.
+    """
+    fd, name = tempfile.mkstemp(suffix=".md", prefix="pr-body-")
+    body_path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        result = _run(
+            ["gh", "pr", "edit", str(pr_number), "--body-file", str(body_path)],
+            cwd=cwd, check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return False
+        return True
+    finally:
+        body_path.unlink(missing_ok=True)
+
+
+def warn_stale_pr_body(pr_number: int, cwd: Optional[Path] = None) -> bool:
+    """Comment on the PR that its description is out of date. Returns True if
+    the comment landed.
+
+    The fallback for `update_pr_body` failing. The run stays green in that
+    case — the submission is committed and pushed — so the only other signal
+    is a stderr line in a workflow log nobody opens, leaving the approver
+    reading stale numbers with no indication they are stale.
+
+    Never raises: this is already the degraded path.
+    """
+    note = (
+        "> [!WARNING]\n"
+        "> **This description is out of date.** The submission was updated "
+        "and re-pushed, but refreshing this description failed.\n"
+        ">\n"
+        "> Review the committed submission YAML and the rendered PDF in "
+        "**Files changed** — those are current. The totals and line items "
+        "above may describe an earlier version of this submission."
+    )
+    result = _run(
+        ["gh", "pr", "comment", str(pr_number), "--body", note],
+        cwd=cwd, check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"WARNING: could not comment the stale-description caveat on PR "
+            f"#{pr_number} either — this log is the only record.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 def write_submission_yaml(submission: dict, repo_root: Path) -> Path:
@@ -778,6 +885,162 @@ def submission_png_path(submission: dict, repo_root: Path) -> Path:
     period = submission["period"]
     submission_id = submission["submission_id"]
     return repo_root / "generated_pdfs" / period / f"{submission_id}.png"
+
+
+# A page object in a typst-rendered PDF: `<</Type/Page/Parent ...>>`. The
+# lookahead only has to reject `/Pages` (the page-tree node, which carries
+# `/Count`); `/Type/PageLabels` and friends don't exist.
+_PDF_PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?!s)")
+
+
+def pdf_page_count(pdf_path: Path) -> Optional[int]:
+    """Best-effort page count for a typst-rendered PDF, or None if unknown.
+
+    Deliberately dependency-free — the submission workflow installs pyyaml and
+    nothing else, so pypdf isn't available where this runs. typst writes its
+    page objects as plain (uncompressed) dictionaries in both the pinned 0.13.0
+    and current releases, so counting `/Type /Page` occurrences is accurate
+    there; None is returned when the scan finds none at all, so a caller's
+    decision never rests on a structure we didn't recognise.
+    """
+    try:
+        raw = pdf_path.read_bytes()
+    except OSError:
+        return None
+    count = len(_PDF_PAGE_OBJECT.findall(raw))
+    return count or None
+
+
+# typst's message when asked to export a multi-page document to a single image.
+# Matched loosely (the wording has shifted across releases) but specifically
+# enough that an unrelated render failure is not mistaken for overflow.
+_MULTIPAGE_EXPORT_HINTS = (
+    "multiple images",
+    "page number template",
+    "cannot export multiple",
+)
+
+
+def _is_multipage_export_error(exc: BaseException) -> bool:
+    """True when a PNG render failure is typst refusing a multi-page export.
+
+    Used to keep the "your submission is too long" message off failures that
+    have nothing to do with length — a missing font or a template error would
+    otherwise be reported to the contractor as their problem while the admin
+    saw no error at all.
+    """
+    text = str(exc).lower()
+    return any(hint in text for hint in _MULTIPAGE_EXPORT_HINTS)
+
+
+def render_overflow_error(submission: dict, pages: Optional[int]) -> list[dict]:
+    """Contractor-facing error for a submission that outgrew the one-page
+    template, in parse_issue's `errors` shape.
+
+    The templates are single-page A4 by design and the PR preview is a single
+    image, so there is no rendering path for page 2: typst refuses the PNG
+    export outright. The row budget is not a fixed number — it depends on
+    description lengths and on the typst version — hence the fuzzy guidance.
+    """
+    type_label = {
+        "timesheet": "timesheet",
+        "milestone_invoice": "invoice",
+        "reimbursement": "claim",
+    }.get(submission.get("type", ""), "submission")
+    spilled = f" (it needs {pages} pages)" if pages and pages > 1 else ""
+    return [{"message": (
+        f"This {type_label} is too long for the one-page document the engine "
+        f"produces{spilled}, so it can't be rendered or filed. It has "
+        f"{len(submission.get('entries', []))} line items; roughly 25–30 fit, "
+        f"depending on how long the descriptions are. To fix: shorten the "
+        f"longest descriptions, and/or split it into more than one submission "
+        f"(for a claim, one issue per trip works well) and file them "
+        f"separately."
+    )}]
+
+
+def report_submit_error(
+    errors: list[dict],
+    issue_number: int,
+    repo_root: Path,
+    *,
+    errors_file: Optional[str] = None,
+    warnings: Optional[list[dict]] = None,
+) -> None:
+    """Surface a failure that happens *after* parsing to the contractor.
+
+    A submit-mode failure raised from this script has nowhere to go on its own:
+    the workflow's submit-error comment is gated on the parse and
+    receipt-fetch steps, and a failing step skips every step after it — so the
+    contractor gets no comment at all, moments after `/validate` told them the
+    submission was ready. Reuse the parse-error channel rather than inventing
+    a second one: same errors JSON shape, same sentinel comment, same
+    `parse-error` label, so the existing `post_error_comment clear` step tidies
+    it up when the next attempt succeeds.
+
+    Never raises — the caller is already returning non-zero, and that exit code
+    is what stops the run. A failure to comment degrades to a loud log.
+
+    Renders with `parse_failed=False`: the body parsed cleanly, so the
+    parse-error framing ("I couldn't parse this submission") would be false
+    and would send the contractor looking for a syntax error that isn't there.
+
+    On success it touches `CONTRACTOR_NOTIFIED_MARKER` so the workflow's
+    catch-all `failure()` comment stands down — otherwise the contractor gets
+    two comments, the generic one explicitly contradicting this specific one.
+    """
+    for err in errors:
+        print(f"ERROR: {err['message']}", file=sys.stderr)
+
+    if errors_file:
+        # Keep the file channel consistent with parse_issue / fetch_receipts,
+        # so anything reading it downstream sees the same failure.
+        try:
+            with open(errors_file, "w", encoding="utf-8") as f:
+                json.dump({"errors": errors, "warnings": warnings or []}, f, indent=2)
+        except OSError as exc:
+            print(f"WARNING: could not write {errors_file}: {exc}", file=sys.stderr)
+
+    repo = os.environ.get("GITHUB_REPOSITORY") or detect_repo_owner_name(repo_root)
+    if not repo:
+        print(
+            f"WARNING: no GITHUB_REPOSITORY and `gh repo view` failed — cannot "
+            f"tell issue #{issue_number} what went wrong; this log is the only "
+            f"record.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        post_error_comment.post_or_update(
+            repo, issue_number, errors, warnings or [],
+            post_error_comment.DEFAULT_LABEL,
+            parse_failed=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — already on the failure path
+        print(
+            f"WARNING: could not comment on issue #{issue_number} ({exc}) — the "
+            f"contractor has not been told; follow up manually.",
+            file=sys.stderr,
+        )
+        return
+    _mark_contractor_notified()
+
+
+# Touched by report_submit_error once the contractor has a specific comment on
+# the issue. `process-submission.yml`'s catch-all failure() step checks for it
+# and stays quiet, so the two never contradict each other.
+CONTRACTOR_NOTIFIED_MARKER = "/tmp/contractor_notified"
+
+
+def _mark_contractor_notified(
+    marker: str = CONTRACTOR_NOTIFIED_MARKER,
+) -> None:
+    try:
+        Path(marker).write_text("1", encoding="utf-8")
+    except OSError as exc:
+        # Worst case the contractor gets a second, generic comment. Not worth
+        # failing the already-failing run over.
+        print(f"WARNING: could not write {marker}: {exc}", file=sys.stderr)
 
 
 def detect_repo_owner_name(cwd: Path) -> Optional[str]:
@@ -971,6 +1234,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         for w in cross_check_milestone_ids(submission, contract):
             warnings.append({"message": w.message})
 
+    # Non-blocking: flag a total that the per-line currency rounding pulled
+    # away from the rows it's printed above (JPY sub-yen amounts only).
+    drift = rounding_drift_warning(submission)
+    if drift:
+        warnings.append(drift)
+
     # If there's an open PR for this branch, switch to the branch BEFORE
     # writing any artifacts (untracked files would conflict with the
     # branch's tracked content on checkout). Stale branches without an
@@ -1037,13 +1306,59 @@ def main(argv: Optional[list[str]] = None) -> int:
             template_dir=templates_dir,
             output_path=pdf_path,
         )
-        render_submission_png(
-            submission_path=yaml_path,
-            settings_path=settings_path,
-            template_dir=templates_dir,
-            output_path=png_path,
-            ppi=args.png_ppi,
-        )
+
+        # The templates are single-page A4 and entry rows are unbounded, so a
+        # long enough submission spills onto page 2 — at which point typst
+        # refuses to export the PNG preview at all ("cannot export multiple
+        # images without a page number template"). That used to raise here:
+        # after the artifacts were written, before the commit, with the
+        # workflow's submit-error comment already skipped — so the contractor
+        # got nothing back, having just been told "ready to submit" by
+        # `/validate`. Check the rendered page count (the exact row budget
+        # moves with the typst version and with description lengths, so it
+        # can't be a row limit) and report the overflow to them instead.
+        pages = pdf_page_count(pdf_path)
+        if pages is not None and pages > 1:
+            report_submit_error(
+                render_overflow_error(submission, pages),
+                args.issue_number, repo_root,
+                errors_file=args.errors_file, warnings=warnings,
+            )
+            return 1
+        try:
+            render_submission_png(
+                submission_path=yaml_path,
+                settings_path=settings_path,
+                template_dir=templates_dir,
+                output_path=png_path,
+                ppi=args.png_ppi,
+            )
+        except RuntimeError as exc:
+            if pages == 1:
+                # Single page, so the PNG export failed for some other reason
+                # — not the contractor's problem. Keep the loud raise.
+                raise
+            if not _is_multipage_export_error(exc):
+                # Page count was unreadable AND typst is complaining about
+                # something else — a missing font, a template bug. Blaming the
+                # contractor for "too long" would hide a real defect and leave
+                # the admin with no error, so raise. This matters more over
+                # time: if a future typst writes PDFs whose page count
+                # `pdf_page_count` can't read, `pages` is None for *every*
+                # document and this branch becomes the default path.
+                raise
+            # Page count unreadable, but typst named the multi-page export as
+            # the reason — same binary just produced the PDF from the same
+            # template, so treat it as the overflow.
+            print("PDF page count could not be determined; typst reports a "
+                  "multi-page export failure, so treating this as overflow.",
+                  file=sys.stderr)
+            report_submit_error(
+                render_overflow_error(submission, pages),
+                args.issue_number, repo_root,
+                errors_file=args.errors_file, warnings=warnings,
+            )
+            return 1
         pdf_rel = pdf_path.relative_to(repo_root).as_posix()
         png_rel = png_path.relative_to(repo_root).as_posix()
         paths_to_stage.extend([pdf_path, png_path])
@@ -1088,12 +1403,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("No content changes detected; branch left in current state.",
               file=sys.stderr)
 
-    if has_open_pr:
-        # PR already open on this branch; the push updated it in place.
-        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
-        return 0
-
-    # Fresh branch → open a new PR.
+    # Describes what this run produced — the totals, period, line items,
+    # receipt list and email-size warnings the admin approves against.
     body = render_pr_body(
         issue_number=args.issue_number,
         submitter=args.issue_author,
@@ -1104,6 +1415,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         warnings=warnings,
         receipts_manifest=receipts_manifest_data,
     )
+
+    if has_open_pr:
+        # PR already open on this branch; the push updated its commits, but
+        # GitHub never re-derives the description — so refresh it here or the
+        # admin reviews the *first* submission's numbers against the current
+        # PDF. `png_url` is already scoped to this branch (raw_url is built
+        # with `branch`), so the preview points at the image just committed.
+        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
+        if update_pr_body(open_pr_number, body, cwd=repo_root):
+            print(f"Refreshed PR #{open_pr_number} description.")
+        else:
+            # The submission is committed and pushed at this point; a failed
+            # description update must not throw that away.
+            print(
+                f"WARNING: could not refresh PR #{open_pr_number}'s description "
+                f"— it still describes an earlier submission. The pushed YAML "
+                f"and PDF are the current ones: review those, not the PR body, "
+                f"or re-run /submit to retry.",
+                file=sys.stderr,
+            )
+            # The run stays green, so a warning in the log is invisible to the
+            # person who matters. The PR body is the stated approval-decision
+            # surface on a payment path — put the caveat where the approver
+            # will actually see it.
+            warn_stale_pr_body(open_pr_number, cwd=repo_root)
+        return 0
+
+    # Fresh branch → open a new PR.
     pr_url = open_pr(
         args.issue_title, body, cwd=repo_root,
         extra_labels=[submission_type.replace("_", "-")],

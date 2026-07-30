@@ -221,9 +221,16 @@ def render_reimbursement_body(ledger: dict, reimbursements_config: dict) -> str:
     """Render a markdown body for the per-repo reimbursements ledger.
 
     Contractor-level (no contract): summary is a per-currency table since
-    claims are single-currency but the ledger spans currencies. The funding
-    project renders per claim — it can vary over time if the repo's
-    `config/reimbursements.yml` is updated between claims.
+    claims are single-currency but the ledger spans currencies. Each claim
+    records the funding project it was billed to, so that renders per row —
+    it can vary over time if the repo's `config/reimbursements.yml` is
+    updated between claims.
+
+    `reimbursements_config` is that file's contents; it supplies the
+    *current* project code for the header. That's the only thing an empty
+    ledger can say about the arrangement, which is exactly the state
+    `onboarding/sync_templates.py` renders when it first opens the pinned
+    issue. Pass `{}` if unavailable — the header line is then omitted.
     """
     totals = ledger.get("totals", {})
     claims = ledger.get("claims", [])
@@ -235,9 +242,20 @@ def render_reimbursement_body(ledger: dict, reimbursements_config: dict) -> str:
         "> Auto-updated by the approval workflow. Don't edit manually — your",
         "> changes will be overwritten on the next approval.",
         "",
+    ]
+
+    project = reimbursements_config.get("project")
+    if project:
+        lines.extend([
+            f"**Funding project:** `{project}` — current setting; each claim "
+            f"below records the code it was actually billed to.",
+            "",
+        ])
+
+    lines.extend([
         "## Summary",
         "",
-    ]
+    ])
 
     if totals:
         lines.extend([
@@ -293,17 +311,27 @@ def render_reimbursement_body(ledger: dict, reimbursements_config: dict) -> str:
     return "\n".join(lines)
 
 
-def render_body(ledger: dict, contract: dict) -> str:
-    """Pick the right renderer based on ledger.type. For reimbursement
-    ledgers the second argument is the repo's reimbursements config rather
-    than a contract."""
+def render_body(
+    ledger: dict,
+    contract: dict,
+    reimbursements_config: Optional[dict] = None,
+) -> str:
+    """Pick the right renderer based on ledger.type.
+
+    Reimbursement ledgers are contractor-level, so they take the repo's
+    `config/reimbursements.yml` (as `reimbursements_config`) rather than a
+    contract; `contract` is ignored for that type. Do NOT forward `contract`
+    into the config slot: a contract dict carries its own `project` key, so
+    the mix-up would silently render the contract's funding code as the
+    reimbursement arrangement's.
+    """
     ledger_type = ledger.get("type")
     if ledger_type == "hourly":
         return render_hourly_body(ledger, contract)
     if ledger_type == "milestone":
         return render_milestone_body(ledger, contract)
     if ledger_type == "reimbursement":
-        return render_reimbursement_body(ledger, contract)
+        return render_reimbursement_body(ledger, reimbursements_config or {})
     raise ValueError(f"Unknown ledger type `{ledger_type}`.")
 
 
@@ -351,8 +379,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="GitHub owner/name. Default: $GITHUB_REPOSITORY.")
     p.add_argument("--reimbursements", type=Path, default=None,
                    help="Path to config/reimbursements.yml (reimbursement ledgers "
-                        "only — holds the `ledger_issue` number). Default: "
-                        "config/reimbursements.yml under --repo-root.")
+                        "only — holds the funding project and the `ledger_issue` "
+                        "number). Default: config/reimbursements.yml under --repo-root.")
     p.add_argument("--dry-run", action="store_true",
                    help="Render the body to stdout instead of editing the issue. "
                         "Useful for local development without an issue number.")
