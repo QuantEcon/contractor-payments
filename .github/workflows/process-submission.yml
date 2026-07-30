@@ -95,12 +95,24 @@ jobs:
         id: engine_ref
         env:
           JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
+          # Printed only when the primary lookup fails, so a future runner or
+          # GHES version that populates these differently is diagnosable from
+          # the failed run itself rather than needing a debug commit.
+          CONTEXT_DUMP: |
+            github.job_workflow_ref = '${{ github.job_workflow_ref }}'
+            github.job_workflow_sha = '${{ github.job_workflow_sha }}'
+            github.workflow_ref     = '${{ github.workflow_ref }}'
+            github.workflow_sha     = '${{ github.workflow_sha }}'
+            github.ref              = '${{ github.ref }}'
+            github.sha              = '${{ github.sha }}'
         run: |
           if [ -z "$JOB_WORKFLOW_REF" ]; then
             echo "ERROR: github.job_workflow_ref is empty, so the engine ref" >&2
             echo "cannot be resolved. Checking out the default branch instead" >&2
             echo "would risk running scripts that do not match this pipeline," >&2
             echo "so this run stops here." >&2
+            echo "--- ref-bearing github context values, for diagnosis: ---" >&2
+            echo "$CONTEXT_DUMP" >&2
             exit 1
           fi
           # Strip the `<path>.yml@` prefix; a branch name may itself contain
