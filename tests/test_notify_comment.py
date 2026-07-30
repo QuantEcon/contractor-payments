@@ -6,6 +6,10 @@ renderer previously KeyError'd on submissions without a contract_id).
 """
 from __future__ import annotations
 
+import subprocess
+import pytest
+import scripts.notify_comment as nc
+
 from scripts.notify_comment import compose_comment
 
 
@@ -99,3 +103,84 @@ class TestComposeCommentReimbursement:
         # the regression guard for that latent KeyError.
         out = self._compose()
         assert "Reimbursement Claim approved" in out
+
+
+class TestPostCommentOnLockedIssue:
+    """Submission issues are locked when filed, and GitHub rejects comments on
+    a locked issue. That made the post-merge audit comment impossible on the
+    happy path — and since nothing gated on failure, it silently skipped the
+    `processed` label too. Found by E2E: merged PRs #32/#36 carry no
+    `processed` label and their issues have no audit comment.
+    """
+
+    LOCKED_ERR = "GraphQL: Unable to create comment because issue is locked (addComment)"
+
+    def _fake_gh(self, calls, *, comment_fails_until_unlocked=True,
+                 unlock_rc=0, relock_rc=0):
+        def run(cmd, **kwargs):
+            calls.append(cmd[:3])
+            verb = cmd[2]
+            if verb == "comment":
+                locked = comment_fails_until_unlocked and "unlock" not in [
+                    c[2] for c in calls[:-1]
+                ]
+                if locked:
+                    return subprocess.CompletedProcess(cmd, 1, "", self.LOCKED_ERR)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if verb == "unlock":
+                return subprocess.CompletedProcess(cmd, unlock_rc, "", "nope")
+            if verb == "lock":
+                return subprocess.CompletedProcess(cmd, relock_rc, "", "nope")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return run
+
+    def test_unlocks_comments_then_relocks(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(subprocess, "run", self._fake_gh(calls))
+        nc.post_comment(39, "audit body", repo="Q/r")
+        assert [c[2] for c in calls] == ["comment", "unlock", "comment", "lock"]
+
+    def test_relocks_even_when_the_retry_fails(self, monkeypatch):
+        """Leaving a submission issue unlocked is worse than a missing
+        comment, so the re-lock is in a finally."""
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd[:3])
+            if cmd[2] == "comment":
+                return subprocess.CompletedProcess(cmd, 1, "", self.LOCKED_ERR)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        with pytest.raises(RuntimeError):
+            nc.post_comment(39, "audit body", repo="Q/r")
+        assert [c[2] for c in calls] == ["comment", "unlock", "comment", "lock"]
+
+    def test_no_unlock_attempted_when_the_issue_is_not_locked(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            subprocess, "run",
+            self._fake_gh(calls, comment_fails_until_unlocked=False),
+        )
+        nc.post_comment(39, "audit body", repo="Q/r")
+        assert [c[2] for c in calls] == ["comment"]
+
+    def test_unrelated_failure_still_raises_without_unlocking(self, monkeypatch):
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd[:3])
+            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 403: forbidden")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        with pytest.raises(RuntimeError, match="403"):
+            nc.post_comment(39, "audit body", repo="Q/r")
+        assert [c[2] for c in calls] == ["comment"]
+
+    def test_unlock_failure_is_reported_clearly(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            subprocess, "run", self._fake_gh(calls, unlock_rc=1),
+        )
+        with pytest.raises(RuntimeError, match="unlock` failed"):
+            nc.post_comment(39, "audit body", repo="Q/r")
