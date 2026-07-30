@@ -195,12 +195,14 @@ class TestEngineCheckoutIsPinnedToTheWorkflow:
     the scripts don't have — which is how it surfaced on the test repo:
     `parse_issue.py: error: unrecognized arguments: --reimbursements`.
 
-    `github.job_workflow_sha` is the reusable workflow file's own commit, so
-    pinning to it makes the pipeline definition and the code it drives
-    inseparable.
+    The ref is derived from `github.job_workflow_ref` (this workflow's own
+    `path@ref`) in a step that runs *before* the checkout. Note
+    `github.job_workflow_sha` is NOT usable — it reads as empty in the github
+    context, confirmed on a real run, which is why the resolve step fails hard
+    instead of falling back to the default branch.
     """
 
-    PIN = "${{ github.job_workflow_sha }}"
+    PIN = "${{ steps.engine_ref.outputs.ref }}"
 
     def _engine_checkouts(self, path):
         return [
@@ -240,7 +242,12 @@ class TestEngineCheckoutIsPinnedToTheWorkflow:
         if path.name == "send-reminders.yml":
             pytest.skip("read-only reminder pass; no artifacts written")
         runs = " ".join(s.get("run") or "" for s in _steps(workflow))
-        assert "rev-parse HEAD" in runs and "EXPECTED_SHA" in runs, (
-            f"{path.name}: pins the engine checkout but never verifies it "
-            f"resolved, so an empty job_workflow_sha would pass silently."
+        assert "job_workflow_ref is empty" in runs or "JOB_WORKFLOW_REF" in runs, (
+            f"{path.name}: pins the engine checkout but never checks that the "
+            f"ref resolved, so an empty job_workflow_ref would silently become "
+            f"a default-branch checkout."
+        )
+        assert "rev-parse HEAD" in runs, (
+            f"{path.name}: does not report which engine commit it ran, so a "
+            f"surprising outcome cannot be tied back to a commit."
         )

@@ -73,37 +73,42 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      # Run the scripts from this workflow's own commit — see the note in
+      # process-submission.yml. It matters more here: this is the workflow that
+      # stamps approval, writes the ledger and emails the fiscal host, so the
+      # scripts doing that must be the ones reviewed alongside this YAML.
+      # Fatal rather than best-effort: guessing is not an acceptable degraded
+      # mode on the payment path.
+      - name: Resolve the engine ref (this workflow's own commit)
+        id: engine_ref
+        env:
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
+        run: |
+          if [ -z "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: github.job_workflow_ref is empty, so the engine ref" >&2
+            echo "cannot be resolved. Refusing to fall back to the default" >&2
+            echo "branch on the approval path." >&2
+            exit 1
+          fi
+          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
+          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
+            exit 1
+          fi
+          echo "engine ref: ${ENGINE_REF} (from ${JOB_WORKFLOW_REF})"
+          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
+
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          # Same commit as this workflow file — see the note in
-          # process-submission.yml. Matters more here: this is the workflow
-          # that stamps approval, writes the ledger and emails the fiscal
-          # host, so the scripts doing that must be the ones reviewed
-          # alongside this YAML.
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.engine_ref.outputs.ref }}
           path: engine
 
-      - name: Verify the engine checkout matches this workflow
-        env:
-          EXPECTED_SHA: ${{ github.job_workflow_sha }}
+      - name: Report which engine commit is running
         run: |
-          # See process-submission.yml. Fatal rather than best-effort: this
-          # workflow emails the fiscal host, so running scripts from an
-          # unknown commit is not an acceptable degraded mode.
-          if [ -z "$EXPECTED_SHA" ]; then
-            echo "ERROR: github.job_workflow_sha is empty, so the engine" >&2
-            echo "checkout silently fell back to the default branch." >&2
-            exit 1
-          fi
-          ACTUAL_SHA=$(git -C engine rev-parse HEAD)
-          echo "engine scripts at ${ACTUAL_SHA} (workflow ${EXPECTED_SHA})"
-          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo "ERROR: engine checkout is ${ACTUAL_SHA} but this workflow is" >&2
-            echo "${EXPECTED_SHA}." >&2
-            exit 1
-          fi
+          echo "engine scripts at $(git -C engine rev-parse HEAD)"
+          echo "  (ref ${{ steps.engine_ref.outputs.ref }})"
 
       - name: Set up Python
         uses: actions/setup-python@v5

@@ -29,13 +29,31 @@ jobs:
       - name: Check out the contractor repo
         uses: actions/checkout@v4
 
+      # Run this workflow's own engine commit — see the note in
+      # process-submission.yml.
+      - name: Resolve the engine ref (this workflow's own commit)
+        id: engine_ref
+        env:
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
+        run: |
+          if [ -z "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: github.job_workflow_ref is empty; cannot resolve the" >&2
+            echo "engine ref." >&2
+            exit 1
+          fi
+          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
+          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
+            exit 1
+          fi
+          echo "engine ref: ${ENGINE_REF}"
+          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
+
       - name: Check out the engine repo
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          # Same commit as this workflow file — see the note in
-          # process-submission.yml.
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.engine_ref.outputs.ref }}
           path: engine
 
       - name: Set up Python

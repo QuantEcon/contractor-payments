@@ -78,42 +78,54 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Resolve which engine commit to run, BEFORE checking it out.
+      #
+      # `actions/checkout` with no `ref:` takes the engine's default branch, so
+      # a caller pinned to `@some-branch` got that branch's workflow YAML
+      # driving `main`'s scripts. The mismatch is invisible until the YAML
+      # passes a flag the scripts don't have — which is how it surfaced:
+      # `parse_issue.py: error: unrecognized arguments: --reimbursements`.
+      #
+      # `github.job_workflow_ref` is this reusable workflow's own path@ref, e.g.
+      # `QuantEcon/contractor-payments/.github/workflows/process-submission.yml@refs/heads/main`.
+      # (`github.job_workflow_sha` looks like the obvious choice but is empty in
+      # the github context — verified on a real run, hence the hard failure
+      # below rather than a silent fallback.)
+      - name: Resolve the engine ref (this workflow's own commit)
+        id: engine_ref
+        env:
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
+        run: |
+          if [ -z "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: github.job_workflow_ref is empty, so the engine ref" >&2
+            echo "cannot be resolved. Checking out the default branch instead" >&2
+            echo "would risk running scripts that do not match this pipeline," >&2
+            echo "so this run stops here." >&2
+            exit 1
+          fi
+          # Strip the `<path>.yml@` prefix; a branch name may itself contain
+          # `@`, so anchor on the filename rather than the last `@`.
+          ENGINE_REF="${JOB_WORKFLOW_REF#*.yml@}"
+          if [ -z "$ENGINE_REF" ] || [ "$ENGINE_REF" = "$JOB_WORKFLOW_REF" ]; then
+            echo "ERROR: could not parse a ref out of '${JOB_WORKFLOW_REF}'." >&2
+            exit 1
+          fi
+          echo "engine ref: ${ENGINE_REF} (from ${JOB_WORKFLOW_REF})"
+          echo "ref=${ENGINE_REF}" >> "$GITHUB_OUTPUT"
+
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
-          # Pin the scripts to the same commit as THIS workflow file.
-          # Without a ref, checkout takes the engine's default branch, so a
-          # caller pinned to `@some-branch` got that branch's workflow YAML
-          # driving `main`'s scripts. That mismatch is invisible until the
-          # YAML passes a flag the scripts don't have yet — which is exactly
-          # how it surfaced: `parse_issue.py: error: unrecognized arguments:
-          # --reimbursements`. `job_workflow_sha` is the reusable workflow's
-          # own commit, so the two can no longer drift.
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.engine_ref.outputs.ref }}
           path: engine
 
-      - name: Verify the engine checkout matches this workflow
-        env:
-          EXPECTED_SHA: ${{ github.job_workflow_sha }}
+      - name: Report which engine commit is running
         run: |
-          # An empty `ref:` makes checkout silently take the default branch,
-          # which is the very failure this pin exists to prevent — so treat an
-          # unavailable job_workflow_sha as fatal rather than as "use main".
-          if [ -z "$EXPECTED_SHA" ]; then
-            echo "ERROR: github.job_workflow_sha is empty, so the engine" >&2
-            echo "checkout above silently fell back to the default branch." >&2
-            echo "The scripts running may not match this workflow." >&2
-            exit 1
-          fi
-          ACTUAL_SHA=$(git -C engine rev-parse HEAD)
-          echo "engine scripts at ${ACTUAL_SHA} (workflow ${EXPECTED_SHA})"
-          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo "ERROR: engine checkout is ${ACTUAL_SHA} but this workflow is" >&2
-            echo "${EXPECTED_SHA}. Refusing to run scripts from a different" >&2
-            echo "commit than the pipeline definition." >&2
-            exit 1
-          fi
+          # Traceability: every run states the exact scripts it used, so a
+          # surprising outcome can be tied to a commit without guesswork.
+          echo "engine scripts at $(git -C engine rev-parse HEAD)"
+          echo "  (ref ${{ steps.engine_ref.outputs.ref }})"
 
       - name: Set up Python
         uses: actions/setup-python@v5
