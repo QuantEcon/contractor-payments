@@ -228,18 +228,23 @@ def _recompute_totals(ledger: dict, items: list[dict]) -> None:
     with one entry.
     """
     active_items = [item for item in items if item.get("status") != "superseded"]
+    # Round the money as well as the hours. Summing floats leaves artefacts
+    # like `305.21999999999997` in the committed ledger — and because the
+    # display paths format on the way out, the stored audit record and every
+    # surface that shows it disagree. `round` on an int is a no-op, so JPY
+    # ledgers are unaffected.
     if ledger["type"] == "hourly":
         total_hours = sum(item["hours"] for item in active_items)
         total_amount = sum(item["amount"] for item in active_items)
         ledger["totals"] = {
             "hours_to_date": round(total_hours, 2),
-            "amount_to_date": total_amount,
+            "amount_to_date": round(total_amount, 2),
             "submissions_count": len(active_items),
         }
     else:
         total_amount = sum(item["amount"] for item in active_items)
         ledger["totals"] = {
-            "amount_to_date": total_amount,
+            "amount_to_date": round(total_amount, 2),
             "claims_count": len(active_items),
         }
 

@@ -78,15 +78,37 @@ def mark_superseded_yaml(
 ) -> Path:
     """Locate the superseded submission's YAML and stamp it as superseded.
 
-    Returns the path that was updated. Raises FileNotFoundError if the
-    YAML can't be found — caller decides whether to treat that as fatal
+    `period` is the *revision's* period and is only a hint: it is where the
+    predecessor usually lives, but a revision that also corrects the period
+    (`2026-05` claimed, revised to `2026-06`) leaves the predecessor under the
+    old one. Look there first, then fall back to scanning every period
+    directory for the id — assuming the revision's period raised
+    FileNotFoundError mid-pipeline, which aborted the ledger update, the
+    approval email and the audit comment while leaving the revision already
+    stamped `approved`.
+
+    Returns the path that was updated. Raises FileNotFoundError if the YAML
+    can't be found anywhere — caller decides whether to treat that as fatal
     (it indicates the revision workflow is operating on inconsistent state).
     """
-    path = repo_root / "submissions" / period / f"{superseded_id}.yml"
+    filename = f"{superseded_id}.yml"
+    path = repo_root / "submissions" / period / filename
+    if not path.exists():
+        candidates = sorted((repo_root / "submissions").glob(f"*/{filename}"))
+        if len(candidates) > 1:
+            raise FileNotFoundError(
+                f"Cannot mark `{superseded_id}` as superseded: ambiguous — "
+                f"found in {len(candidates)} periods "
+                f"({', '.join(c.parent.name for c in candidates)})."
+            )
+        if candidates:
+            path = candidates[0]
     if not path.exists():
         raise FileNotFoundError(
-            f"Cannot mark `{superseded_id}` as superseded: "
-            f"YAML not found at {path}. Workflow state inconsistent."
+            f"Cannot mark `{superseded_id}` as superseded: YAML not found "
+            f"under {repo_root / 'submissions'} (looked in period "
+            f"`{period}` and every other period directory). "
+            f"Workflow state inconsistent."
         )
     with open(path, encoding="utf-8") as f:
         previous = yaml.safe_load(f)

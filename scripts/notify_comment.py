@@ -140,11 +140,34 @@ def compose_comment(
     return "\n".join(lines) + "\n"
 
 
+_LOCKED_MARKER = "issue is locked"
+
+
+def _gh_issue(verb: str, target_number: int, repo: Optional[str],
+              *extra: str) -> subprocess.CompletedProcess:
+    cmd = ["gh", "issue", verb, str(target_number), *extra]
+    if repo:
+        cmd.extend(["--repo", repo])
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
 def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -> None:
     """Post a new comment on the issue or PR via `gh issue comment --body-file`.
 
     Works for both issues and PRs because they share GitHub's issue
     numbering and the issue-comment endpoint accepts either.
+
+    Submission issues are *locked* when they are filed, and GitHub rejects
+    comments on a locked issue outright:
+
+        GraphQL: Unable to create comment because issue is locked (addComment)
+
+    That made this audit comment — the record that the submission was merged,
+    ledgered and emailed — impossible to post on the normal happy path, and
+    because nothing gated on failure it also silently skipped the `processed`
+    label on every affected submission. So on a lock rejection: unlock,
+    comment, re-lock. The lock is restored in a `finally`, because leaving a
+    submission issue unlocked is a worse outcome than a missing comment.
     """
     repo = repo or os.environ.get("GITHUB_REPOSITORY")
     fd, path = tempfile.mkstemp(suffix=".md", prefix="approval-comment-")
@@ -152,15 +175,42 @@ def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
-        cmd = ["gh", "issue", "comment", str(target_number),
-               "--body-file", str(body_path)]
-        if repo:
-            cmd.extend(["--repo", repo])
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
+        result = _gh_issue("comment", target_number, repo,
+                           "--body-file", str(body_path))
+        if result.returncode == 0:
+            return
+
+        if _LOCKED_MARKER not in (result.stderr or "").lower():
             raise RuntimeError(
-                f"gh issue comment failed (exit {result.returncode}). stderr:\n{result.stderr}"
+                f"gh issue comment failed (exit {result.returncode}). "
+                f"stderr:\n{result.stderr}"
             )
+
+        print(f"Issue #{target_number} is locked; unlocking to post the audit "
+              f"comment, then re-locking.", file=sys.stderr)
+        unlock = _gh_issue("unlock", target_number, repo)
+        if unlock.returncode != 0:
+            raise RuntimeError(
+                f"issue #{target_number} is locked and `gh issue unlock` failed "
+                f"(exit {unlock.returncode}), so the audit comment cannot be "
+                f"posted. stderr:\n{unlock.stderr}"
+            )
+        try:
+            retry = _gh_issue("comment", target_number, repo,
+                              "--body-file", str(body_path))
+            if retry.returncode != 0:
+                raise RuntimeError(
+                    f"gh issue comment failed after unlocking (exit "
+                    f"{retry.returncode}). stderr:\n{retry.stderr}"
+                )
+        finally:
+            relock = _gh_issue("lock", target_number, repo)
+            if relock.returncode != 0:
+                print(f"WARNING: could not re-lock issue #{target_number} "
+                      f"({relock.stderr.strip() or 'gh failed'}). Re-lock it by "
+                      f"hand: gh issue lock {target_number}"
+                      + (f" --repo {repo}" if repo else ""),
+                      file=sys.stderr)
     finally:
         body_path.unlink(missing_ok=True)
 

@@ -38,6 +38,17 @@ on:
         required: true
         type: string
 
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line, or the
+          pipeline definition and the code it drives come from different
+          commits. Optional, defaulting to 'main': a caller that pins `@main`
+          and omits this gets exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
+
 jobs:
   process:
     runs-on: ubuntu-latest
@@ -53,10 +64,23 @@ jobs:
           fetch-depth: 2  # need the merge commit's parent for diff-tree
           ref: main
 
+      # Run the scripts from the same engine commit as this workflow file.
+      #
+      # `actions/checkout` with no `ref:` takes the engine's default branch, so
+      # a caller pinned to `@some-branch` got that branch's workflow YAML
+      # driving `main`'s scripts. The mismatch stays invisible until the YAML
+      # passes a flag the scripts do not have.
+      #
+      # The ref has to come from the caller: there is no context value for it.
+      # `github.job_workflow_ref` and `github.job_workflow_sha` both read as
+      # EMPTY here (verified on real runs), and `github.workflow_ref` /
+      # `github.workflow_sha` describe the *calling* workflow in the contractor
+      # repo, not this one.
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Set up Python
@@ -88,15 +112,30 @@ jobs:
           # Files added/changed by the merge — diff against the first parent
           # (i.e. main's HEAD before the merge). `git diff-tree` on a merge
           # commit is silent by default, hence the explicit parent compare.
-          SUBMISSION_FILE=$(git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" \
-            | grep -E '^submissions/.*\.yml$' \
-            | head -1)
-          if [ -z "$SUBMISSION_FILE" ]; then
+          SUBMISSION_FILES=$(git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" \
+            | grep -E '^submissions/.*\.yml$' || true)
+          if [ -z "$SUBMISSION_FILES" ]; then
             echo "ERROR: No submissions/*.yml found in merge commit $MERGE_SHA" >&2
             echo "--- All files changed by the merge: ---" >&2
             git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA" >&2 || true
             exit 1
           fi
+          # Refuse to guess. A merge carrying more than one submission means
+          # the branch accumulated an abandoned one (e.g. the period was
+          # corrected before merge), and the previous `head -1` silently
+          # approved whichever path sorted first — for a forward period
+          # correction, the abandoned one. Fail loudly instead: nothing is
+          # stamped, ledgered or emailed until an admin resolves it.
+          SUBMISSION_COUNT=$(printf '%s\n' "$SUBMISSION_FILES" | wc -l | tr -d ' ')
+          if [ "$SUBMISSION_COUNT" -gt 1 ]; then
+            echo "ERROR: merge $MERGE_SHA carries $SUBMISSION_COUNT submission files;" >&2
+            echo "refusing to guess which one was approved." >&2
+            printf '%s\n' "$SUBMISSION_FILES" >&2
+            echo "Fix: keep one submission per PR — revert the merge, drop the" >&2
+            echo "abandoned YAML (plus its generated_pdfs/ entry), and re-merge." >&2
+            exit 1
+          fi
+          SUBMISSION_FILE="$SUBMISSION_FILES"
           echo "submission_file=$SUBMISSION_FILE" >> "$GITHUB_OUTPUT"
           echo "Submission file: $SUBMISSION_FILE"
 
@@ -123,6 +162,7 @@ jobs:
           echo "Original issue: #$ISSUE_NUMBER"
 
       - name: Stamp approval + re-render PDF/PNG
+        id: stamp
         env:
           PYTHONPATH: engine
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -134,6 +174,7 @@ jobs:
             --approver "${{ inputs.merged_by }}"
 
       - name: Append to ledger YAML
+        id: update_ledger
         env:
           PYTHONPATH: engine
         run: |
@@ -149,11 +190,46 @@ jobs:
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "Process approved submission from PR #${{ inputs.pr_number }} [skip ci]"
-            git push origin main
+            # Two approvals merging close together both push to main. Without
+            # a retry the loser is simply rejected — and because nothing
+            # downstream is failure-gated that used to silently cost the
+            # email, the audit comment and the label.
+            PUSHED=false
+            for ATTEMPT in 1 2 3 4 5; do
+              if git push origin HEAD:main; then
+                PUSHED=true
+                echo "Pushed to main on attempt ${ATTEMPT}."
+                break
+              fi
+              echo "Push rejected (attempt ${ATTEMPT}/5) — another approval likely landed first."
+              git fetch origin main
+              if ! git rebase FETCH_HEAD; then
+                git rebase --abort || true
+                echo "ERROR: rebase onto the updated main conflicted." >&2
+                echo "Another approval touched the same ledger lines. Nothing has been" >&2
+                echo "pushed and no email was sent; the ledger on main still has only" >&2
+                echo "the other approval's entry." >&2
+                echo "Fix: 'Re-run failed jobs' — the re-run checks out the settled main" >&2
+                echo "and appends this submission after the other entry, which replays" >&2
+                echo "cleanly." >&2
+                exit 1
+              fi
+              # No point backing off after the final attempt.
+              if [ "$ATTEMPT" -lt 5 ]; then
+                sleep $((ATTEMPT * 3))
+              fi
+            done
+            if [ "$PUSHED" != "true" ]; then
+              echo "ERROR: could not push to main after 5 attempts (persistent" >&2
+              echo "contention, or a rejected push such as branch protection)." >&2
+              echo "Nothing downstream ran: no email, no audit comment, no label." >&2
+              exit 1
+            fi
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update pinned ledger issue
+        id: ledger_issue
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -163,6 +239,7 @@ jobs:
             --repo "${{ github.repository }}"
 
       - name: Send approval email
+        id: email
         env:
           PYTHONPATH: engine
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -182,6 +259,17 @@ jobs:
             --output-summary /tmp/email_summary.json
 
       - name: Post audit comment on the original issue
+        id: audit_comment
+        # Not implicit-success(): this comment asserts the submission was
+        # located, stamped, ledgered and pushed. When those hold it should
+        # post even if a LATER step failed — an SMTP failure then yields
+        # the comment reading "Email: not sent" instead of silence.
+        if: >-
+          ${{ !cancelled()
+          && steps.find_submission.outcome == 'success'
+          && steps.stamp.outcome == 'success'
+          && steps.update_ledger.outcome == 'success'
+          && steps.commit_back.outcome == 'success' }}
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -231,8 +319,79 @@ jobs:
             "**Superseded by #${{ inputs.pr_number }}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
 
       - name: Apply `processed` label to the merged PR
+        id: label
+        # Explicit rather than implicit so a future `continue-on-error`
+        # cannot quietly make a failed run look processed. The runbook
+        # treats this label as "done"; a failed run must not wear it.
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr edit "${{ inputs.pr_number }}" --add-label "processed" \
             --repo "${{ github.repository }}"
+
+      # ─── Failure reporting ───────────────────────────────────────────────
+      # Every step above carries GitHub's implicit success(), so before this
+      # existed a mid-pipeline failure silently skipped the ledger, the email,
+      # the audit comment and the label, and the only signal was a red run
+      # nobody was watching. This says what did and did not happen, and is
+      # explicit that the `processed` label was withheld on purpose.
+      - name: Report pipeline failure on the PR and issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          O_FIND: ${{ steps.find_submission.outcome }}
+          O_STAMP: ${{ steps.stamp.outcome }}
+          O_LEDGER: ${{ steps.update_ledger.outcome }}
+          O_COMMIT: ${{ steps.commit_back.outcome }}
+          O_ISSUE: ${{ steps.ledger_issue.outcome }}
+          O_EMAIL: ${{ steps.email.outcome }}
+          O_AUDIT: ${{ steps.audit_comment.outcome }}
+        run: |
+          row() {
+            case "$2" in
+              success) MARK="✅ completed" ;;
+              failure) MARK="❌ **FAILED**" ;;
+              skipped|"") MARK="⏭️ did not run" ;;
+              *) MARK="$2" ;;
+            esac
+            printf '| %s | %s |\n' "$1" "$MARK"
+          }
+
+          # The email is the outward-facing consequence, so state it plainly:
+          # recovery differs entirely depending on whether the fiscal host has
+          # already been contacted.
+          if [ "$O_EMAIL" = "success" ]; then
+            EMAIL_LINE='The approval email **was sent** — do not re-send it during recovery.'
+          else
+            EMAIL_LINE='**No approval email was sent.** The fiscal host has not been contacted for this submission.'
+          fi
+
+          {
+            printf '> [!CAUTION]\n'
+            printf '> **The approval pipeline failed part-way through.**\n\n'
+            printf '| Step | Outcome |\n|---|---|\n'
+            row "1. Find submission"      "$O_FIND"
+            row "2. Stamp approval"       "$O_STAMP"
+            row "3. Append to ledger"     "$O_LEDGER"
+            row "4. Commit back to main"  "$O_COMMIT"
+            row "5. Pinned ledger issue"  "$O_ISSUE"
+            row "6. Approval email"       "$O_EMAIL"
+            row "7. Audit comment"        "$O_AUDIT"
+            printf '\n%s\n\n' "$EMAIL_LINE"
+            printf 'Run log: %s\n\n' "$RUN_URL"
+            printf 'The `processed` label was deliberately not applied, so this PR stays visible as unfinished.\n'
+          } > /tmp/failure_comment.md
+
+          # Post to both surfaces; a comment failure must not hide the original
+          # failure, so each is tolerated individually (the job is already red).
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/failure_comment.md \
+            || echo "WARN: could not post failure comment on PR #${PR_NUMBER}."
+          if [ -n "$ISSUE_NUMBER" ] && [ "$ISSUE_NUMBER" != "$PR_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file /tmp/failure_comment.md \
+              || echo "WARN: could not post failure comment on issue #${ISSUE_NUMBER} (locked?)."
+          fi

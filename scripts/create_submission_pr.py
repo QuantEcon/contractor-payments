@@ -412,6 +412,66 @@ def checkout_existing_branch(branch: str, cwd: Optional[Path] = None) -> None:
     _run(["git", "checkout", branch], cwd=cwd)
 
 
+# Directories the engine owns outright on a submission branch. Everything
+# under them for a given issue is generated, so a resubmit is free to
+# replace the previous run's output wholesale.
+_ARTIFACT_DIRS = ("submissions", "generated_pdfs")
+
+
+def purge_branch_artifacts(
+    base_ref: str,
+    cwd: Optional[Path] = None,
+    *,
+    dirs: tuple[str, ...] = _ARTIFACT_DIRS,
+) -> list[Path]:
+    """Delete every engine artifact this branch added on top of `base_ref`.
+
+    Called on the update path (open PR, same issue re-submitted) after the
+    branch is checked out, before the new artifacts are written. Without it
+    a resubmit only ever *adds*, because `stage_and_commit` is handed just
+    the paths it wrote this run. The damaging case is a corrected period: the
+    run writes a *second* submission YAML, both land on the branch, and
+    `process-approved.yml` then approves whichever one sorts first — which for
+    a forward correction is the claim the contractor abandoned.
+
+    Scoped to what the branch itself contributed (`base_ref...HEAD`) so
+    artifacts already merged on the base branch — the original behind a `-vN`
+    revision, say — are left alone. `dirs` narrows it further: only purge what
+    this run will regenerate, so `--skip-pdf` keeps the committed PDF rather
+    than dropping it. Returns the deleted paths so the caller can stage the
+    removals.
+    """
+    result = _run(
+        ["git", "diff", "--name-only", "--diff-filter=AM",
+         f"{base_ref}...HEAD", "--", *dirs],
+        cwd=cwd,
+    )
+    root = Path(cwd) if cwd else Path(".")
+    removed: list[Path] = []
+    for rel in result.stdout.split("\n"):
+        rel = rel.strip()
+        if not rel:
+            continue
+        path = root / rel
+        if path.is_file():
+            path.unlink()
+            removed.append(path)
+
+    # Prune the period directories the deletions just emptied. Git does not
+    # track empty directories, so this is tidiness rather than correctness —
+    # but it keeps the working tree a faithful picture of the commit.
+    artifact_roots = {root / d for d in dirs}
+    for path in removed:
+        parent = path.parent
+        while parent not in artifact_roots and parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # not empty, or gone already
+            parent = parent.parent
+    return removed
+
+
 def stage_and_commit(
     paths: list[Path],
     issue_number: int,
@@ -426,9 +486,14 @@ def stage_and_commit(
     changes (no-op — possible when re-running on an existing branch
     where the regenerated artifacts are identical to what's already
     committed). Callers should treat False as "nothing to push".
+
+    Staged with `git add --all -- <path>` so that *removals* are recorded
+    too: on the update path `purge_branch_artifacts` deletes the previous
+    run's output, and a plain `git add <path>` of a vanished file leaves the
+    deletion unstaged — the branch would then keep both copies.
     """
-    for p in paths:
-        _run(["git", "add", str(p)], cwd=cwd)
+    if paths:
+        _run(["git", "add", "--all", "--", *(str(p) for p in paths)], cwd=cwd)
     # Has anything been staged? `git diff --cached --quiet` returns 0
     # when there are no staged diffs, non-zero otherwise.
     result = _run(["git", "diff", "--cached", "--quiet"], cwd=cwd, check=False)
@@ -536,6 +601,70 @@ def raw_url(owner_name: str, branch: str, path_in_repo: str) -> str:
     the repo, which is the case for anyone reviewing the PR — so markdown
     image embeds in PR bodies resolve correctly."""
     return f"https://github.com/{owner_name}/raw/{branch}/{path_in_repo}"
+
+
+def update_pr_body(pr_number: int, body: str, cwd: Optional[Path] = None) -> bool:
+    """Rewrite an open PR's description. Returns True on success.
+
+    The push updates a PR's *commits*, never its body, so on the resubmit path
+    the body kept describing the first submission — stale total, stale period,
+    stale line items — while the YAML and PDF underneath it moved on. That body is the admin's approval decision surface, so it has to
+    track the branch.
+
+    Deliberately non-fatal: by the time this runs the submission is already
+    committed and pushed, and losing the submission over a failed `gh` call
+    would be far worse than an out-of-date description. The caller warns.
+    """
+    fd, name = tempfile.mkstemp(suffix=".md", prefix="pr-body-")
+    body_path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        result = _run(
+            ["gh", "pr", "edit", str(pr_number), "--body-file", str(body_path)],
+            cwd=cwd, check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return False
+        return True
+    finally:
+        body_path.unlink(missing_ok=True)
+
+
+def warn_stale_pr_body(pr_number: int, cwd: Optional[Path] = None) -> bool:
+    """Comment on the PR that its description is out of date. Returns True if
+    the comment landed.
+
+    The fallback for `update_pr_body` failing. The run stays green in that
+    case — the submission is committed and pushed — so the only other signal
+    is a stderr line in a workflow log nobody opens, leaving the approver
+    reading stale numbers with no indication they are stale.
+
+    Never raises: this is already the degraded path.
+    """
+    note = (
+        "> [!WARNING]\n"
+        "> **This description is out of date.** The submission was updated "
+        "and re-pushed, but refreshing this description failed.\n"
+        ">\n"
+        "> Review the committed submission YAML and the rendered PDF in "
+        "**Files changed** — those are current. The totals and line items "
+        "above may describe an earlier version of this submission."
+    )
+    result = _run(
+        ["gh", "pr", "comment", str(pr_number), "--body", note],
+        cwd=cwd, check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"WARNING: could not comment the stale-description caveat on PR "
+            f"#{pr_number} either — this log is the only record.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def load_contract(repo_root: Path, contract_id: str) -> dict:
@@ -675,8 +804,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     # writing any artifacts (untracked files would conflict with the
     # branch's tracked content on checkout). Stale branches without an
     # open PR are force-pushed past — they don't need a checkout.
+    purged: list[Path] = []
     if has_open_pr:
+        # Capture the default-branch tip we were checked out on before
+        # switching, so the purge below can tell "added by this branch"
+        # from "already merged on the base branch".
+        base_ref = _run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root
+        ).stdout.strip()
         checkout_existing_branch(branch, cwd=repo_root)
+        # The resubmit replaces the previous run's output rather than
+        # accumulating alongside it. See purge_branch_artifacts.
+        purge_dirs = _ARTIFACT_DIRS
+        if args.skip_pdf:
+            # Nothing will regenerate them, so leave the committed PDFs alone.
+            purge_dirs = tuple(d for d in purge_dirs if d != "generated_pdfs")
+        purged = purge_branch_artifacts(
+            base_ref, cwd=repo_root, dirs=purge_dirs
+        )
+        for path in purged:
+            print(f"Removed stale {path.relative_to(repo_root).as_posix()}")
 
     # Write the YAML.
     yaml_path = write_submission_yaml(submission, repo_root)
@@ -689,7 +836,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # so reviewers see it without leaving the PR.
     pdf_rel: Optional[str] = None
     png_url: Optional[str] = None
-    paths_to_stage: list[Path] = [yaml_path]
+    # `purged` first so the removals are staged even when the resubmit
+    # rewrites a different period/id and never touches those paths again.
+    paths_to_stage: list[Path] = [*purged, yaml_path]
     if not args.skip_pdf:
         pdf_path = submission_pdf_path(submission, repo_root)
         png_path = submission_png_path(submission, repo_root)
@@ -750,12 +899,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("No content changes detected; branch left in current state.",
               file=sys.stderr)
 
-    if has_open_pr:
-        # PR already open on this branch; the push updated it in place.
-        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
-        return 0
-
-    # Fresh branch → open a new PR.
     body = render_pr_body(
         issue_number=args.issue_number,
         submitter=args.issue_author,
@@ -765,6 +908,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         png_url=png_url,
         warnings=warnings,
     )
+
+    if has_open_pr:
+        # PR already open on this branch; the push updated its commits, but
+        # GitHub never re-derives the description — so refresh it here or the
+        # admin reviews the *first* submission's numbers against the current
+        # PDF. `png_url` is already scoped to this branch, so the preview
+        # points at the image just committed.
+        print(f"Updated existing PR #{open_pr_number} on branch `{branch}`.")
+        if update_pr_body(open_pr_number, body, cwd=repo_root):
+            print(f"Refreshed PR #{open_pr_number} description.")
+        else:
+            # The submission is committed and pushed at this point; a failed
+            # description update must not throw that away.
+            print(
+                f"WARNING: could not refresh PR #{open_pr_number}'s description "
+                f"— it still describes an earlier submission. The pushed YAML "
+                f"and PDF are the current ones: review those, not the PR body, "
+                f"or re-run /submit to retry.",
+                file=sys.stderr,
+            )
+            # The run stays green, so a log line is invisible to the person who
+            # matters. The PR body is the approval-decision surface — put the
+            # caveat where the approver will actually see it.
+            warn_stale_pr_body(open_pr_number, cwd=repo_root)
+        return 0
+
+    # Fresh branch → open a new PR.
     pr_url = open_pr(
         args.issue_title, body, cwd=repo_root,
         extra_labels=[submission_type.replace("_", "-")],

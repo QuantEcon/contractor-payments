@@ -58,6 +58,17 @@ on:
         type: string
         default: "submit"
 
+      engine_ref:
+        description: >
+          Which engine commit-ish to run the scripts from. MUST match the ref
+          this workflow is called at in the caller's `uses:` line, or the
+          pipeline definition and the code it drives come from different
+          commits. Optional, defaulting to 'main': a caller that pins `@main`
+          and omits this gets exactly the previous behaviour.
+        required: false
+        type: string
+        default: "main"
+
 jobs:
   process:
     runs-on: ubuntu-latest
@@ -72,10 +83,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Run the scripts from the same engine commit as this workflow file.
+      #
+      # `actions/checkout` with no `ref:` takes the engine's default branch, so
+      # a caller pinned to `@some-branch` got that branch's workflow YAML
+      # driving `main`'s scripts. The mismatch stays invisible until the YAML
+      # passes a flag the scripts do not have.
+      #
+      # The ref has to come from the caller: there is no context value for it.
+      # `github.job_workflow_ref` and `github.job_workflow_sha` both read as
+      # EMPTY here (verified on real runs), and `github.workflow_ref` /
+      # `github.workflow_sha` describe the *calling* workflow in the contractor
+      # repo, not this one.
       - name: Check out the engine repo (scripts + templates)
         uses: actions/checkout@v4
         with:
           repository: QuantEcon/contractor-payments
+          ref: ${{ inputs.engine_ref }}
           path: engine
 
       - name: Set up Python
@@ -111,15 +135,29 @@ jobs:
         env:
           PYTHONPATH: engine
         run: |
+          PARSE_RC=0
           python -m scripts.parse_issue \
             --body-file /tmp/issue_body.md \
             --output-json /tmp/submission.json \
             --output-errors-json /tmp/errors.json \
-            || true
+            || PARSE_RC=$?
           if [ -f /tmp/submission.json ]; then
             echo "parse_ok=true" >> "$GITHUB_OUTPUT"
-          else
+          elif [ -f /tmp/errors.json ]; then
+            # The parser ran and rejected the body: a data error the
+            # contractor can fix. Stay green so the error-comment steps run.
             echo "parse_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            # Neither artifact exists, so the parser never got far enough to
+            # judge the body — bad flags, an import error, a missing config.
+            # That is an engine fault, and reporting it to the contractor as
+            # "your submission needs a fix" is both false and self-defeating:
+            # the error-comment step then crashes on the absent errors.json.
+            # Fail instead, so the failure comment says it is not their text.
+            echo "ERROR: scripts.parse_issue exited ${PARSE_RC} without writing" >&2
+            echo "/tmp/submission.json or /tmp/errors.json. Treating this as an" >&2
+            echo "engine failure, not a submission error." >&2
+            exit 1
           fi
 
       # ─── /validate path ───────────────────────────────────────────────────
@@ -170,6 +208,7 @@ jobs:
           fi
 
       - name: Create submission PR
+        id: create_pr
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -242,11 +281,63 @@ jobs:
             --errors-file /tmp/errors.json \
             --issue "${{ inputs.issue_number }}"
 
-      # ─── Always (submit mode): remove `submit` label so re-applying re-triggers
+      # ─── Genuinely always (submit mode) ──────────────────────────────────
+      # The label is the contractor's only retry handle — the caller fires on
+      # `issues: [labeled]` — so a failed run that keeps it strands them with
+      # no way to re-fire the event. `always()` rather than the implicit
+      # success() the banner used to claim. Placed before the failure comment
+      # below so that comment's "the label has been removed" is true when read.
       - name: Remove `submit` label
-        if: inputs.mode == 'submit'
+        if: ${{ always() && inputs.mode == 'submit' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue edit "${{ inputs.issue_number }}" --remove-label submit \
             || echo "submit label not present; continuing."
+
+      # ─── Failure reporting ───────────────────────────────────────────────
+      # Without this, ANY step failure skipped everything downstream and the
+      # contractor got nothing back — moments after /validate said "ready to
+      # submit". The existing submit-error comment above only covers parse
+      # failures, which are captured as a step *output*, not a step failure.
+      - name: Post pipeline-failure comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          MODE: ${{ inputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          O_PARSE: ${{ steps.parse.outcome }}
+          O_CREATE_PR: ${{ steps.create_pr.outcome }}
+        run: |
+          if [ "$MODE" = "validate" ]; then
+            HEADLINE='`/validate` failed before it could report a result.'
+            OUTCOME='Nothing was changed. Re-run `/validate` once the cause below is fixed.'
+          elif [ "$O_CREATE_PR" = "success" ]; then
+            HEADLINE='`/submit` failed **after** the submission PR was created.'
+            OUTCOME='The PR exists and carries your submission, but the follow-up housekeeping did not finish. **Do not re-submit** — an admin will pick this up from the run log.'
+          else
+            HEADLINE='`/submit` failed — **nothing was filed.**'
+            OUTCOME='No submission PR was created. The `submit` label has been removed, so re-applying it retries the run once the cause below is fixed.'
+          fi
+
+          if [ "$O_PARSE" = "failure" ]; then
+            STAGE="parsing the submission"
+          elif [ "$O_CREATE_PR" = "failure" ]; then
+            STAGE="rendering the PDF and opening the submission PR"
+          else
+            STAGE="workflow setup (checkout / Python / Typst install)"
+          fi
+
+          {
+            printf '> [!WARNING]\n'
+            printf '> %s\n\n' "$HEADLINE"
+            printf 'This is not a problem with the text of your submission (a bad submission comes back as a "needs a fix" comment listing the lines). The run broke at this stage: **%s**.\n\n' "$STAGE"
+            printf '%s\n\n' "$OUTCOME"
+            printf 'Run log (admins): %s\n' "$RUN_URL"
+          } > /tmp/failure_comment.md
+
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body-file /tmp/failure_comment.md \
+            || echo "WARN: could not post the failure comment on #${ISSUE_NUMBER} (locked?)."
