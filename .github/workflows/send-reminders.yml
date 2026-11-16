@@ -71,9 +71,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           DRY_RUN_ARG=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             DRY_RUN_ARG="--dry-run"
           fi
           python -m scripts.send_reminders \

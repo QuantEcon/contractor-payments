@@ -166,30 +166,35 @@ jobs:
         env:
           PYTHONPATH: engine
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+          MERGED_BY: ${{ inputs.merged_by }}
         run: |
           python -m scripts.finalize_approval \
-            --submission "${{ steps.find_submission.outputs.submission_file }}" \
+            --submission "$SUBMISSION_FILE" \
             --settings config/settings.yml \
             --templates engine/templates \
-            --approver "${{ inputs.merged_by }}"
+            --approver "$MERGED_BY"
 
       - name: Append to ledger YAML
         id: update_ledger
         env:
           PYTHONPATH: engine
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
         run: |
           python -m scripts.update_ledger \
-            --submission "${{ steps.find_submission.outputs.submission_file }}"
+            --submission "$SUBMISSION_FILE"
 
       - name: Commit re-rendered PDF/PNG + ledger to main
         id: commit_back
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           git add submissions/ generated_pdfs/ ledger/
           if git diff --cached --quiet; then
             echo "Nothing to commit (idempotent re-run on already-processed PR?)"
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "Process approved submission from PR #${{ inputs.pr_number }} [skip ci]"
+            git commit -m "Process approved submission from PR #${PR_NUMBER} [skip ci]"
             # Two approvals merging close together both push to main. Without
             # a retry the loser is simply rejected — and because nothing
             # downstream is failure-gated that used to silently cost the
@@ -233,10 +238,12 @@ jobs:
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONTRACT_ID: ${{ steps.find_submission.outputs.contract_id }}
+          REPO: ${{ github.repository }}
         run: |
           python -m scripts.update_ledger_issue \
-            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
-            --repo "${{ github.repository }}"
+            --ledger "ledger/${CONTRACT_ID}.yml" \
+            --repo "$REPO"
 
       - name: Send approval email
         id: email
@@ -249,13 +256,18 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           PSL_EMAIL: ${{ vars.PSL_EMAIL }}
           QUANTECON_EMAIL_REVIEWER: ${{ vars.QUANTECON_EMAIL_REVIEWER }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+          PERIOD: ${{ steps.find_submission.outputs.period }}
+          SUBMISSION_ID: ${{ steps.find_submission.outputs.submission_id }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
         run: |
           python -m scripts.notify_email \
-            --submission "${{ steps.find_submission.outputs.submission_file }}" \
+            --submission "$SUBMISSION_FILE" \
             --settings config/settings.yml \
-            --pdf "generated_pdfs/${{ steps.find_submission.outputs.period }}/${{ steps.find_submission.outputs.submission_id }}.pdf" \
+            --pdf "generated_pdfs/${PERIOD}/${SUBMISSION_ID}.pdf" \
             --fiscal-host engine/templates/fiscal-host.yml \
-            --issue-url "https://github.com/${{ github.repository }}/issues/${{ steps.find_issue.outputs.issue_number }}" \
+            --issue-url "https://github.com/${REPO}/issues/${ISSUE_NUMBER}" \
             --output-summary /tmp/email_summary.json
 
       - name: Post audit comment on the original issue
@@ -273,14 +285,19 @@ jobs:
         env:
           PYTHONPATH: engine
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+          CONTRACT_ID: ${{ steps.find_submission.outputs.contract_id }}
+          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
           python -m scripts.notify_comment \
-            --submission "${{ steps.find_submission.outputs.submission_file }}" \
-            --ledger "ledger/${{ steps.find_submission.outputs.contract_id }}.yml" \
+            --submission "$SUBMISSION_FILE" \
+            --ledger "ledger/${CONTRACT_ID}.yml" \
             --email-summary /tmp/email_summary.json \
-            --issue ${{ steps.find_issue.outputs.issue_number }} \
-            --pr ${{ inputs.pr_number }} \
-            --repo "${{ github.repository }}"
+            --issue "$ISSUE_NUMBER" \
+            --pr "$PR_NUMBER" \
+            --repo "$REPO"
 
       # Phase 2.5: when this submission supersedes a previous one, post a
       # forward-reference comment on the now-superseded PR so anyone landing
@@ -290,10 +307,13 @@ jobs:
       - name: Comment on the superseded PR (revisions only)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
           SUPERSEDES_ID=$(python -c "import yaml,sys; \
-            d=yaml.safe_load(open('${{ steps.find_submission.outputs.submission_file }}')); \
-            print(d.get('supersedes') or '')")
+            d=yaml.safe_load(open(sys.argv[1])); \
+            print(d.get('supersedes') or '')" "$SUBMISSION_FILE")
           if [ -z "$SUPERSEDES_ID" ]; then
             echo "Not a revision; skipping superseded-PR comment."
             exit 0
@@ -306,17 +326,17 @@ jobs:
           # current revision PR (whose body contains `<id>-v2.yml`, which
           # would substring-match `<id>` but not `<id>.yml`). Also filter
           # out the current PR explicitly as belt-and-suspenders.
-          PREV_PR=$(gh pr list --repo "${{ github.repository }}" --state merged \
+          PREV_PR=$(gh pr list --repo "$REPO" --state merged \
             --search "\"${SUPERSEDES_ID}.yml\" in:body" --json number \
-            --jq "map(select(.number != ${{ inputs.pr_number }})) | first | .number // empty")
+            --jq "map(select(.number != ${PR_NUMBER})) | first | .number // empty")
           if [ -z "$PREV_PR" ]; then
             echo "Could not locate previous PR for $SUPERSEDES_ID; skipping cross-comment."
             echo "(The revision still landed cleanly; this is a non-fatal audit gap.)"
             exit 0
           fi
           echo "Found previous PR: #$PREV_PR. Posting forward-reference comment."
-          gh pr comment "$PREV_PR" --repo "${{ github.repository }}" --body \
-            "**Superseded by #${{ inputs.pr_number }}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
+          gh pr comment "$PREV_PR" --repo "$REPO" --body \
+            "**Superseded by #${PR_NUMBER}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
 
       - name: Apply `processed` label to the merged PR
         id: label
@@ -326,9 +346,11 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
-          gh pr edit "${{ inputs.pr_number }}" --add-label "processed" \
-            --repo "${{ github.repository }}"
+          gh pr edit "$PR_NUMBER" --add-label "processed" \
+            --repo "$REPO"
 
       # ─── Failure reporting ───────────────────────────────────────────────
       # Every step above carries GitHub's implicit success(), so before this
