@@ -168,23 +168,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_AUTHOR: ${{ inputs.issue_author }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           CONTRACT_ID=$(python -c "import json; print(json.load(open('/tmp/submission.json'))['contract_id'])")
           python -m scripts.post_validate_result success \
             --submission-file /tmp/submission.json \
             --contract-file "contracts/${CONTRACT_ID}.yml" \
-            --submitter "${{ inputs.issue_author }}" \
-            --issue "${{ inputs.issue_number }}"
+            --submitter "$ISSUE_AUTHOR" \
+            --issue "$ISSUE_NUMBER"
 
       - name: Post validate-error comment
         if: inputs.mode == 'validate' && steps.parse.outputs.parse_ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           python -m scripts.post_validate_result error \
             --errors-file /tmp/errors.json \
-            --issue "${{ inputs.issue_number }}"
+            --issue "$ISSUE_NUMBER"
 
       # ─── /submit path ─────────────────────────────────────────────────────
       # Phase 2.5: revision intent comes from filesystem state — not the
@@ -197,9 +200,10 @@ jobs:
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           SUPERSEDES=$(python -m scripts.find_previous_submission \
-            --issue "${{ inputs.issue_number }}")
+            --issue "$ISSUE_NUMBER")
           echo "supersedes=$SUPERSEDES" >> "$GITHUB_OUTPUT"
           if [ -n "$SUPERSEDES" ]; then
             echo "Previous approved submission detected; this is a revision superseding: $SUPERSEDES"
@@ -213,47 +217,54 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          SUPERSEDES: ${{ steps.revision.outputs.supersedes }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_AUTHOR: ${{ inputs.issue_author }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
         run: |
-          SUPERSEDES_ARG=""
-          if [ -n "${{ steps.revision.outputs.supersedes }}" ]; then
-            SUPERSEDES_ARG="--supersedes ${{ steps.revision.outputs.supersedes }}"
+          SUPERSEDES_ARGS=()
+          if [ -n "$SUPERSEDES" ]; then
+            SUPERSEDES_ARGS=(--supersedes "$SUPERSEDES")
           fi
           python -m scripts.create_submission_pr \
             --submission-file /tmp/submission.json \
             --errors-file /tmp/errors.json \
-            --issue-number "${{ inputs.issue_number }}" \
-            --issue-author "${{ inputs.issue_author }}" \
-            --issue-title "${{ inputs.issue_title }}" \
+            --issue-number "$ISSUE_NUMBER" \
+            --issue-author "$ISSUE_AUTHOR" \
+            --issue-title "$ISSUE_TITLE" \
             --templates-dir engine/templates \
-            $SUPERSEDES_ARG
+            "${SUPERSEDES_ARGS[@]}"
 
       - name: Clear prior submit-error comment
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           python -m scripts.post_error_comment clear \
-            --issue "${{ inputs.issue_number }}"
+            --issue "$ISSUE_NUMBER"
 
       - name: Clear prior validate-result comment
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           python -m scripts.post_validate_result clear \
-            --issue "${{ inputs.issue_number }}"
+            --issue "$ISSUE_NUMBER"
 
       - name: Close and lock the issue
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           # Look up the PR that create_submission_pr just opened (or updated)
           # for this issue. Branch name is deterministic per
           # branch_name_for_issue() in create_submission_pr.py.
-          BRANCH="submission/issue-${{ inputs.issue_number }}"
+          BRANCH="submission/issue-${ISSUE_NUMBER}"
           PR_NUMBER=$(gh pr list \
             --repo "$GITHUB_REPOSITORY" \
             --head "$BRANCH" \
@@ -265,10 +276,10 @@ jobs:
           else
             COMMENT="Submission filed — see the PR linked above. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)."
           fi
-          gh issue close "${{ inputs.issue_number }}" \
+          gh issue close "$ISSUE_NUMBER" \
             --comment "$COMMENT" \
             || echo "Issue close failed (may already be closed); continuing."
-          gh issue lock "${{ inputs.issue_number }}" --reason resolved \
+          gh issue lock "$ISSUE_NUMBER" --reason resolved \
             || echo "Issue lock failed (may already be locked); continuing."
 
       - name: Post submit-error comment (on parse failure)
@@ -276,10 +287,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           python -m scripts.post_error_comment post \
             --errors-file /tmp/errors.json \
-            --issue "${{ inputs.issue_number }}"
+            --issue "$ISSUE_NUMBER"
 
       # ─── Genuinely always (submit mode) ──────────────────────────────────
       # The label is the contractor's only retry handle — the caller fires on
@@ -291,8 +303,9 @@ jobs:
         if: ${{ always() && inputs.mode == 'submit' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          gh issue edit "${{ inputs.issue_number }}" --remove-label submit \
+          gh issue edit "$ISSUE_NUMBER" --remove-label submit \
             || echo "submit label not present; continuing."
 
       # ─── Failure reporting ───────────────────────────────────────────────
