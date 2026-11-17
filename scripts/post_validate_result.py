@@ -106,7 +106,7 @@ def render_error_comment(
     lines: list[str] = []
     lines.append("❌ **Validation failed — not ready to submit**")
     lines.append("")
-    lines.append("I couldn't parse this submission. Here's what I found:")
+    lines.append("This submission needs a fix before it can be filed. Here's what I found:")
     lines.append("")
 
     for err in errors:
