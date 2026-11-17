@@ -34,6 +34,13 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from scripts.generate_pdf import DEFAULT_PNG_PPI, render_submission_pdf, render_submission_png
+from scripts.money import (
+    amount_for_hours,
+    format_hours,
+    format_money,
+    money_for_yaml,
+    sum_decimal,
+)
 from scripts.parse_issue import cross_check_milestone_ids
 
 
@@ -150,15 +157,14 @@ def resolve_payer_today(fiscal_host_path: Path) -> str:
     return datetime.now(tz).date().isoformat()
 
 
-def format_currency_amount(amount: float, currency: str) -> float | int:
-    """Format an amount appropriately for the currency.
+def format_currency_amount(amount, currency: str) -> float | int:
+    """Quantize an amount for storage in the submission YAML.
 
     JPY has no fractional units, so we return an int. AUD/USD return a float
-    rounded to two decimals.
+    with exactly two decimals. Rounding is half-up via Decimal (see
+    scripts/money.py); kept under this name because callers and tests import it.
     """
-    if currency.upper() == "JPY":
-        return int(round(amount))
-    return round(amount, 2)
+    return money_for_yaml(amount, currency)
 
 
 def enrich_submission(
@@ -233,14 +239,18 @@ def enrich_submission(
                 f"Contract `{contract_id_in_contract}` is missing required terms: "
                 f"{', '.join(f'`{k}`' for k in missing)}."
             )
-        hourly_rate = float(terms["hourly_rate"])
+        hourly_rate = terms["hourly_rate"]
         currency = terms["currency"]
         # max_hours_per_month is required on the contract but may be null
         # (explicit "uncapped" — admin chose not to set a monthly cap).
         raw_cap = terms["max_hours_per_month"]
         max_hours_per_month = float(raw_cap) if raw_cap is not None else None
         total_hours = submission["totals"]["hours"]
-        amount = format_currency_amount(total_hours * hourly_rate, currency)
+        # Decimal end to end, rounded once, half-up. The float version wrote
+        # 49.99 for 1.5 h x 33.33 (49.995) and 420.52 for 10.5 h x 40.05.
+        amount = money_for_yaml(
+            amount_for_hours(total_hours, hourly_rate, currency), currency
+        )
         rate_display = format_currency_amount(hourly_rate, currency)
 
         return {
@@ -269,7 +279,7 @@ def enrich_submission(
             )
         entries = sorted(submission["entries"], key=lambda e: e["date"])
         total_amount = format_currency_amount(
-            sum(e["amount"] for e in entries),
+            sum_decimal(e["amount"] for e in entries),
             currency,
         )
         # Normalise per-entry amount display formatting too, so the YAML +
@@ -318,10 +328,13 @@ def render_pr_body(
         f"**Contract:** `{submission['contract_id']}`",
     ]
     if submission_type == "timesheet":
-        lines.append(f"**Total hours:** {totals['hours']}")
+        lines.append(f"**Total hours:** {format_hours(totals['hours'])}")
     else:
         lines.append(f"**Milestones claimed:** {len(submission['entries'])}")
-    lines.append(f"**Total amount:** {totals['amount']} {totals['currency']}")
+    lines.append(
+        f"**Total amount:** {format_money(totals['amount'], totals['currency'])} "
+        f"{totals['currency']}"
+    )
     lines.append("")
     if submission_type == "timesheet":
         cap = totals.get("max_hours_per_month")

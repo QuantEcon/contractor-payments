@@ -134,8 +134,9 @@ Within ~30 seconds:
    YAML of your submission, a rendered PDF, and an inline PNG preview.
 2. Your QuantEcon administrator is **automatically requested as
    reviewer** (via CODEOWNERS).
-3. The originating issue is **closed and locked**, with a comment
-   linking to the PR.
+3. The originating issue is **closed**, with a comment linking to
+   the PR. To change anything later, see
+   [Corrections and revisions](corrections.md).
 
 You don't need to do anything with the PR — your administrator handles
 review and merging.

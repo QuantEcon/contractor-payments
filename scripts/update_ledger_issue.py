@@ -30,17 +30,17 @@ from typing import Optional
 
 import yaml
 
+from scripts.money import format_hours, format_money
+
 
 MARKER_PREFIX = "ledger-issue-marker"
 
 
 # ─── Formatting helpers ─────────────────────────────────────────────────────
 
-def _fmt_amount(amount: float, currency: str) -> str:
-    """Pretty-print an amount for the currency. JPY: no decimals. AUD/USD: 2."""
-    if currency.upper() == "JPY":
-        return f"{int(round(amount)):,}"
-    return f"{amount:,.2f}"
+def _fmt_amount(amount, currency: str) -> str:
+    """Currency-aware display (JPY: no decimals; AUD/USD: 2), half-up."""
+    return format_money(amount, currency)
 
 
 def _last_approval(items: list[dict]) -> tuple[Optional[str], Optional[str]]:
@@ -117,7 +117,7 @@ def render_hourly_body(ledger: dict, contract: dict) -> str:
         "| Submissions | Hours to date | Amount to date | Last approved |",
         "|---|---|---|---|",
         f"| {totals['submissions_count']} "
-        f"| {totals['hours_to_date']} "
+        f"| {format_hours(totals['hours_to_date'])} "
         f"| {_fmt_amount(totals['amount_to_date'], currency)} {currency} "
         f"| {last_date or '—'}{' by @' + last_by if last_by else ''} |",
         "",
@@ -133,7 +133,7 @@ def render_hourly_body(ledger: dict, contract: dict) -> str:
         for s in submissions:
             is_superseded = s.get("status") == "superseded"
             period_cell = _strike(s["period"], is_superseded)
-            hours_cell = _strike(str(s["hours"]), is_superseded)
+            hours_cell = _strike(format_hours(s["hours"]), is_superseded)
             rate_cell = _strike(f"{_fmt_amount(s['rate'], currency)} {currency}", is_superseded)
             amount_cell = _strike(f"{_fmt_amount(s['amount'], currency)} {currency}", is_superseded)
             approved_cell = _strike(

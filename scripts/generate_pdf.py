@@ -34,6 +34,8 @@ from typing import Optional
 
 import yaml
 
+from scripts.money import format_hours, format_money
+
 
 def _merge_contractor(submission: dict, settings: dict) -> dict:
     """Fold the contractor identity from settings.yml into the submission dict.
@@ -70,22 +72,17 @@ def _add_display_strings(data: dict) -> dict:
     totals = data.get("totals", {})
     currency = totals.get("currency", "")
 
-    def fmt_money(value: float) -> str:
-        # JPY has no minor units, hence the int — but it does use thousands
-        # separators, so omitting them was accidental rather than a locale
-        # choice. It also made the PDF the odd one out: for one submission the
-        # amount rendered as `163300` here while the email, the pinned ledger
-        # issue and the audit comment all said `163,300`.
-        if currency.upper() == "JPY":
-            return f"{int(round(value)):,}"
-        return f"{value:,.2f}"
+    def fmt_money(value) -> str:
+        # Same formatter as the email, ledger issue and audit comment, so the
+        # PDF can't disagree with them (e.g. `163,300` JPY everywhere).
+        return format_money(value, currency)
 
     out = dict(data)
 
     # Totals
     totals_out = dict(totals)
     if "hours" in totals:
-        totals_out["hours_display"] = f"{totals['hours']:.1f}"
+        totals_out["hours_display"] = format_hours(totals["hours"])
     if "rate" in totals:
         totals_out["rate_amount_display"] = fmt_money(totals["rate"])
     if "amount" in totals:
@@ -97,7 +94,7 @@ def _add_display_strings(data: dict) -> dict:
     for e in data.get("entries", []):
         eo = dict(e)
         if "hours" in eo:
-            eo["hours_display"] = f"{eo['hours']:.1f}"
+            eo["hours_display"] = format_hours(eo["hours"])
         if "amount" in eo:
             eo["amount_display"] = fmt_money(eo["amount"])
         entries_out.append(eo)
@@ -194,6 +191,12 @@ def _run_typst(staged_typ: Path, output_path: Path, fmt: str, ppi: Optional[int]
     cmd = ["typst", "compile", "--format", fmt]
     if ppi is not None:
         cmd.extend(["--ppi", str(ppi)])
+    if fmt == "png":
+        # One auto-height page: Typst refuses to write a multi-page document
+        # to a single PNG, which made long months fail `/submit`. The PDF is
+        # unaffected and paginates normally. See the `preview` input in the
+        # templates.
+        cmd.extend(["--input", "preview=1"])
     cmd.extend([str(staged_typ), str(output_path)])
 
     try:

@@ -8,7 +8,7 @@ name: Issue to PR
 #   - Opening / editing an issue no longer triggers the engine. The issue
 #     body is a long-lived draft the contractor edits over time.
 #   - `/submit` comment OR `submit` label → engine runs in submit mode
-#     (parse + open PR + close/lock issue + remove submit label).
+#     (parse + open PR + close issue + remove submit label).
 #   - `/validate` comment → engine runs in validate mode (parse dry-run +
 #     post sentinel-marked result comment, no PR).
 #   - Revisions (Phase 2.5): reopen the closed issue, edit the body, then

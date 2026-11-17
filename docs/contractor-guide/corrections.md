@@ -22,21 +22,25 @@ file it.
 
 A Pull Request exists. Your administrator may already be reviewing it.
 
-**The issue is now closed and locked**, so you can't edit the body
-anymore. The PR is the authoritative artifact.
+**The issue is now closed**, and the PR is the authoritative artifact.
 
-Your options:
+To correct it:
 
-1. **Ask your administrator to edit the PR branch directly.** They have
-   write access and can adjust the YAML / re-render the PDF.
-2. **Have your administrator close the PR**, then **reopen the original
-   issue**, edit the body, and `/submit` again. This produces a fresh
-   submission with the same identifier (no `-v2` suffix because the
-   original was never merged).
+1. **Reopen the original issue** (the **Reopen issue** button at the
+   bottom of the issue).
+2. Edit the body — fix the rows, change the period, whatever needs to
+   change — and run `/validate` to confirm it parses.
+3. Comment `/submit`.
 
-If you're comfortable with git yourself, you can also push directly to
-the PR branch — but the YAML format is strict and the PDF needs to be
-regenerated, so this is normally an admin task.
+Because the PR hasn't been merged yet, this **updates the existing PR
+in place**: same submission identifier, regenerated YAML and PDF, and a
+refreshed PR description. Your administrator reviews the updated
+version.
+
+If you'd rather not do this yourself, ask your administrator. You
+can't push to the PR branch directly — contractor accounts don't have
+write access to the repository, so every change goes through the
+issue and the engine.
 
 ## After the PR is merged, before the payment processor pays
 
@@ -49,10 +53,8 @@ In this window, mistakes are recoverable through a **revision**.
 
 ### How to file a revision
 
-1. Find the original submission issue (it's closed and locked).
-2. Click **Reopen issue**. The lock blocks new comments from
-   non-collaborators but you, as the contractor, can still operate on
-   it.
+1. Find the original submission issue (it's closed).
+2. Click **Reopen issue**.
 3. Click ⋯ → Edit the body. Make your corrections — change the rows,
    adjust the period, whatever needs to change.
 4. Re-run `/validate` to confirm the corrected version parses.

@@ -1,6 +1,10 @@
 name: Process approved submission (reusable)
 
 # Reusable workflow that runs after a submission PR merges:
+#   0. Verify the merge before treating it as an approval: the merger is an
+#      authorised approver, the PR only touched generated files, and every
+#      total recomputes from the entries + contract (scripts/verify_approval.py).
+#      On refusal nothing below runs.
 #   1. Stamp the submission YAML with approval metadata (status, approved_by,
 #      approved_date) and re-render PDF + PNG (amber → green block).
 #   2. Append the submission to ledger/<contract-id>.yml.
@@ -109,6 +113,12 @@ jobs:
         env:
           MERGE_SHA: ${{ inputs.merge_commit_sha }}
         run: |
+          # The checkout is main at depth 2, so if another approval's
+          # `[skip ci]` commit landed on main before this job started, the
+          # merge commit's parent is outside that history and the diffs here
+          # and in the verify step fail. Fetch the merge commit and its
+          # parents explicitly; it's a no-op when they are already present.
+          git fetch --no-tags --depth=2 origin "$MERGE_SHA"
           # Files added/changed by the merge — diff against the first parent
           # (i.e. main's HEAD before the merge). `git diff-tree` on a merge
           # commit is silent by default, hence the explicit parent compare.
@@ -160,6 +170,45 @@ jobs:
           fi
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
           echo "Original issue: #$ISSUE_NUMBER"
+
+      # Gate everything outward-facing on three checks (scripts/verify_approval.py):
+      #   - the person who merged is on the engine's approver list
+      #     (quantecon.approvers in templates/fiscal-host.yml). The list lives
+      #     in the engine, not the contractor repo, so a contractor can't add
+      #     themselves; and a merge is otherwise anyone with Write.
+      #   - the PR touched only submissions/ and generated_pdfs/, so a
+      #     submission PR can't also change a contract, settings or workflow.
+      #   - every total recomputes from the entries and the contract on main.
+      #     The PR branch is editable, so its YAML totals are a claim, not a
+      #     fact.
+      # Changed files come from both the merge diff and the PR files API
+      # (which also lists a rename's old path), so a rebase-merge that only
+      # shows its last commit can't hide anything. On refusal nothing below
+      # runs and the failure comment carries the reasons.
+      - name: Verify approver, PR scope and totals
+        id: verify
+        env:
+          PYTHONPATH: engine
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          MERGE_SHA: ${{ inputs.merge_commit_sha }}
+          MERGED_BY: ${{ inputs.merged_by }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+        run: |
+          {
+            git diff --name-only "${MERGE_SHA}^1" "$MERGE_SHA"
+            gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)'
+          } | sort -u > /tmp/changed_files.txt
+          echo "Files changed by PR #${PR_NUMBER}:"
+          cat /tmp/changed_files.txt
+          python -m scripts.verify_approval \
+            --submission "$SUBMISSION_FILE" \
+            --changed-files /tmp/changed_files.txt \
+            --merged-by "$MERGED_BY" \
+            --fiscal-host engine/templates/fiscal-host.yml \
+            --report /tmp/verify_report.md
 
       - name: Stamp approval + re-render PDF/PNG
         id: stamp
@@ -367,6 +416,7 @@ jobs:
           ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           O_FIND: ${{ steps.find_submission.outcome }}
+          O_VERIFY: ${{ steps.verify.outcome }}
           O_STAMP: ${{ steps.stamp.outcome }}
           O_LEDGER: ${{ steps.update_ledger.outcome }}
           O_COMMIT: ${{ steps.commit_back.outcome }}
@@ -398,13 +448,19 @@ jobs:
             printf '> **The approval pipeline failed part-way through.**\n\n'
             printf '| Step | Outcome |\n|---|---|\n'
             row "1. Find submission"      "$O_FIND"
-            row "2. Stamp approval"       "$O_STAMP"
-            row "3. Append to ledger"     "$O_LEDGER"
-            row "4. Commit back to main"  "$O_COMMIT"
-            row "5. Pinned ledger issue"  "$O_ISSUE"
-            row "6. Approval email"       "$O_EMAIL"
-            row "7. Audit comment"        "$O_AUDIT"
+            row "2. Verify approval"      "$O_VERIFY"
+            row "3. Stamp approval"       "$O_STAMP"
+            row "4. Append to ledger"     "$O_LEDGER"
+            row "5. Commit back to main"  "$O_COMMIT"
+            row "6. Pinned ledger issue"  "$O_ISSUE"
+            row "7. Approval email"       "$O_EMAIL"
+            row "8. Audit comment"        "$O_AUDIT"
             printf '\n%s\n\n' "$EMAIL_LINE"
+            # The verifier's refusal report says why and what to do.
+            if [ -f /tmp/verify_report.md ]; then
+              cat /tmp/verify_report.md
+              printf '\n'
+            fi
             printf 'Run log: %s\n\n' "$RUN_URL"
             printf 'The `processed` label was deliberately not applied, so this PR stays visible as unfinished.\n'
           } > /tmp/failure_comment.md

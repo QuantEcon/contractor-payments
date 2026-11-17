@@ -496,32 +496,24 @@ def verify_repo_doesnt_exist(handle: str) -> None:
 
 
 _NO_PROTECTION_NOTICE = """\
-  ⚠ Branch protection on `main` is currently DEFERRED.
+  ℹ Access model: the contractor gets TRIAGE, not Write.
 
-  The contractor's repo will be created with no protection on `main`,
-  which means anyone with Write access (the contractor + the admin)
-  can in principle push directly without a PR. The intended approval
-  flow (issue → PR → admin review → merge) is operationally enforced,
-  not technically enforced.
+  Triage lets them open and edit their submission issues, comment
+  `/validate` / `/submit`, apply the `submit` label and reopen issues
+  for revisions. It does NOT let them push, merge, edit workflows or
+  change contracts — so they can't approve their own claim, change
+  their rate, or run a workflow that reads the org's SMTP secrets.
 
-  Background: the original Phase 3b design relied on an org-level
-  ruleset granting bypass to the `github-actions` integration.
-  GitHub's modern Rulesets UI no longer exposes that integration as
-  a selectable bypass actor, and classic protection's
-  `enforce_admins: false` doesn't admit the bot push either
-  (PLAN.md §8 documents both findings). The durable fix is a
-  dedicated GitHub App for the engine push — see
-  `notes/ADMIN_RUNBOOK.md` → "Branch protection (deferred)" for the
-  migration recipe. Migration is data-preserving; no need to
-  recreate this contractor's repo when we land it.
-
-  Proceeding without protection is acceptable for a private repo with
-  a single trusted contractor + admin; revisit once the GitHub App
-  path is implemented."""
+  `main` has no branch protection (the engine's post-merge push can't
+  bypass it — see notes/ADMIN_RUNBOOK.md → "Access model and branch
+  protection"). With only admins and the engine able to write, that's
+  acceptable. Approval is also checked at merge time: only handles in
+  `quantecon.approvers` (engine templates/fiscal-host.yml) count, and
+  the PR may only touch submissions/ and generated_pdfs/."""
 
 
 def notify_protection_deferred(*, dry_run: bool) -> None:
-    """Surface the deferred-protection decision at onboarding time.
+    """Surface the access model at onboarding time.
 
     Replaces the old `verify_org_ruleset` pre-flight (which urged the
     admin to set up a ruleset we now know doesn't work — see PLAN.md
@@ -577,7 +569,7 @@ def render_plan(inputs: Inputs) -> str:
         f"  5. Initial commit + push",
         f"  6. Create {len(WORKFLOW_LABELS)} workflow labels",
         f"  7. Set delete_branch_on_merge=true",
-        f"  8. Add collaborators (contractor=Write, admin=Admin)",
+        f"  8. Add collaborators (contractor=Triage, admin=Admin)",
         f"  9. Open pinned ledger issue + write its number back to the contract",
         "═" * 60,
         "",
@@ -795,15 +787,20 @@ def execute(inputs: Inputs, *, dry_run: bool) -> Optional[str]:
     run(["gh", "api", "--method", "PATCH", f"repos/{full}",
          "-f", "delete_branch_on_merge=true"], dry_run=dry_run)
 
-    # 8. Collaborators.
+    # 8. Collaborators. The contractor gets Triage, never Write: Write can
+    # merge (= approve their own claim), edit contracts, and add a workflow
+    # on any branch that reads the org's SMTP secrets. Triage still covers
+    # everything the submission flow needs from them (issues, comments, the
+    # `submit` label, reopening for a revision). See ADMIN_RUNBOOK.md →
+    # "Access model and branch protection".
     print("→ Adding collaborators")
-    run(["gh", "api", "--method", "PUT",
-         f"repos/{full}/collaborators/{inputs.handle}",
-         "-f", "permission=push"], dry_run=dry_run)
     if inputs.admin != inputs.handle:
         run(["gh", "api", "--method", "PUT",
-             f"repos/{full}/collaborators/{inputs.admin}",
-             "-f", "permission=admin"], dry_run=dry_run)
+             f"repos/{full}/collaborators/{inputs.handle}",
+             "-f", "permission=triage"], dry_run=dry_run)
+    run(["gh", "api", "--method", "PUT",
+         f"repos/{full}/collaborators/{inputs.admin}",
+         "-f", "permission=admin"], dry_run=dry_run)
 
     # 9. Open the pinned ledger issue and write its number back to the contract.
     print("→ Opening pinned ledger issue")

@@ -3,11 +3,12 @@
 #
 # Two things here are deliberate rather than incidental:
 #
-#   - **Typst is installed, at the version the pipeline pins.** Nothing in the
-#     suite needs it today, but the renderers do, and installing it here means
-#     a render-level test can be added without also having to remember the
-#     toolchain. The version is *derived* from the pipeline workflows rather
-#     than repeated here, so CI can't drift from what renders real documents.
+#   - **Typst is installed, at the version the pipeline pins.** The render
+#     tests (tests/test_render.py) compile the real templates, e.g. a full
+#     month of rows to PDF + PNG preview; they skip locally without Typst but
+#     must run here. The version is *derived* from the pipeline workflows
+#     rather than repeated here, so CI can't drift from what renders real
+#     documents.
 #   - **The matrix covers 3.12 and 3.13.** 3.12 is what the submission and
 #     approval workflows run, so it is the version that matters; 3.13 is what
 #     the maintainer has locally. Testing both catches the drift where a fix

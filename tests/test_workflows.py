@@ -277,3 +277,72 @@ class TestCallerTemplatesPinBothHalves:
                 f"passes engine_ref={engine_ref!r}. The workflow and the scripts "
                 f"it drives would come from different commits."
             )
+
+
+class TestApprovalIsVerifiedBeforeAnythingOutwardFacing:
+    """`verify` (scripts/verify_approval.py) is the gate that stops a
+    contractor's self-merge, a PR that also edits a contract, or a hand-edited
+    total from being stamped, ledgered and emailed to the fiscal host. It must
+    run before all of those, with no condition that lets them run when it
+    fails."""
+
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "process-approved.yml"
+    GATED = ("stamp", "update_ledger", "commit_back", "email")
+
+    def _ids(self):
+        return [_id(s) for s in _steps(_load(self.WORKFLOW))]
+
+    def test_verify_runs_before_every_outward_facing_step(self):
+        ids = self._ids()
+        assert "verify" in ids
+        for step_id in self.GATED:
+            assert ids.index("verify") < ids.index(step_id), step_id
+
+    def test_gated_steps_cannot_run_after_a_failed_verify(self):
+        for step in _steps(_load(self.WORKFLOW)):
+            if _id(step) in self.GATED:
+                condition = str(step.get("if", ""))
+                assert "always()" not in condition and "failure()" not in condition, _id(step)
+
+    def test_verify_reads_approvers_from_the_engine_checkout(self):
+        verify = next(s for s in _steps(_load(self.WORKFLOW)) if _id(s) == "verify")
+        assert "scripts.verify_approval" in verify["run"]
+        assert "--fiscal-host engine/templates/fiscal-host.yml" in verify["run"]
+
+
+def test_submission_parse_step_runs_contract_checks():
+    """Contract problems must reach the contractor as a fixable error, which
+    only happens if check_submission runs inside the parse step (it decides
+    parse_ok by whether the submission JSON survives)."""
+    wf = _load(REPO_ROOT / ".github" / "workflows" / "process-submission.yml")
+    parse = next(s for s in _steps(wf) if _id(s) == "parse")
+    run = parse["run"]
+    assert run.index("scripts.parse_issue") < run.index("scripts.check_submission")
+    assert run.index("scripts.check_submission") < run.index('echo "parse_ok=true"')
+
+
+def test_submitted_issues_are_not_locked():
+    """Contractors are Triage collaborators. Only Write+ can unlock an issue,
+    so locking it on /submit would block their reopen → /submit revision
+    path. See ADMIN_RUNBOOK.md → "Access model and branch protection"."""
+    text = (REPO_ROOT / ".github" / "workflows" / "process-submission.yml").read_text()
+    assert "gh issue lock" not in text
+
+
+def test_onboarding_never_grants_contractors_write():
+    """Write lets a contractor merge (self-approve), edit contracts, and read
+    org secrets from a workflow on any branch."""
+    text = (REPO_ROOT / "onboarding" / "new-contractor.py").read_text()
+    assert "permission=push" not in text
+    assert "permission=triage" in text
+
+
+def test_merge_commit_is_fetched_before_it_is_diffed():
+    """The approval job checks out main at depth 2. If another approval's
+    commit lands first, the merge commit's parent is outside that history
+    and both the find and verify diffs fail. The find step must fetch the
+    merge commit explicitly before its first diff."""
+    wf = _load(REPO_ROOT / ".github" / "workflows" / "process-approved.yml")
+    run = next(s for s in _steps(wf) if _id(s) == "find_submission")["run"]
+    fetch = run.index('git fetch --no-tags --depth=2 origin "$MERGE_SHA"')
+    assert fetch < run.index("git diff")

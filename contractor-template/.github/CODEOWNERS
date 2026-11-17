@@ -1,9 +1,9 @@
 # CODEOWNERS — auto-requests review from the QuantEcon admin on every PR.
 #
 # The admin handle is templated in by `onboarding/new-contractor.py`
-# (Phase 3b). Combined with branch protection on `main` (also configured
-# by onboarding), this gives a "1 approving review required" gate that
-# the contractor-payments workflow respects before allowing merge.
+# (Phase 3b). Approval itself is enforced at merge by the engine
+# (scripts/verify_approval.py: the merger must be in the engine's
+# approver list), not by branch protection, which is deferred.
 #
 # CODEOWNERS triggers regardless of PR author (the github-actions[bot]
 # opens submission PRs; the codeowner is requested either way), and is

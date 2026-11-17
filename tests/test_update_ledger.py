@@ -389,7 +389,7 @@ class TestTotalsAreRounded:
     disagreed."""
 
     def test_float_artefact_does_not_reach_the_ledger(self):
-        ledger = {"type": "hourly", "totals": {}}
+        ledger = {"type": "hourly", "currency": "AUD", "totals": {}}
         items = [
             {"hours": 1, "amount": 100.10, "status": "approved"},
             {"hours": 1, "amount": 100.10, "status": "approved"},
@@ -404,12 +404,12 @@ class TestTotalsAreRounded:
         assert repr(total) == "305.22"
 
     def test_jpy_integer_totals_are_unaffected(self):
-        ledger = {"type": "milestone", "totals": {}}
+        ledger = {"type": "milestone", "currency": "JPY", "totals": {}}
         _recompute_totals(ledger, [{"amount": 77000, "status": "approved"}])
         assert repr(ledger["totals"]["amount_to_date"]) == "77000"
 
     def test_superseded_entries_still_excluded(self):
-        ledger = {"type": "milestone", "totals": {}}
+        ledger = {"type": "milestone", "currency": "AUD", "totals": {}}
         _recompute_totals(ledger, [
             {"amount": 100.10, "status": "approved"},
             {"amount": 999.99, "status": "superseded"},
