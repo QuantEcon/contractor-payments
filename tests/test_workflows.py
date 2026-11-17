@@ -335,3 +335,14 @@ def test_onboarding_never_grants_contractors_write():
     text = (REPO_ROOT / "onboarding" / "new-contractor.py").read_text()
     assert "permission=push" not in text
     assert "permission=triage" in text
+
+
+def test_merge_commit_is_fetched_before_it_is_diffed():
+    """The approval job checks out main at depth 2. If another approval's
+    commit lands first, the merge commit's parent is outside that history
+    and both the find and verify diffs fail. The find step must fetch the
+    merge commit explicitly before its first diff."""
+    wf = _load(REPO_ROOT / ".github" / "workflows" / "process-approved.yml")
+    run = next(s for s in _steps(wf) if _id(s) == "find_submission")["run"]
+    fetch = run.index('git fetch --no-tags --depth=2 origin "$MERGE_SHA"')
+    assert fetch < run.index("git diff")

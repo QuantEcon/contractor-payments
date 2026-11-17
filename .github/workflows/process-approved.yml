@@ -113,6 +113,12 @@ jobs:
         env:
           MERGE_SHA: ${{ inputs.merge_commit_sha }}
         run: |
+          # The checkout is main at depth 2, so if another approval's
+          # `[skip ci]` commit landed on main before this job started, the
+          # merge commit's parent is outside that history and the diffs here
+          # and in the verify step fail. Fetch the merge commit and its
+          # parents explicitly; it's a no-op when they are already present.
+          git fetch --no-tags --depth=2 origin "$MERGE_SHA"
           # Files added/changed by the merge — diff against the first parent
           # (i.e. main's HEAD before the merge). `git diff-tree` on a merge
           # commit is silent by default, hence the explicit parent compare.

@@ -70,6 +70,16 @@ def verify(
     errors = verify_merge(changed_files, merged_by, approvers)
     warnings: list[str] = []
 
+    # A hand-edited file can parse as a list or a scalar. Refuse with a
+    # report rather than crash on `.get`, which would leave the failure
+    # comment with no reason in it.
+    if not isinstance(submission, dict):
+        errors.append(
+            f"The submission file isn't a YAML mapping (it parsed as "
+            f"{type(submission).__name__}), so it can't be verified."
+        )
+        return errors, warnings
+
     contract_id = submission.get("contract_id")
     if not is_safe_contract_id(contract_id):
         errors.append(f"Contract ID `{contract_id}` isn't valid.")

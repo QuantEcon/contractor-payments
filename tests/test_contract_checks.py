@@ -342,6 +342,23 @@ class TestVerifyApprovalCli:
         assert "Amount is `5000.0` AUD" in text
         assert "revert this merge" in text
 
+    def test_non_mapping_submission_is_refused_with_a_report(self, repo):
+        sub_path = repo / "submissions" / "2026-05" / "bad.yml"
+        sub_path.parent.mkdir(parents=True, exist_ok=True)
+        sub_path.write_text("- just\n- a list\n")
+        changed = repo / "changed.txt"
+        changed.write_text("submissions/2026-05/bad.yml\n")
+        fiscal = repo / "fiscal-host.yml"
+        _write_yaml(fiscal, {"quantecon": {"approvers": ["mmcky"]}})
+        report = repo / "report.md"
+        rc = verify_approval.main([
+            "--submission", str(sub_path), "--changed-files", str(changed),
+            "--merged-by", "mmcky", "--fiscal-host", str(fiscal),
+            "--repo-root", str(repo), "--report", str(report),
+        ])
+        assert rc == 1
+        assert "isn't a YAML mapping (it parsed as list)" in report.read_text()
+
     def test_approvers_come_from_engine_file(self, tmp_path):
         fiscal = tmp_path / "fh.yml"
         _write_yaml(fiscal, {"quantecon": {"approvers": ["@mmcky", " other "]}})
