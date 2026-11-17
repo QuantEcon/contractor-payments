@@ -191,6 +191,12 @@ def _run_typst(staged_typ: Path, output_path: Path, fmt: str, ppi: Optional[int]
     cmd = ["typst", "compile", "--format", fmt]
     if ppi is not None:
         cmd.extend(["--ppi", str(ppi)])
+    if fmt == "png":
+        # One auto-height page: Typst refuses to write a multi-page document
+        # to a single PNG, which made long months fail `/submit`. The PDF is
+        # unaffected and paginates normally. See the `preview` input in the
+        # templates.
+        cmd.extend(["--input", "preview=1"])
     cmd.extend([str(staged_typ), str(output_path)])
 
     try:
