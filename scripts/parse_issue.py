@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
+from scripts.money import hours_for_yaml, sum_decimal
+
 
 # ─── Result types ───────────────────────────────────────────────────────────
 
@@ -121,15 +123,25 @@ def _parse_date(s: str) -> Optional[date]:
 # ─── Hours parsing ──────────────────────────────────────────────────────────
 
 _HOURS_RE = re.compile(
-    r"^(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)?$",
+    r"^(\d+(?:\.(\d+))?)\s*(h|hr|hrs|hour|hours)?$",
     re.IGNORECASE,
 )
+
+# Hours are billed to the hundredth. More precision than that can't be shown
+# on the PDF, so the printed hours and the billed amount would disagree.
+_MAX_HOURS_DECIMALS = 2
 
 
 def _parse_hours(s: str) -> Optional[float]:
     """Parse hours, stripping common unit suffixes (h, hr, hrs, hour, hours)."""
     m = _HOURS_RE.match(s.strip())
     return float(m.group(1)) if m else None
+
+
+def _hours_decimals(s: str) -> int:
+    """Number of decimal places in an hours value that `_parse_hours` accepted."""
+    m = _HOURS_RE.match(s.strip())
+    return len(m.group(2) or "") if m else 0
 
 
 # ─── Amount parsing ─────────────────────────────────────────────────────────
@@ -351,6 +363,14 @@ def _parse_time_entries(
             errors.append(ParseError(
                 f"couldn't read hours from `{hours_str}` — please use a number "
                 f"(e.g. `4.5`).",
+                line=line_no,
+            ))
+            continue
+
+        if _hours_decimals(hours_str) > _MAX_HOURS_DECIMALS:
+            errors.append(ParseError(
+                f"hours can have at most {_MAX_HOURS_DECIMALS} decimal places "
+                f"(got `{hours_str}`) — e.g. `1.25` or `0.5`.",
                 line=line_no,
             ))
             continue
@@ -638,7 +658,7 @@ def parse_issue(body: str) -> ParseResult:
         return result
 
     if submission_type == "timesheet":
-        total_hours = round(sum(e["hours"] for e in entries), 2)
+        total_hours = hours_for_yaml(sum_decimal(e["hours"] for e in entries))
         result.submission = {
             "type": "timesheet",
             "contract_id": contract,
@@ -649,7 +669,9 @@ def parse_issue(body: str) -> ParseResult:
             "status": "pending",
         }
     else:
-        total_amount = round(sum(e["amount"] for e in entries), 2)
+        # Exact sum; enrich_submission re-derives the total with the
+        # contract's currency precision, so no rounding here.
+        total_amount = float(sum_decimal(e["amount"] for e in entries))
         result.submission = {
             "type": "milestone_invoice",
             "contract_id": contract,

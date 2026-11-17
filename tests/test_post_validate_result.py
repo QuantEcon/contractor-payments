@@ -76,8 +76,8 @@ class TestRenderSuccessComment:
 
     def test_milestone_shows_total_currency(self):
         out = render_success_comment(self._enriched_milestone())
-        assert "77000" in out
-        assert "JPY" in out
+        # Same thousands-separated display as the PDF, email and ledger issue.
+        assert "77,000 JPY" in out
 
     def test_milestone_does_not_show_rate(self):
         out = render_success_comment(self._enriched_milestone())

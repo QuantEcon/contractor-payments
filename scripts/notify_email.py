@@ -48,6 +48,8 @@ from typing import Optional
 
 import yaml
 
+from scripts.money import format_money
+
 
 # Map submission.type → human-readable label for the subject line.
 _TYPE_LABEL = {
@@ -65,11 +67,9 @@ def _load_yaml(path: Path) -> dict:
     return data
 
 
-def _fmt_amount(amount: float, currency: str) -> str:
-    """Currency-aware display. JPY: no decimals. AUD/USD: 2 decimals."""
-    if currency.upper() == "JPY":
-        return f"{int(round(amount)):,}"
-    return f"{amount:,.2f}"
+def _fmt_amount(amount, currency: str) -> str:
+    """Currency-aware display (JPY: no decimals; AUD/USD: 2), half-up."""
+    return format_money(amount, currency)
 
 
 def _read_testing_mode(fiscal_host_path: Path) -> bool:

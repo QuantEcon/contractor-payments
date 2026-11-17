@@ -35,6 +35,8 @@ from typing import Optional
 
 import yaml
 
+from scripts.money import format_hours, format_money
+
 
 # Same emoji conventions used in the running-ledger issue body, so admins
 # learn one visual vocabulary across both surfaces.
@@ -48,10 +50,9 @@ def _load_yaml(path: Path) -> dict:
     return data
 
 
-def _fmt_amount(amount: float, currency: str) -> str:
-    if currency.upper() == "JPY":
-        return f"{int(round(amount)):,}"
-    return f"{amount:,.2f}"
+def _fmt_amount(amount, currency: str) -> str:
+    """Currency-aware display (JPY: no decimals; AUD/USD: 2), half-up."""
+    return format_money(amount, currency)
 
 
 _TYPE_LABEL = {
@@ -91,7 +92,7 @@ def compose_comment(
             f"📒 **Ledger:** `{contract_id}` — added {amount_display} "
             f"(running total: {_fmt_amount(totals.get('amount_to_date', 0), currency)} {currency} "
             f"across {totals.get('submissions_count', 0)} submission(s); "
-            f"{totals.get('hours_to_date', 0)} hours)."
+            f"{format_hours(totals.get('hours_to_date', 0))} hours)."
         )
     else:  # milestone
         totals = ledger.get("totals", {})

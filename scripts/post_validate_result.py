@@ -32,7 +32,8 @@ from typing import Optional
 
 import yaml
 
-from scripts.create_submission_pr import enrich_submission, format_currency_amount
+from scripts.create_submission_pr import enrich_submission
+from scripts.money import format_hours, format_money
 
 
 SENTINEL = "<!-- submission-validate-result -->"
@@ -61,13 +62,13 @@ def render_success_comment(enriched: dict) -> str:
     if submission_type == "timesheet":
         currency = totals["currency"]
         lines.append(f"| Entries | {len(entries)} day{'' if len(entries) == 1 else 's'} |")
-        lines.append(f"| Hours | {totals['hours']} |")
-        lines.append(f"| Rate | {totals['rate']} {currency}/hour |")
-        lines.append(f"| **Total** | **{totals['amount']} {currency}** |")
+        lines.append(f"| Hours | {format_hours(totals['hours'])} |")
+        lines.append(f"| Rate | {format_money(totals['rate'], currency)} {currency}/hour |")
+        lines.append(f"| **Total** | **{format_money(totals['amount'], currency)} {currency}** |")
     elif submission_type == "milestone_invoice":
         currency = totals["currency"]
         lines.append(f"| Milestones | {len(entries)} |")
-        lines.append(f"| **Total** | **{totals['amount']} {currency}** |")
+        lines.append(f"| **Total** | **{format_money(totals['amount'], currency)} {currency}** |")
     else:
         # Defensive — unknown type. Surface what we have without computed totals.
         lines.append(f"| Type | `{submission_type}` |")
