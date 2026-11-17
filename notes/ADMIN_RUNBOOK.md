@@ -23,7 +23,7 @@ companion contractor-facing guide will live at
 | [4. Post-merge correction — revision or independent second invoice](#4-post-merge-correction--revision-or-supplemental) | ✅ | Two-mechanism model implemented + E2E verified (Phase 2.5) |
 | [5. PR closed without merging](#5-pr-closed-without-merging) | ⚠️ Partial | Minor |
 | [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ⚠️ Partial | Yes — no targeted re-run |
-| [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — no date enforcement |
+| [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — renewal steps are manual |
 | [8. Wrong currency / contract mismatch](#8-wrong-currency--contract-mismatch) | ✅ | — |
 | [9. Concurrent submissions](#9-concurrent-submissions) | ⚠️ Rare race | Low priority |
 
@@ -151,9 +151,14 @@ There are two paths and they behave differently:
 Works cleanly — same as Scenario 2. Workflow re-runs, PR auto-updates.
 **This is the recommended path.**
 
-**Path B — admin or contractor edits the YAML directly on the PR branch.**
-Possible because both have write access to the branch. **But the PDF
-and PNG will NOT auto-regenerate** — the workflow only fires on
+**Path B — admin edits the YAML directly on the PR branch.**
+Only admins can do this (contractors are Triage collaborators and can't
+push). **The PDF and PNG will NOT auto-regenerate**, and the merge-time
+verification (`scripts/verify_approval.py`) recomputes every total from
+the entries and the contract: a hand edit that changes hours or amounts
+without updating `totals` is refused at merge, before anything is
+stamped or emailed. Editing a description is fine; anything numeric,
+use Path A — the workflow only fires on
 `issues.opened` and `issues.edited`, not on push to a submission
 branch. The PR ends up with a YAML/PDF mismatch.
 
@@ -462,8 +467,13 @@ A new contract is being set up.
 
 **What happens (current behaviour).**
 
-- **No date-based enforcement.** The engine doesn't validate
-  submission `period` against `contract.start_date` / `end_date`.
+- **Date-based enforcement (since the contract-checks change).** At
+  `/validate` and `/submit` the engine rejects hourly entries dated
+  outside `start_date`–`end_date` and any claim on a contract with
+  `status: ended`; milestone dates outside the window only warn. The
+  same window check runs again at merge (status is not re-checked
+  there, so marking a contract `ended` after its last claim is filed
+  doesn't block that claim's approval).
   Submissions outside the contract window will still parse and create
   a PR. **Admin catches this in PR review.**
 - **Renewals**: a new `contracts/<new-id>.yml` is added. The
@@ -562,9 +572,84 @@ when the workflow tries to add a file that conflicts.
 
 ---
 
+## Access model and branch protection
+
+**Contractors are Triage collaborators, not Write.** Triage covers
+everything the submission flow needs from them: opening and editing
+their issues, `/validate` and `/submit` comments, the `submit` label,
+and reopening an issue to file a correction or revision. It can't push,
+merge, or edit workflows.
+
+Why not Write: with Write and no branch protection, a contractor could
+(1) merge their own submission PR, which the engine treated as approval
+and emailed to PSL; (2) edit `contracts/*.yml` and raise their own rate;
+and (3) add a workflow on any branch that reads the org-level `SMTP_*`
+secrets. (3) is not fixed by branch protection, because workflows on any
+branch get the secrets. `SMTP_PASSWORD` is an app password on admin@,
+and app passwords also work for IMAP, so that exposure was the whole
+admin mailbox.
+
+Defence in depth at merge time (`scripts/verify_approval.py`, step
+"Verify approval" in `process-approved.yml`): only handles listed in
+`quantecon.approvers` in the engine's `templates/fiscal-host.yml` count
+as approvers; the PR may only change `submissions/` and
+`generated_pdfs/`; and every total must recompute from the entries and
+the contract on `main`. A refusal stamps, ledgers and emails nothing,
+and the failure comment on the PR says why.
+
+### One-time migration for repos onboarded before this change
+
+Onboarding now grants Triage. Repos created earlier gave the contractor
+Write; downgrade each one (repeat per contractor):
+
+```bash
+gh api -X PUT repos/QuantEcon/contractor-HANDLE/collaborators/HANDLE -f permission=triage
+```
+
+Then confirm with
+`gh api repos/QuantEcon/contractor-HANDLE/collaborators/HANDLE/permission --jq .role_name`
+(expect `triage`).
+
+**Rotate the SMTP credential.** Any contractor who had Write could have
+read it. Revoke the admin@ app password, and preferably move sending to
+a dedicated send-only mailbox (e.g. a `payments@` user rather than an
+alias on admin@) so the secret can't read mail. Update `SMTP_USER`,
+`SMTP_PASSWORD` (and `SMTP_FROM` if it changes) as org secrets.
+
+Issues are now **closed but not locked** on `/submit`: only Write+ can
+unlock an issue, so a lock would block a Triage contractor's revision
+path. Issues locked by the old engine can be unlocked by an admin when a
+contractor needs to revise one.
+
+### If an approval is refused
+
+The PR's failure comment includes a "Verify approval: ❌" row and the
+reasons. In every case the recovery is the same and nothing has reached
+PSL:
+
+1. Revert the merge on `main` (GitHub's **Revert** button on the PR,
+   then merge the revert PR). That removes the pending submission YAML
+   and PDFs the PR added.
+2. Fix the cause — merge it yourself if the merger wasn't an approver;
+   put contract changes in their own admin PR first; let the engine
+   regenerate a hand-edited YAML.
+3. Reopen the original issue and `/submit`. The engine opens a fresh PR;
+   an approver merges it.
+
+PRs opened by the engine **before** the Decimal-money change can be
+refused if their amount landed exactly on a half-cent (the old float
+rounding went the other way). Re-run `/submit` on the issue before
+merging such a PR; it regenerates the YAML and PDF with correct
+rounding.
+
+---
+
 ## Branch protection (deferred)
 
 **Status as of 2026-05-20: contractor repos run without branch protection.**
+With contractors on Triage (above) the only writers are admins and the
+engine, which removes most of the risk this section describes; the
+GitHub App path below is still worthwhile as a guard against mistakes.
 This is a deliberate short-term acceptance, not an oversight. The
 section below records (a) what's at risk in the current state, (b) why
 the original design no longer works, and (c) the step-by-step migration
@@ -573,7 +658,8 @@ plan to fix it once we have time.
 ### Current state and risk
 
 Every contractor repo is created private with two collaborators:
-the contractor (Write) and the admin (Admin). Nothing on the repo's
+the contractor (Triage since the access-model change; Write before) and
+the admin (Admin). Nothing on the repo's
 `main` branch is technically enforced — either collaborator can push
 directly, force-push, or delete `main`. The intended approval flow
 (issue → PR → admin review → merge → engine workflow) is **operationally**
@@ -679,6 +765,12 @@ From the App settings page, click **Install App** in the left sidebar.
 3. Confirm install.
 
 #### Step 3 — Store credentials as org secrets
+
+> **Only do this while every contractor is on Triage.** The App's private
+> key lets anyone holding it mint a token with write access to *every*
+> repo the App is installed on. Any collaborator with Write on any
+> contractor repo can read org secrets from a workflow, so a single
+> Write contractor would gain write access to all contractor repos.
 
 The engine workflow needs the App ID + private key to mint tokens.
 Both live as **org-level** Actions secrets on `QuantEcon` (so every

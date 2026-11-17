@@ -4,8 +4,8 @@ name: Process submission (reusable)
 # modes, selected by the caller via the `mode` input:
 #
 #   submit   — parse the issue body and (on success) open a PR with
-#              structured YAML + rendered PDF + PNG preview. Close and
-#              lock the originating issue. Remove the `submit` label if
+#              structured YAML + rendered PDF + PNG preview. Close the
+#              originating issue (not locked: see the close step). Remove the `submit` label if
 #              present. Same downstream behaviour as pre-Phase-3c flow.
 #
 #   validate — parse the issue body in dry-run mode and post a
@@ -51,7 +51,7 @@ on:
         default: ""
       mode:
         description: >
-          'submit' (default) — parse + open PR + close/lock issue + remove
+          'submit' (default) — parse + open PR + close issue + remove
           submit label. 'validate' — parse dry-run + post sentinel-marked
           result comment, no PR. See PLAN §8 Phase 3c.
         required: false
@@ -270,7 +270,12 @@ jobs:
           python -m scripts.post_validate_result clear \
             --issue "$ISSUE_NUMBER"
 
-      - name: Close and lock the issue
+      # Closed, deliberately NOT locked. Contractors are Triage collaborators
+      # (no Write), and only Write+ can unlock an issue or reliably comment on
+      # a locked one — so a lock would strand the revision path (reopen, edit,
+      # `/submit`). The PR's YAML is the record of what was filed; later edits
+      # to this issue's body change nothing unless `/submit` runs again.
+      - name: Close the issue
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -287,15 +292,14 @@ jobs:
             --json number \
             --jq '.[0].number // empty')
           if [ -n "$PR_NUMBER" ]; then
-            COMMENT="Submission filed — see #${PR_NUMBER}. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)."
+            WHERE="see #${PR_NUMBER}"
           else
-            COMMENT="Submission filed — see the PR linked above. This issue is closed and locked now; corrections go via the PR branch (or reopen + /submit to file a revision)."
+            WHERE="see the PR linked above"
           fi
+          COMMENT="Submission filed — ${WHERE}. This issue is now closed. To correct the submission, reopen this issue, edit the entries, and comment \`/submit\` again (before approval this updates the PR; after approval it files a revision)."
           gh issue close "$ISSUE_NUMBER" \
             --comment "$COMMENT" \
             || echo "Issue close failed (may already be closed); continuing."
-          gh issue lock "$ISSUE_NUMBER" --reason resolved \
-            || echo "Issue lock failed (may already be locked); continuing."
 
       - name: Post submit-error comment (on parse failure)
         if: inputs.mode == 'submit' && steps.parse.outputs.parse_ok == 'false'

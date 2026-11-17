@@ -29,8 +29,8 @@ body:
           PDF; an admin reviews and merges.
 
         **Corrections before submission:** edit the issue body.
-        **After submission:** the issue is locked; edit the PR branch
-        directly, or ask an admin to revise.
+        **After submission:** the issue is closed. To correct it,
+        reopen it, edit the entries, and comment `/submit` again.
 
         Need help? See the
         [Submit a timesheet](https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/) guide.

@@ -170,7 +170,8 @@ Within ~30 seconds:
    a PNG preview.
 2. Your QuantEcon administrator is automatically requested as
    reviewer.
-3. The originating issue is **closed and locked**.
+3. The originating issue is **closed**. To change anything later, see
+   [Corrections and revisions](corrections.md).
 
 ![The opened Pull Request with an inline PNG preview of the rendered milestone invoice.](img/mi-07-pr-opened.png)
 

@@ -319,3 +319,19 @@ def test_submission_parse_step_runs_contract_checks():
     run = parse["run"]
     assert run.index("scripts.parse_issue") < run.index("scripts.check_submission")
     assert run.index("scripts.check_submission") < run.index('echo "parse_ok=true"')
+
+
+def test_submitted_issues_are_not_locked():
+    """Contractors are Triage collaborators. Only Write+ can unlock an issue,
+    so locking it on /submit would block their reopen → /submit revision
+    path. See ADMIN_RUNBOOK.md → "Access model and branch protection"."""
+    text = (REPO_ROOT / ".github" / "workflows" / "process-submission.yml").read_text()
+    assert "gh issue lock" not in text
+
+
+def test_onboarding_never_grants_contractors_write():
+    """Write lets a contractor merge (self-approve), edit contracts, and read
+    org secrets from a workflow on any branch."""
+    text = (REPO_ROOT / "onboarding" / "new-contractor.py").read_text()
+    assert "permission=push" not in text
+    assert "permission=triage" in text

@@ -168,7 +168,7 @@ QuantEcon/contractor-{handle}/
 Phase 3 onboarding seeds both `hourly-timesheet.yml` and `milestone-invoice.yml` unconditionally. The reimbursement template lands in **Phase 5** alongside the multi-select onboarding feature, which lets the admin opt repos in or out of any of the three template types (useful once reimbursement-only payees exist).
 
 Access control:
-- The contractor — **Write** (so they can push edits to their own submission PR branches).
+- The contractor — **Triage** (open/edit their issues, comment `/validate` / `/submit`, apply the `submit` label, reopen issues for revisions). Not Write: Write could merge (self-approve), edit contracts, and read org secrets from a workflow. See `notes/ADMIN_RUNBOOK.md` → "Access model and branch protection".
 - The admin (`mmcky` initially) — **Admin**.
 - The payments manager — **Read** (so they can see PDFs and get notifications).
 
@@ -1060,6 +1060,7 @@ Deferred to a standalone phase because reimbursements are materially more comple
 
 - All contractor repos are private. The engine repo could later be made public as a reference implementation; by design it holds no data.
 - No third-party GitHub Actions on any financial-data path. Only `actions/checkout` and `actions/setup-python` from first-party `actions/*`.
+- **Contractors are Triage collaborators, not Write**, and approval is verified at merge: the merger must be in `quantecon.approvers` (engine `templates/fiscal-host.yml`), the PR may only touch `submissions/` + `generated_pdfs/`, and totals are recomputed from entries + contract before anything is stamped or emailed (`scripts/verify_approval.py`).
 - Branch protection on `main` for every contractor repo: **DEFERRED (no protection in place as of 2026-05-20)** — original ruleset-based spec no longer works after GitHub UI changes removed the GitHub Actions integration as a bypass actor; migration path is a dedicated GitHub App for the engine push. See §8 Phase 3b "Branch protection on `main` — DEFERRED" and `notes/ADMIN_RUNBOOK.md`.
 - GitHub Secrets only for credentials the workflow needs. From Phase 2: SMTP credentials (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) live as **org-level** secrets on `QuantEcon`, so every contractor repo's reusable-workflow run reads them without per-repo setup. Never in any YAML; never committed.
 - **Email content is sensitive.** Approval emails carry the contractor's real name, contract ID, period, amount, and an attached PDF with the same data. In transit: TLS via SMTP submission port 587. At rest: in the PSL recipient's inbox + Cc on the QuantEcon admin mailbox. We accept this — the recipient is the fiscal host, the email is what triggers payment, and there's no way to deliver value to PSL without the data being present at the receiving end. The `notifications.testing_mode` flag keeps PSL off the recipient list until a repo is explicitly cut over. It resolves per-repo — the contractor repo's `config/settings.yml` overrides the engine-wide default in `templates/fiscal-host.yml`, which stays `true` (fail-safe); a repo that configures nothing never emails PSL (see §9 "Email recipients & testing").

@@ -55,11 +55,13 @@ QuantEcon/contractor-{handle}       ← per-contractor (private)
    `submit` label). The thin caller workflow fires `process-submission.yml`
    in this repo. Scripts parse the issue body, write a structured submission
    YAML, render PDF + PNG via Typst, open a PR on the contractor's repo
-   with the PNG embedded inline, and close+lock the originating issue.
+   with the PNG embedded inline, and close the originating issue.
 4. **Review.** Admin reviews the PR — verifies the contract reference,
    amounts, description.
-5. **Approve.** Admin merges. The engine re-renders the PDF with the
-   approval block, updates the ledger, emails the approved PDF to PSL
+5. **Approve.** Admin merges. The engine first verifies the merge — an
+   authorised approver merged it, the PR only touched generated files,
+   and every total recomputes from the entries and the contract — then
+   re-renders the PDF with the approval block, updates the ledger, emails the approved PDF to PSL
    Foundation (with the QuantEcon admin Cc'd), and posts an audit comment
    on the closed issue.
 
