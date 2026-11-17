@@ -2,8 +2,9 @@
 
 **Status:** proposal for review. Nothing here is built yet.
 **Replaces:** the issue-form design in PLAN.md §4.7 and the Phase 5 build
-plan in §8, which PR #4 implemented and then parked (see
-`notes/PHASE5-SHELVED.md` on the `phase-5-reimbursement` branch).
+plan in §8, which [PR #4](https://github.com/QuantEcon/contractor-payments/pull/4) implemented and then parked. The full
+reasoning is in [`notes/PHASE5-SHELVED.md`](https://github.com/QuantEcon/contractor-payments/blob/phase-5-reimbursement/notes/PHASE5-SHELVED.md) on the
+`phase-5-reimbursement` branch.
 
 ---
 
@@ -24,7 +25,7 @@ path the timesheet engine already has.
 
 ## 2. Why not GitHub issues
 
-PR #4 built reimbursements on the timesheet pattern (issue form → PR → merge)
+[PR #4](https://github.com/QuantEcon/contractor-payments/pull/4) built reimbursements on the timesheet pattern (issue form → PR → merge)
 and measured these problems:
 
 | Problem | Consequence |
@@ -37,8 +38,8 @@ and measured these problems:
 The underlying mismatch: for timesheets and invoices **the data is the
 deliverable**, so GitHub's diff-and-review model fits. For reimbursements
 **the evidence is the deliverable**, and receipts are what GitHub handles
-worst. Contractors moving to Triage (PR #13) removes the credential-theft
-objection, but not the other three.
+worst. Moving contractors to Triage, as proposed in [PR #13](https://github.com/QuantEcon/contractor-payments/pull/13), would
+remove the credential-theft objection, but not the other three.
 
 ## 3. Goals and constraints
 
@@ -93,7 +94,7 @@ emails), not a personal account.
 |---|---|---|
 | Email | Collected automatically (verified sign-in) | Identity of the claimant |
 | Full name | Short answer | As it should appear on the claim |
-| Payout currency | Dropdown (AUD, USD, JPY, Other) | The currency PSL pays in; see §8 |
+| Payout currency | Dropdown (the currencies PSL can pay, plus Other) | See §8. **Other** branches to a one-question section asking for the ISO code (below) |
 | Purpose | Paragraph | Trip or event and why the expenses were needed |
 | Pre-approval reference | Short answer, optional | Required by policy above a threshold (§12) |
 | Corrects claim | Short answer, optional | Previous claim ID, for a revision (§9) |
@@ -107,10 +108,21 @@ duplicating the first in the Forms editor)
 | Category | Dropdown | e.g. travel, accommodation, meals, conference fees, equipment, software, other |
 | Description | Short answer | What it was |
 | Amount on receipt | Short answer, number validation | In the receipt's currency |
-| Receipt currency | Dropdown | ISO code |
+| Receipt currency | Dropdown (common codes, plus Other) | |
+| Receipt currency code | Short answer, optional, regex `^[A-Z]{3}$` | Required when the dropdown says Other; `build_packet` errors if it is missing |
 | Amount charged in payout currency | Short answer, number validation | From the card or bank statement; equals the receipt amount when currencies match |
 | Receipt | File upload, 1–5 files, PDF or image, 10 MB | **This line's** receipt: linkage by construction |
 | Add another expense? | Multiple choice, go to section by answer | Yes → next Expense section; No → Declaration |
+
+**Currency codes.** Forms can't show a field conditionally inside a
+section, so "Other" is handled two ways. For the payout currency, the answer
+branches to a one-question section ("Payout currency code", short answer,
+regular-expression validation `^[A-Z]{3}$`) that then continues to Expense 1.
+For receipt currencies, each expense section carries an optional code field
+with the same validation, which `build_packet` requires whenever the dropdown
+says Other. Either way the engine then checks the code against its ISO 4217
+table (§7), so a well-formed but non-existent code like `XYZ` is caught
+before anything is rendered.
 
 Google Forms has no repeating groups. Branching between duplicated sections
 gives the same result for up to ten lines, without code. A claim with more
@@ -182,7 +194,9 @@ the review surface and in the packet's index):
 |---|---|
 | File type sniffed from magic bytes is PDF, PNG or JPEG (not the extension) | Error. HEIC from iPhones: convert or reject, see §12 |
 | Every line has at least one receipt | Warning (an admin may accept a missing receipt with a reason) |
-| Amounts positive, within the currency's decimal places (`scripts/money.py`) | Error |
+| Every currency code is a real ISO 4217 code, looked up in a table the engine carries (code → decimal places, e.g. JPY 0, KWD 3) | Error |
+| Payout currency is one PSL can pay (a configured list, §12) | Error |
+| Amounts positive, within the currency's decimal places (via the Decimal money helper `scripts/money.py` proposed in [PR #13](https://github.com/QuantEcon/contractor-payments/pull/13); 5a extends its decimal-places lookup from "JPY or two" to the ISO table) | Error |
 | Category in the allowed list | Warning |
 | Date not in the future; not older than the policy limit | Error / warning |
 | Receipt currency ≠ payout currency but claimed amount equals receipt amount | Warning (probably not converted) |
@@ -238,7 +252,7 @@ workflow, as contractor repos do today.
    warnings and a link to the packet in Drive.
 2. **Review:** the admin opens the packet from the PR link and checks the
    receipts.
-3. **Merge = approval:** the same checks as PR #13 (`verify_approval`: the
+3. **Merge = approval:** the same checks as [PR #13](https://github.com/QuantEcon/contractor-payments/pull/13) (`verify_approval`: the
    merger is in `quantecon.approvers`, the PR touched only `claims/` and
    `previews/`, totals recompute), then: re-render as approved → email PSL
    the packet → append to `ledger/<claimant>.yml` (per payout currency) →
@@ -296,25 +310,27 @@ audit trail stronger than the Sheet is needed.
 4. Retention period for receipts and claim records.
 5. Is one PDF per claim the right shape for their books, or would they also
    like a CSV line export?
+6. Which payout currencies can they pay? This becomes the configured list
+   the payout-currency dropdown and the §7 check use.
 
 **For QuantEcon**
 
-6. Pre-approval threshold for travel, and who grants it.
-7. Category list and per-category limits, if any.
-8. Whether file upload works for respondents outside the QuantEcon domain:
+7. Pre-approval threshold for travel, and who grants it.
+8. Category list and per-category limits, if any.
+9. Whether file upload works for respondents outside the QuantEcon domain:
    uploads need a Google sign-in, and Workspace settings can restrict them
    to internal users. Test before announcing the form.
-9. HEIC (iPhone) photos: convert to JPEG in `build_packet`, or ask claimants to
+10. HEIC (iPhone) photos: convert to JPEG in `build_packet`, or ask claimants to
    upload JPEG/PDF.
-10. Who owns the Form and folders: the payments mailbox (recommended) or an
+11. Who owns the Form and folders: the payments mailbox (recommended) or an
     admin's account.
 
 ## 13. Reuse
 
 | From | Reused for |
 |---|---|
-| PR #4 (`phase-5-reimbursement`) | `templates/reimbursement.typ` as the summary-page starting point; magic-byte type sniffing from `scripts/fetch_receipts.py`; per-currency ledger shape; category allowlist validation |
-| Engine (`main` + PR #13) | `scripts/money.py`; `verify_approval` and the approver list; `notify_email` (attachments, testing mode, Reply-To); revision/supersede ledger logic; fiscal-host timezone for dates; Typst toolchain and render tests |
+| [PR #4](https://github.com/QuantEcon/contractor-payments/pull/4) (`phase-5-reimbursement`) | `templates/reimbursement.typ` as the summary-page starting point; magic-byte type sniffing from `scripts/fetch_receipts.py`; per-currency ledger shape; category allowlist validation |
+| Engine (`main` + [PR #13](https://github.com/QuantEcon/contractor-payments/pull/13), not yet merged) | `scripts/money.py`; `verify_approval` and the approver list; `notify_email` (attachments, testing mode, Reply-To); revision/supersede ledger logic; fiscal-host timezone for dates; Typst toolchain and render tests |
 | Not reused | Issue form, attachment-URL parsing and token fetch, per-repo reimbursement config, `sync_templates` form gating |
 
 ## 14. Alternatives considered
