@@ -25,6 +25,12 @@ psl_foundation:
 quantecon:
   name: QuantEcon
   address: null
+  # GitHub handles whose merge of a submission PR counts as approval.
+  # process-approved.yml refuses (nothing stamped, ledgered or emailed) when
+  # anyone else merges. Kept here, in the engine, so it can't be widened from
+  # a contractor repo. An empty or missing list refuses every approval.
+  approvers:
+    - mmcky
 
 # Email notification config for approved submissions (Phase 2).
 #

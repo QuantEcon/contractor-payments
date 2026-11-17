@@ -41,8 +41,16 @@ SENTINEL = "<!-- submission-validate-result -->"
 
 # ─── Pure rendering (testable) ──────────────────────────────────────────────
 
-def render_success_comment(enriched: dict) -> str:
-    """Render a positive validate-result comment from an enriched submission."""
+def render_success_comment(
+    enriched: dict,
+    warnings: Optional[list[dict]] = None,
+) -> str:
+    """Render a positive validate-result comment from an enriched submission.
+
+    `warnings` are the parser's and contract checks' non-blocking notes (e.g.
+    a milestone amount that differs from the contract schedule). They appear
+    on the PR for the admin too, so the contractor should see them first.
+    """
     submission_type = enriched["type"]
     contract_id = enriched["contract_id"]
     period = enriched["period"]
@@ -72,6 +80,12 @@ def render_success_comment(enriched: dict) -> str:
     else:
         # Defensive — unknown type. Surface what we have without computed totals.
         lines.append(f"| Type | `{submission_type}` |")
+
+    if warnings:
+        lines.append("")
+        lines.append("_Notes (non-blocking — your administrator will see these on the PR):_")
+        for w in warnings:
+            lines.append(f"- {w['message']}")
 
     lines.append("")
     lines.append(
@@ -188,6 +202,7 @@ def post_success(
     submission: dict,
     contract: dict,
     submitter: str,
+    warnings: Optional[list[dict]] = None,
 ) -> None:
     enriched = enrich_submission(
         submission,
@@ -197,7 +212,7 @@ def post_success(
         issue_number=issue,
         submitted_date="(dry-run)",
     )
-    body = render_success_comment(enriched)
+    body = render_success_comment(enriched, warnings)
     existing = find_existing_comment_id(repo, issue)
     if existing is not None:
         update_comment(repo, existing, body)
@@ -243,6 +258,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_success = sub.add_parser("success", help="Post or update the validate-result comment on parse success.")
     p_success.add_argument("--submission-file", required=True,
                            help="JSON output from parse_issue.py (--output-json).")
+    p_success.add_argument("--errors-file", default=None,
+                           help="JSON from parse_issue.py (--output-errors-json), for warnings.")
     p_success.add_argument("--contract-file", required=True,
                            help="Path to contracts/{contract_id}.yml in the contractor repo.")
     p_success.add_argument("--submitter", required=True,
@@ -271,7 +288,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             submission = json.load(f)
         with open(args.contract_file, encoding="utf-8") as f:
             contract = yaml.safe_load(f)
-        post_success(args.repo, args.issue, submission, contract, args.submitter)
+        warnings: list[dict] = []
+        if args.errors_file:
+            with open(args.errors_file, encoding="utf-8") as f:
+                warnings = json.load(f).get("warnings", [])
+        post_success(args.repo, args.issue, submission, contract, args.submitter, warnings)
     elif args.mode == "error":
         with open(args.errors_file, encoding="utf-8") as f:
             data = json.load(f)

@@ -134,6 +134,7 @@ jobs:
         id: parse
         env:
           PYTHONPATH: engine
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           PARSE_RC=0
           python -m scripts.parse_issue \
@@ -141,6 +142,19 @@ jobs:
             --output-json /tmp/submission.json \
             --output-errors-json /tmp/errors.json \
             || PARSE_RC=$?
+          # Check the parsed claim against its contract and ledger (ended
+          # contract, dates outside the contract, milestone already paid...).
+          # Findings join the parser's errors.json, so they reach the
+          # contractor as the usual "needs a fix" comment; on any error the
+          # script deletes submission.json, which routes this run down the
+          # parse-failure path below. A crash here fails the step (engine
+          # fault), same as a crash in the parser.
+          if [ -f /tmp/submission.json ]; then
+            python -m scripts.check_submission \
+              --submission-file /tmp/submission.json \
+              --errors-file /tmp/errors.json \
+              --issue "$ISSUE_NUMBER"
+          fi
           if [ -f /tmp/submission.json ]; then
             echo "parse_ok=true" >> "$GITHUB_OUTPUT"
           elif [ -f /tmp/errors.json ]; then
@@ -174,6 +188,7 @@ jobs:
           CONTRACT_ID=$(python -c "import json; print(json.load(open('/tmp/submission.json'))['contract_id'])")
           python -m scripts.post_validate_result success \
             --submission-file /tmp/submission.json \
+            --errors-file /tmp/errors.json \
             --contract-file "contracts/${CONTRACT_ID}.yml" \
             --submitter "$ISSUE_AUTHOR" \
             --issue "$ISSUE_NUMBER"
