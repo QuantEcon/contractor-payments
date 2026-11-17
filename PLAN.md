@@ -1,6 +1,6 @@
 # QuantEcon Contractor Payments — Implementation Plan
 
-**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice; Reimbursement Claim deferred to Phase 5.
+**Status:** Working draft. v1 scope spans Hourly Timesheet + Milestone Invoice. Reimbursement claims are handled outside the issue flow — Phase 5, proposed in [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md).
 **Source issue:** [QuantEcon/admin#3 — PRJ: QuantEcon Timesheet Management System](https://github.com/QuantEcon/admin/issues/3)
 **Related (broader vision, separate track):** [QuantEcon/admin#5 — PRJ: QuantEcon admin infrastructure](https://github.com/QuantEcon/admin/issues/5)
 
@@ -20,7 +20,7 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
 - [x] **Phase 3b** — Onboarding script for new contractor repos (E2E verified on a fresh `contractor-mmcky` repo: onboarding script → submit → PDF → ledger → email all worked first try)
 - [x] **Phase 3c** — Deferred submission: issue-as-draft + `/submit` + `/validate` + period-close reminders (full E2E verified on `contractor-engine-test` 2026-05-19: six scenarios passed including the parse-fail → fix → re-submit arc and reminder idempotency)
 - [ ] **Phase 4** — Docs + first real contractors (per-repo `testing_mode` opt-in to production; see §9 "Email recipients & testing")  ← **current target**
-- [ ] **Phase 5** — Reimbursement Claim engine (post-launch)
+- [ ] **Phase 5** — Reimbursement claims via Google Form + claim packet PDF (proposed: [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md); the issue-based build in PR #4 is parked)
 
 ## Contents
 
@@ -34,7 +34,7 @@ Phase progress — high-level summary. Detailed task lists per phase live in [§
    - 4.4 [Hourly Timesheet form](#44-githubissue_templatehourly-timesheetyml--hourly-timesheet-form)
    - 4.5 [Submission validation and failure handling](#45-submission-validation-and-failure-handling)
    - 4.6 [Milestone Invoice form](#46-githubissue_templatemilestone-invoiceyml--milestone-invoice-form)
-   - 4.7 [Reimbursement Claim form](#47-githubissue_templatereimbursement-claimyml--reimbursement-claim-form)
+   - 4.7 [Reimbursement claims — outside the issue flow](#47-reimbursement-claims--outside-the-issue-flow)
    - 4.8 [Generic submission YAML shape](#48-generic-submission-yaml-shape)
 5. [Onboarding script](#5-onboarding--onboardingnew-contractorpy)
 6. [v1 scope](#6-v1-scope)
@@ -68,7 +68,7 @@ A single shared repo with all contractors as collaborators would leak every cont
 
 Selected: one private repo per contractor under the QuantEcon org, named `QuantEcon/contractor-{github-handle}`. Privacy by construction; preserves all GitHub-native benefits; at 5–10 contractors the onboarding overhead is a single scripted command.
 
-**Why `contractor-{handle}` and not `timesheets-{handle}`:** the repo will later absorb other contractor-related artefacts (invoices, reimbursements, end-of-year statements, contract documents) without renaming. The system we're building is the first feature, not the only one.
+**Why `contractor-{handle}` and not `timesheets-{handle}`:** the repo will later absorb other contractor-related artefacts (invoices, end-of-year statements, contract documents; reimbursements are handled separately, §4.7) without renaming. The system we're building is the first feature, not the only one.
 
 ---
 
@@ -149,7 +149,6 @@ QuantEcon/contractor-{handle}/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── hourly-timesheet.yml      (contract dropdown filtered to hourly contracts)
 │   │   ├── milestone-invoice.yml     (contract dropdown filtered to milestone contracts)
-│   │   ├── reimbursement-claim.yml   (Phase 5; see §8)
 │   │   └── config.yml                (blank issues disabled)
 │   ├── workflows/
 │   │   ├── issue-to-pr.yml           (calls reusable from QuantEcon/contractor-payments)
@@ -165,7 +164,7 @@ QuantEcon/contractor-{handle}/
 └── README.md
 ```
 
-Phase 3 onboarding seeds both `hourly-timesheet.yml` and `milestone-invoice.yml` unconditionally. The reimbursement template lands in **Phase 5** alongside the multi-select onboarding feature, which lets the admin opt repos in or out of any of the three template types (useful once reimbursement-only payees exist).
+Phase 3 onboarding seeds both `hourly-timesheet.yml` and `milestone-invoice.yml` unconditionally. Reimbursements do not use a contractor-repo issue form (see §4.7 and [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md)), so no third template is planned.
 
 Access control:
 - The contractor — **Triage** (open/edit their issues, comment `/validate` / `/submit`, apply the `submit` label, reopen issues for revisions). Not Write: Write could merge (self-approve), edit contracts, and read org secrets from a workflow. See `notes/ADMIN_RUNBOOK.md` → "Access model and branch protection".
@@ -203,7 +202,7 @@ Written once by the onboarding script; rarely changes afterwards.
 
 ### 4.2 `contracts/{contract-id}.yml` — contract terms
 
-The contract is the authorization for **labor claims** (hourly or milestone). Reimbursements are *not* tied to a contract — they're contractor-level and authorized per-claim via the approval flow (see §4.6).
+The contract is the authorization for **labor claims** (hourly or milestone). Reimbursements are *not* tied to a contract — they're claimant-level, authorized per claim, and handled outside the contractor repo (see §4.7).
 
 Two contract types:
 
@@ -284,17 +283,16 @@ One file per contract. To renew, the admin copies an existing contract file, edi
 
 ### 4.3 Submission forms — overview
 
-Each contractor repo exposes three issue-template options on the "New Issue" page:
+Each contractor repo exposes two issue-template options on the "New Issue" page:
 
 | Template | Filename | Filed against | What it claims |
 |---|---|---|---|
 | 📋 Hourly Timesheet | `hourly-timesheet.yml` | Hourly contract | Hours worked in a month |
 | 🎯 Milestone Invoice | `milestone-invoice.yml` | Milestone contract | A specific milestone delivered |
-| 🧾 Reimbursement Claim | `reimbursement-claim.yml` | Contractor (no contract) | Out-of-pocket expenses |
 
 GitHub renders each YAML template as a web form on the "New Issue" page; on submit, GitHub serialises the field values into the issue body as markdown. `scripts/parse_issue.py` then parses that markdown into a structured submission YAML (§4.7).
 
-All three follow the same engine flow: form submitted → parser runs → PR opened with structured YAML + PDF + PNG preview → admin reviews and merges → ledger updated + payments-manager notified (Phase 2).
+Both follow the same engine flow: form submitted → parser runs → PR opened with structured YAML + PDF + PNG preview → admin reviews and merges → ledger updated + payments-manager notified (Phase 2).
 
 ### 4.4 `.github/ISSUE_TEMPLATE/hourly-timesheet.yml` — Hourly Timesheet form
 
@@ -309,7 +307,7 @@ The interface contractors interact with. GitHub renders this YAML as a web form 
 5. **Additional notes** (textarea, optional) — free text.
 6. **Confirmation** (checkbox, required) — single ack of accuracy.
 
-The `period` is computed as `{year}-{month[:2]}` by the parser (e.g. `2026-07`). Splitting Year and Month means the admin only edits the Year list annually, not the full twelve-row Period list. Same pattern across all three submission forms (§4.6, §4.7).
+The `period` is computed as `{year}-{month[:2]}` by the parser (e.g. `2026-07`). Splitting Year and Month means the admin only edits the Year list annually, not the full twelve-row Period list. Same pattern across both submission forms (§4.6).
 
 **The form file** (post-substitution example):
 
@@ -515,42 +513,20 @@ For contractors on a milestone contract. The contract is lightweight metadata (�
 
 **Submission ID:** `{handle}-invoice-{period}` (e.g. `mmcky-invoice-2025-11`). Period-based for consistency with timesheets; collision suffix `-vN` applies the same way (§v1.1).
 
-### 4.7 `.github/ISSUE_TEMPLATE/reimbursement-claim.yml` — Reimbursement Claim form
+### 4.7 Reimbursement claims — outside the issue flow
 
-Filed against the **contractor**, not a specific contract. RAs and staff under a contract submit reimbursements here for out-of-pocket expenses (travel, equipment, software, etc.). Approval is per-claim via the standard PR review flow — there is no pre-authorization in a contract.
+Reimbursements are **not** filed as issues in contractor repos. [PR #4](https://github.com/QuantEcon/contractor-payments/pull/4) built that design (issue form → PR → merge, receipts as issue attachments) and parked it: GitHub anonymizes dragged-in attachment filenames, nothing links a receipt to its line item, `GITHUB_TOKEN` cannot fetch attachments, and claims cannot be centralized without exposing every claimant's receipts to every other claimant. Full reasoning: [`notes/PHASE5-SHELVED.md`](https://github.com/QuantEcon/contractor-payments/blob/phase-5-reimbursement/notes/PHASE5-SHELVED.md) on the `phase-5-reimbursement` branch.
 
-A single reimbursement claim covers one **period** (calendar month) and may bundle multiple line items incurred on different dates within that month — e.g. one trip with flight + hotel + meals across four days.
-
-**Form fields:**
-
-1. **Year** + **Month** (dropdowns, both required) — same two-dropdown pattern as §4.4. Parser combines them to `YYYY-MM`. The period is the month the claim is *filed against*, not necessarily when the expense was incurred (though usually the same month).
-2. **Line items** (textarea, required) — one row per receipt, pipe-delimited: `YYYY-MM-DD | amount | category | description`. Currency is fixed for the submission (see field 3); per-line currency mixing is out of scope in v1. Categories must match the contractor repo's `config/settings.yml` allowed list.
-3. **Currency** (dropdown, required) — ISO 4217 code; same supported list as contracts (`AUD | USD | JPY` in v1, extensible). One currency per submission.
-4. **Total amount** (number, required) — contractor enters the total; parser verifies it matches the sum of line-item amounts (rejects on mismatch as a sanity check).
-5. **Trip / project context** (textarea, optional) — free text. Useful for trips where line items don't individually justify their purpose.
-6. **Receipts** — see "Receipt storage" below.
-7. **Confirmation** (checkbox, required) — single ack.
-
-**Receipt storage — DEFERRED.** Where receipts physically live (GitHub issue attachments? Committed PDFs in `receipts/<period>/`? External store?) is an open decision (see §10). The Reimbursement engine ships in **Phase 5** (post-launch — see §8) *after* this decision is made and the multi-currency design is settled; the form schema above will pick up a `receipts:` field and a per-line-item `currency` column then.
-
-**Parser must reject:**
-
-- Any line-item date outside the selected `Period` (warn rather than reject if a trip legitimately spans a month boundary — exact policy decided during build).
-- Sum of line items ≠ stated total.
-- Empty line items.
-- Currency not in supported list.
-- Category not in the contractor repo's allowed list.
-
-**Submission ID:** `{handle}-reimbursement-{period}` (e.g. `mmcky-reimbursement-2025-09`). Collision suffix `-vN` applies if a second reimbursement is filed for the same month — a legitimate case (multiple trips in one month), distinct from revisions.
+The replacement design — a Google Form with a receipt upload per expense line, receipts kept in an admin-only Drive folder, and an engine-built **claim packet** PDF (summary page plus each receipt captioned with its line) emailed to PSL on approval — is in [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md). Claimants need no GitHub account, and receipts never enter git.
 
 ### 4.8 Generic submission YAML shape
 
-After parsing, all three submission types persist to `submissions/{period}/{submission_id}.yml`. The engine layer (PDF render, ledger update, payments-manager notify) consumes a common shape with a `type` discriminator:
+After parsing, both submission types persist to `submissions/{period}/{submission_id}.yml`. The engine layer (PDF render, ledger update, payments-manager notify) consumes a common shape with a `type` discriminator:
 
 ```yaml
 # Common fields (all types)
 submission_id: <handle>-<type>-<period>[-vN]
-type: hourly | milestone_invoice | reimbursement
+type: hourly | milestone_invoice
 period: YYYY-MM
 submitted_date: YYYY-MM-DD       # in payer's timezone (§9)
 submitted_by: <github-handle>
@@ -578,19 +554,9 @@ entries:
 totals:
   amount: ...       # sum of entries[].amount
   currency: ...     # from contract
-
-# --- reimbursement ---
-# contract_id intentionally absent — reimbursements are contractor-level
-line_items:
-  - {date: ..., amount: ..., category: ..., description: ..., receipt: <path>}
-trip_context: |
-  ...
-totals:
-  amount: ...       # sum of line_items[].amount
-  currency: ...     # one currency per submission
 ```
 
-This shared shape means Phase 2 merge processing — ledger update, approval re-render, payments-manager notify — runs the same pipeline for all three types, branching only at the render-template selection and the per-type ledger writer.
+This shared shape means Phase 2 merge processing — ledger update, approval re-render, payments-manager notify — runs the same pipeline for both types, branching only at the render-template selection and the per-type ledger writer.
 
 ---
 
@@ -619,11 +585,10 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
    - `submission` — applied by the workflow when opening the submission PR
    - `processed` — applied by Phase 2 merge processing
    - (Phase 3c) `submit` — applied by the contractor to trigger PR creation on a draft issue; auto-removed by the workflow after handling so it can be re-applied
-   - (Phase 5) `reimbursement` — applied by the Reimbursement Claim form, added when Phase 5 lands
 8. Pushes the initial commit.
 9. Prints the contractor-facing URL and next steps.
 
-**Phase 5 will add a multi-select** for which issue templates to seed (Hourly Timesheet / Milestone Invoice / Reimbursement Claim), letting the admin configure reimbursement-only payees or any other subset. Until then, the script seeds both Phase 1/1.5 templates by default.
+The script seeds both templates by default. Reimbursement-only payees (speakers, visitors) need no contractor repo at all under the Phase 5 design (§4.7).
 
 ### What it does **not** do
 
@@ -644,7 +609,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 
 | Decision | Choice | Notes |
 |---|---|---|
-| Submission types | Hourly Timesheet, Milestone Invoice, Reimbursement Claim | All three planned architecturally (§4.3). Phase 1–4 ship Hourly + Milestone; Reimbursement deferred to **Phase 5 (post-launch)** because of multi-currency complexity and the receipt-storage open question (§10). |
+| Submission types | Hourly Timesheet, Milestone Invoice (issue flow); reimbursement claims via a separate intake (§4.7) | Phase 1–4 ship Hourly + Milestone. Reimbursements are Phase 5, outside the issue flow — see [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md). |
 | Per-contractor repo name | `QuantEcon/contractor-{github-handle}` | Future-proof for other contractor artefacts. |
 | Contract data | Plaintext YAML in each contractor's repo | Admin-edited by hand. |
 | Contract ID convention | `QE-PSL-YYYY-NNN` | Documented in §4.2. System accepts any string; onboarding pre-fills this format. |
@@ -659,7 +624,7 @@ A single interactive Python script. Stdlib `argparse` + `pyyaml` + `subprocess` 
 | Ledger / running totals | Yes | One `ledger/<contract-id>.yml` per contract; updated on merge. |
 | Onboarding | Interactive Python script | See §5. |
 | Encryption at rest | None | Each repo is one contractor; blast radius is naturally scoped. |
-| Receipt storage | Decision pending (§10) | Required before Reimbursement engine (Phase 5, post-launch) ships. Options on the table: GitHub issue attachments, committed PDFs in `receipts/<period>/`, or external store. |
+| Receipt storage | Admin-only Google Drive folder; never git (proposed) | Receipts reach PSL inside the claim packet PDF, each captioned with its line item. See [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md) §6–§7. |
 | Currency | Per-contract; AUD, USD, JPY supported in v1 | Specified in each contract YAML (§4.2). JPY rendered without decimals; AUD/USD with two. ISO code as suffix, no symbols. |
 | Cross-contractor reporting | Out of scope | Captured in the broader admin infrastructure issue. |
 
@@ -762,7 +727,7 @@ Phase 1.5 surfaced an operational risk: contractor repos carried their own copie
 - [x] **End-to-end verification** — opened issue #13 on `contractor-engine-test` via the new thin caller; workflow ran cleanly through the reusable workflow, opened PR #14 with correct YAML + PDF + PNG.
 
 ### Phase 2 — Merge processing + email notify
-On PR merge, the engine runs `process-approved.yml` (implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone); the same pipeline picks up reimbursement when Phase 5 lands.
+On PR merge, the engine runs `process-approved.yml` (implemented as a reusable workflow). Designed generic so it covers all in-scope submission types (hourly + milestone). Reimbursement approval (Phase 5b) reuses its checks and email path from a separate admin-only repo.
 
 **Status:** engine code complete. Partial E2E verified through step 6 (ledger-issue refresh); step 7 (email send) is gated on the SMTP credentials in §10. Once the credentials land, one fresh merge will exercise the full pipeline.
 
@@ -978,21 +943,14 @@ Design: a thin caller workflow in each contractor repo runs on `schedule:` (cron
 - [ ] **Per-repo production cutover.** When a contractor's flow is verified, set `notifications.testing_mode: false` in *their* `config/settings.yml` and commit. That repo starts sending real approval emails to PSL; all other repos are unaffected. The engine default in [templates/fiscal-host.yml](../templates/fiscal-host.yml) stays `true` as the fail-safe.
 - [ ] Onboard a small number of additional real contractors; iterate on friction.
 
-### Phase 5 — Reimbursement Claim engine + multi-select onboarding (post-launch)
+### Phase 5 — Reimbursement claims (proposed)
 
-Deferred to a standalone phase because reimbursements are materially more complex than timesheets and invoices: they involve **multi-currency** receipts (a single trip may produce receipts in 2-3 currencies), **receipt storage** (an unresolved open question — see §10), ad-hoc authorisation (no pre-existing contract to check against), and tax-category handling that varies by jurisdiction. Bundling these into Phase 1.5 / 2 would have slowed the launch; running them as a post-launch addition lets real Phase 4 contractors stress-test the simpler types first.
+The first build (issue form, receipts as issue attachments, PR #4) is complete but **parked**; see §4.7 for why. The replacement is designed in [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md) and rolls out in steps:
 
-**Phase 5 build:**
-
-- [ ] **Receipt-storage policy resolved** (where receipts live, PII handling, size limits, multi-page) — see §10.
-- [ ] **Multi-currency design** — does a single reimbursement carry multiple currencies (per-line-item currency), or is each currency a separate submission? Decision drives both the form shape and the PDF render.
-- [ ] **`scripts/parse_reimbursement_issue.py`** (or branch in `parse_issue.py`) — handles line items with date/amount/category/currency/description; validates totals (per-currency if multi-currency); validates category against `config/settings.yml` allowed list.
-- [ ] **`config/settings.yml` extension** — add `reimbursement.allowed_categories: [...]` per contractor.
-- [ ] **`contractor-template/.github/ISSUE_TEMPLATE/reimbursement-claim.yml`** — the new form (§4.7), updated for multi-currency.
-- [ ] **`templates/reimbursement.typ`** — Typst template (title `QUANTECON REIMBURSEMENT`; line-item table; trip-context block; receipts appendix per policy).
-- [ ] **`scripts/create_submission_pr.py`** — extend for the third type.
-- [ ] **`onboarding/new-contractor.py`** — add the multi-select for issue templates. From this phase forward, an admin can configure a payee as reimbursement-only (e.g. one-off speakers, honorarium recipients) or as a full contractor with all three types. Also adds the `reimbursement.allowed_categories` prompt.
-- [ ] End-to-end test against `contractor-engine-test` (or a new `contractor-reimbursement-test`): submit a reimbursement claim with multiple line items (and multi-currency if that design wins), verify the merge flow.
+- [ ] **Open questions answered** — PSL's evidence, currency and retention requirements; pre-approval threshold; whether Form file upload works for respondents outside the QuantEcon domain ([design §12](notes/REIMBURSEMENTS-DESIGN.md#12-open-questions)).
+- [ ] **5a — manual packet.** Google Form with a receipt upload per expense line; `reimbursements/` package with a `build_packet` CLI (rename and type-check receipts, render the claim packet, optional approve + send via `notify_email`); runbook section. Done when one real claim has gone end to end and PSL confirms the packet works for them.
+- [ ] **5b — automated, PR approval** (only if 5a's manual step becomes the bottleneck). Private admin-only `QuantEcon/reimbursements` repo; bridge workflow (Sheet + Drive → claim YAML + PR); keyless Google credential or a *repository* secret, never org-level; merge verified by `verify_approval`; per-claimant ledger; claimant emails.
+- [ ] **5c — optional custom form**, only if the Form's section-per-line UX proves a problem.
 
 ### v2+ (future, in scope of this PLAN if needed)
 - SMTP email delivery (currently @-mention only)
@@ -1024,11 +982,11 @@ Deferred to a standalone phase because reimbursements are materially more comple
 | Email recipient policy | Recipient addresses live as GitHub **org-level Variables** (`vars.PSL_EMAIL`, `vars.QUANTECON_EMAIL_REVIEWER`), not in any file in this (public) engine repo | Engine repo is public for `actions/checkout` access; literal email addresses in committed files would be harvested for spam. Variables keep recipients private without auth/PAT overhead. |
 | Email credentials | GitHub **org-level** secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`) | Scoped at the org so every contractor repo's reusable-workflow run can read them without per-repo setup. Never in any YAML; never committed. |
 | Email recipients & testing | Two-layer `testing_mode` resolution (most specific wins): (1) contractor repo `config/settings.yml` → `notifications.testing_mode`, (2) engine `templates/fiscal-host.yml` → `notifications.testing_mode`, (3) hard-coded `true` fail-safe. While the effective `testing_mode` is `true`, mail goes to `vars.QUANTECON_EMAIL_REVIEWER` only — PSL is never contacted. Recipient addresses themselves are org-level Variables, not in either file. | Per-repo override lets production and test repos coexist: real contractors opt into PSL delivery with `testing_mode: false` in their own settings; `contractor-engine-test` inherits the safe `true` default with no config. The dangerous action (emailing real PSL) is always an explicit opt-in, never the silence default. Replaces the original single global flip. |
-| v1 submission types | Hourly Timesheet + Milestone Invoice + Reimbursement Claim (all three planned architecturally; phased build per §8) | Engine generic across types from day one; per-type build phases keep scope tight. |
+| v1 submission types | Hourly Timesheet + Milestone Invoice via the issue flow; reimbursement claims via a separate intake (§4.7, Phase 5) | The issue flow fits claims whose data is the deliverable; reimbursements are evidence-led and moved out after PR #4 measured the fit. |
 | Milestone contract shape | Structured `milestones[]` schedule with `(id, date, amount, description)` per row, **plus** the contractor entering the row at submission time. Parser emits a non-blocking warning if the submitted milestone ID isn't in the contract's schedule. | Onboarding collects the schedule interactively, so the structured field is free at write-time. Warnings catch typos cheaply without making the engine a hard gate; admin still verifies during PR review. Originally deferred (lightweight `notes:`-only spec) — flipped 2026-05-18 once Phase 3b's onboarding flow made the structured collection trivial. |
 | Submission trigger | Issue is a long-lived draft; PR opens only on an explicit `/submit` comment or `submit` label. `/validate` comment runs the parser in dry-run mode (no PR), reporting parse status + computed totals as a sentinel-marked comment that updates in place across re-runs. Form layer still provides the structured/restricted UI for the initial body seed; HTML-comment format reminders persist through edits. | Lets RAs accumulate hours across days/weeks inside the issue body itself rather than maintaining an external spreadsheet, surfaces parse errors before commit, and keeps the issue as a working surface rather than a single-shot form drop. PR remains canonical once opened (issue closed + locked on `/submit`). Decided 2026-05-19; Phase 3c builds it. |
-| Reimbursement contract relationship | Reimbursements are **contractor-level**, not contract-level | RA/staff expenses are ad-hoc, hard to pre-authorize in a contract; authorization happens per-claim via PR review. Reimbursements live in the contractor repo without a `contract_id` reference. |
-| Issue-template seeding | Phase 3 onboarding seeds both Hourly Timesheet and Milestone Invoice unconditionally. Multi-select (incl. Reimbursement) added in **Phase 5**. | With two templates, all payees get both — multi-select adds friction without benefit. Multi-select lands alongside Reimbursement when the third type makes selectivity meaningful (e.g. reimbursement-only payees). Workflow file is identical across all repos either way — routing is by label, unused branches inert. |
+| Reimbursement contract relationship | Reimbursements are **claimant-level**, not contract-level | Expenses are ad hoc and hard to pre-authorize in a contract; authorization is per claim (plus a pre-approval reference above a threshold). Claims live outside contractor repos, so reimbursement-only payees need no repo. |
+| Issue-template seeding | Onboarding seeds both Hourly Timesheet and Milestone Invoice unconditionally. | With two templates, all payees get both — a multi-select adds friction without benefit. There is no reimbursement template (§4.7). |
 | Engine repo name | `QuantEcon/contractor-payments` | Scope grew beyond timesheets; "contractor-payments" pairs naturally with the `contractor-{handle}` payee repos. Renamed from `QuantEcon/timesheets` during Phase 1.5 alignment. |
 | Ledger in v1 | Yes — one `ledger/<contract-id>.yml` per contract; one pinned GitHub issue per contract as the consumption surface | YAML stays the structured source of truth; the auto-updated pinned issue gives contractor + admin a discoverable, notification-driven view of running totals without any new UI. Cheap to maintain (rendered from YAML), no backfill problem. Cross-contractor reporting and dashboards remain post-launch territory (see [QuantEcon/admin#5](https://github.com/QuantEcon/admin/issues/5)). |
 | Encryption at rest | None | Each repo holds one contractor's data; access is naturally scoped. Revisit if a centralized store is later built. |
@@ -1050,8 +1008,8 @@ Deferred to a standalone phase because reimbursements are materially more comple
 - ~~**Org-level recipient variables.**~~ ✅ Resolved: `vars.PSL_EMAIL` (PSL Foundation contact) and `vars.QUANTECON_EMAIL_REVIEWER` (QuantEcon human reviewer/approver, Cc) are set as org-level Variables on `QuantEcon`. Visibility: Private repositories.
 - **Real-name surfacing.** Mitigation for the payments manager being unable to map GitHub handles → real names: every PDF and notification email surfaces the contractor's real name from `settings.yml`.
 - **Broken doc URLs in `contractor-template/`.** `contractor-template/.github/ISSUE_TEMPLATE/config.yml` and the "Need help?" link inside both `hourly-timesheet.yml` and `milestone-invoice.yml` point at `blob/main/docs/CONTRACTOR_GUIDE.md` — a path that never existed and won't, since the guide is now a published MkDocs site. Repoint at `https://quantecon.github.io/contractor-payments/contractor-guide/submit-timesheet/` (and the invoice equivalent) once those pages land in Phase 4. Tracked in the Phase 4 task list.
-- **Receipt storage for Reimbursement Claims.** Gates Phase 5 (post-launch). Decision spans: where receipts physically live (committed PDFs in `receipts/<period>/`? GitHub issue attachments? external store?), how PII is handled (card numbers, addresses on the receipt itself), file size and multi-page limits, and how receipts surface in the rendered PDF (inline thumbnails? appendix pages? references only?). The reimbursement form schema (§4.7) and the merge-processing PDF render both depend on this.
-- **Multi-currency for Reimbursement Claims.** Also gates Phase 5. A single trip may produce receipts in 2-3 currencies. Decision: per-line-item currency (one submission spans multiple currencies) vs one-currency-per-submission (file separate claims). Drives the form shape, the parser, the PDF render, and the ledger schema for reimbursements.
+- ~~**Receipt storage for Reimbursement Claims.**~~ Proposed: admin-only Google Drive, never git; receipts reach PSL inside the claim packet PDF. See [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md).
+- ~~**Multi-currency for Reimbursement Claims.**~~ Proposed: each line records the receipt's amount and currency plus the amount charged in the claimant's payout currency; claims total in the payout currency and the engine never converts. Pending PSL confirmation. See [notes/REIMBURSEMENTS-DESIGN.md](notes/REIMBURSEMENTS-DESIGN.md) §8.
 - **Parser header-row heuristic is too greedy** (Phase 3c E2E finding, 2026-05-19). `_looks_like_header` in `scripts/parse_issue.py` skips any row whose first field contains the substring `date`, `day`, `when`, `id`, or `milestone` — caught us when a contractor typed `bad-date | 2 | oops` as a data row and the parser silently skipped it, producing a false `/validate` success. Fix: tighten the heuristic to recognise the actual seeded header row (`Date | Hours | Description` / `ID | Date | Amount | Description`) rather than matching on keyword substrings. Small change + new test; non-blocking because the contractor would notice that the bad row's hours/amount didn't appear in the `/validate` totals.
 
 ---
