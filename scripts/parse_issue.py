@@ -93,13 +93,21 @@ def _strip_code_fence(text: str) -> str:
 
 _DATE_DASH_ISO = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")     # 2025-01-05
 _DATE_SLASH_ISO = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})$")    # 2025/01/05
-_DATE_DASH_DMY = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$")     # 05-01-2025
+# Day-first or month-first dates (05-01-2025, 05/01/2025). Never accepted:
+# only used to give a specific error with the year-first spelling.
+_DATE_YEAR_LAST = re.compile(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$")
 
 
 def _parse_date(s: str) -> Optional[date]:
-    """Parse a date string in one of the accepted formats. Returns None on
-    failure. Accepts YYYY-MM-DD, YYYY/MM/DD, and DD-MM-YYYY (only when
-    unambiguous)."""
+    """Parse a year-first date: YYYY-MM-DD (canonical) or YYYY/MM/DD, with
+    one- or two-digit month and day. Returns None for anything else.
+
+    Year-last dates are refused rather than guessed. `05-01-2025` is 5 January
+    to some contractors and 1 May to others; accepting it as day-first used to
+    misdate month-first entries silently, and milestone rows (which may fall
+    outside the selected period) had no other check to catch it. See
+    `date_error` for the message that tells the contractor what to write.
+    """
     s = s.strip()
     for pattern in (_DATE_DASH_ISO, _DATE_SLASH_ISO):
         m = pattern.match(s)
@@ -108,16 +116,55 @@ def _parse_date(s: str) -> Optional[date]:
                 return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             except ValueError:
                 return None
-    m = _DATE_DASH_DMY.match(s)
-    if m:
-        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        # Only accept DD-MM-YYYY when the month is unambiguously 1-12.
-        if 1 <= month <= 12:
-            try:
-                return date(year, month, day)
-            except ValueError:
-                return None
     return None
+
+
+def _valid(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+
+
+def _spelled(d: date) -> str:
+    """`5 January 2026`, independent of locale and platform strftime."""
+    return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
+
+
+def date_error(s: str, example: str) -> str:
+    """The error for a date `_parse_date` rejected, with the fix spelled out.
+
+    For a year-last date the reading is shown back: unambiguous ones get the
+    exact year-first spelling, ambiguous ones (both numbers 12 or under) get
+    both readings so the contractor picks the one they meant.
+    """
+    s = s.strip()
+    m = _DATE_YEAR_LAST.match(s)
+    if m:
+        a, b, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        as_day_first = _valid(year, b, a)    # a = day, b = month
+        as_month_first = _valid(year, a, b)  # a = month, b = day
+        if as_day_first and as_month_first and as_day_first != as_month_first:
+            return (
+                f"`{s}` is ambiguous: it could be {_spelled(as_day_first)} "
+                f"(`{as_day_first.isoformat()}`) or {_spelled(as_month_first)} "
+                f"(`{as_month_first.isoformat()}`). Dates must be year-first, "
+                f"`YYYY-MM-DD`; write the one you mean."
+            )
+        only = as_day_first or as_month_first
+        if only:
+            return (
+                f"`{s}` is not year-first. Dates must be `YYYY-MM-DD`; "
+                f"write it as `{only.isoformat()}`."
+            )
+    return (
+        f"couldn't read a date from `{s}` — please use `YYYY-MM-DD` "
+        f"(e.g. `{example}`)."
+    )
 
 
 # ─── Hours parsing ──────────────────────────────────────────────────────────
@@ -351,11 +398,7 @@ def _parse_time_entries(
 
         parsed_date = _parse_date(date_str)
         if parsed_date is None:
-            errors.append(ParseError(
-                f"couldn't read a date from `{date_str}` — please use `YYYY-MM-DD` "
-                f"(e.g. `2025-01-05`).",
-                line=line_no,
-            ))
+            errors.append(ParseError(date_error(date_str, "2025-01-05"), line=line_no))
             continue
 
         parsed_hours = _parse_hours(hours_str)
@@ -488,11 +531,7 @@ def _parse_milestone_entries(
 
         parsed_date = _parse_date(date_str)
         if parsed_date is None:
-            errors.append(ParseError(
-                f"couldn't read a date from `{date_str}` — please use `YYYY-MM-DD` "
-                f"(e.g. `2025-11-15`).",
-                line=line_no,
-            ))
+            errors.append(ParseError(date_error(date_str, "2025-11-15"), line=line_no))
             continue
 
         parsed_amount = _parse_amount(amount_str)

@@ -104,6 +104,8 @@ Common issues:
 | What you see | What it means | Fix |
 |---|---|---|
 | `Line N: couldn't read a date from 'X'` | Date isn't in `YYYY-MM-DD` form | Reformat the date |
+| Line N: `25-05-2026` is not year-first. Dates must be `YYYY-MM-DD`; write it as `2026-05-25`. | Day-first and month-first dates are refused rather than guessed | Use the date the message gives |
+| Line N: `05-01-2026` is ambiguous: it could be 5 January 2026 (`2026-01-05`) or 1 May 2026 (`2026-05-01`). Dates must be year-first, `YYYY-MM-DD`; write the one you mean. | Both numbers could be the month, so the bot won't guess | Write the one you mean as `YYYY-MM-DD` |
 | `Line N: date 'X' is outside the selected period 'YYYY-MM'` | Day doesn't match the Year/Month dropdowns | Either change the date or change the period |
 | `Line N: duplicate date 'X'` | Two rows share a date | Merge them into one row |
 | `Time Entries section is empty` | No rows, or only the header row | Add at least one data row |

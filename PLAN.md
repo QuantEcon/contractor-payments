@@ -423,7 +423,7 @@ contact_links:
 
 **Parser tolerances** — `parse_issue.py` accepts common variations:
 
-- Date formats: `YYYY-MM-DD` canonical; also accept `YYYY/MM/DD` and `DD-MM-YYYY` if the month is unambiguous.
+- Date formats: year-first only — `YYYY-MM-DD` canonical, `YYYY/MM/DD` and single-digit month/day accepted. Day-first or month-first dates (`05-01-2025`) are rejected with an error that shows the year-first spelling, or both readings when ambiguous; they used to be read as day-first, which silently misdated month-first entries.
 - Hour-unit suffixes stripped: `4.5`, `4.5h`, `4.5 hrs` all parse to `4.5`.
 - Delimiters: `|` canonical; also accept `,` or tab if consistently used in the input (emit a non-blocking warning comment to the issue).
 - Whitespace normalised; blank lines and obvious header rows skipped.
@@ -494,7 +494,7 @@ For contractors on a milestone contract. The contract is lightweight metadata (�
 5. **Confirmation** (checkbox, required) — single ack.
 
 **Parser tolerances** — same lenient rules as timesheet rows:
-- Date formats: `YYYY-MM-DD` canonical; `YYYY/MM/DD` and `DD-MM-YYYY` accepted when unambiguous.
+- Date formats: same year-first rule as timesheet rows. This matters most here, since milestone dates may fall outside the selected period and have no other check.
 - Delimiters: `|` canonical; `,` or tab accepted with a non-blocking warning.
 - Description may contain `|` — parser splits on first three pipes.
 - ID is a free-form string (typically an integer like `3`, but the system accepts any token).
