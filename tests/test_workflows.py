@@ -503,7 +503,8 @@ class TestSecretsAreExplicit:
     """`secrets: inherit` handed every org secret to whatever the engine ref
     pointed at. Only the approval pipeline needs any (the mail credentials)."""
 
-    SMTP = {"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"}
+    SMTP = {"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
+            "PSL_EMAIL", "QUANTECON_EMAIL_REVIEWER"}
 
     @pytest.mark.parametrize("path", CALLER_WORKFLOWS, ids=lambda p: p.name)
     def test_no_caller_inherits_secrets(self, path):
@@ -629,3 +630,15 @@ class TestCommitBackRebuildsOnConflict:
             "scripts.verify_approval", "scripts.finalize_approval", "scripts.update_ledger"]
         assert all("submissions/2026-08/x y.yml" in c.split("|") for c in calls)
         assert "mmcky" in calls[1].split("|")
+
+
+
+def test_recipient_addresses_are_read_as_secrets():
+    """Org variables print verbatim in the step's env block of the log, which
+    contractors can read; secrets are masked (issue #20). The vars fallback
+    is for the switch-over only."""
+    email = next(s for s in _steps(_load(APPROVED_WF)) if _id(s) == "email")
+    for name in ("PSL_EMAIL", "QUANTECON_EMAIL_REVIEWER"):
+        assert email["env"][name] == f"${{{{ secrets.{name} || vars.{name} }}}}"
+    others = [s for s in _steps(_load(APPROVED_WF)) if _id(s) != "email"]
+    assert not any("PSL_EMAIL" in yaml.safe_dump(s) for s in others)

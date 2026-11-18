@@ -27,7 +27,7 @@ scripts/notify_email.py uses smtplib + GitHub Secrets to send mail via
 smtp.gmail.com:587 from <service-account-mailbox>
         │
         ▼
-Recipient (vars.PSL_EMAIL, Cc vars.QUANTECON_EMAIL_REVIEWER) lands the approved PDF
+Recipient (secrets.PSL_EMAIL, Cc secrets.QUANTECON_EMAIL_REVIEWER) lands the approved PDF
 ```
 
 ## What you'll set
@@ -42,13 +42,24 @@ repositories — same as the others):
 | `SMTP_USER` | service-account mailbox address (the address you choose in Step 1) | Step 4 |
 | `SMTP_FROM` | usually same as `SMTP_USER` | Step 4 |
 | `SMTP_PASSWORD` | Google app password (16-char string) | Step 4 |
+| `PSL_EMAIL` | PSL Foundation recipient | See below |
+| `QUANTECON_EMAIL_REVIEWER` | QuantEcon human reviewer/approver (Cc) | See below |
 
-And these org-level Variables (already done):
+The two recipient addresses used to be org **Variables**. Variables print
+verbatim in the Actions log, and contractors can read their repo's logs, so
+they are now **Secrets**, which the log masks (issue #20). To switch:
 
-| Name | Value |
-|---|---|
-| `PSL_EMAIL` | PSL Foundation recipient |
-| `QUANTECON_EMAIL_REVIEWER` | QuantEcon human reviewer/approver (Cc) |
+1. Create the two org secrets with the same values as the variables (scope:
+   the contractor repos and `test-contractor-payments`).
+2. Sync each contractor repo's callers so `process-approved.yml` passes them
+   (`onboarding/sync_callers.py`; see the admin runbook, "Engine releases").
+   Repos still on `secrets: inherit` get them already.
+3. Delete the old variables, and drop the `|| vars.*` fallback from the
+   engine's `process-approved.yml` email step.
+
+The engine also never prints, records or comments the addresses themselves:
+the log, the audit comment and the `approval_email` record name recipients
+by role ("PSL", "the QuantEcon reviewer").
 
 ---
 
@@ -236,7 +247,7 @@ service-account mailbox by default. Two ways to handle:
   `scripts/notify_email.py` sets `Reply-To: $SMTP_FROM` (the payments@
   alias), so PSL's "Reply" lands at payments@ → routed to the underlying
   admin mailbox where any existing Gmail label/filter on the alias picks
-  it up. "Reply All" additionally reaches `vars.QUANTECON_EMAIL_REVIEWER`
+  it up. "Reply All" additionally reaches `QUANTECON_EMAIL_REVIEWER`
   (the human approver Cc'd on the original send), which is the expected
   path for questions that need a human eye.
 
@@ -291,7 +302,7 @@ fail-safe. So:
 
 1. End-to-end test runs stay safe by default — any repo that doesn't set
    `testing_mode` inherits the engine `true`, so PSL is never contacted and
-   all mail goes to `vars.QUANTECON_EMAIL_REVIEWER`.
+   all mail goes to `QUANTECON_EMAIL_REVIEWER`.
 2. To put a contractor into production, set `notifications.testing_mode: false`
    in *their* `config/settings.yml`, commit and push. Their next merge fires
    email to PSL; every other repo is unaffected. (`onboarding/new-contractor.py

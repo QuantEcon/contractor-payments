@@ -35,7 +35,7 @@ HOURLY_LEDGER = {
 
 
 EMAIL_SUMMARY = {
-    "to": "reviewer@example.org",
+    "to": "reviewer",
     "cc": None,
     "subject": "x",
     "sent_at": "2026-06-12 01:00:00 UTC",
@@ -55,7 +55,7 @@ class TestComposeCommentExistingTypes:
         assert "**Contract:** `QE-PSL-2026-001`" in out
         assert "725.00 AUD" in out
         assert "14.5 hours" in out
-        assert "sent to reviewer@example.org" in out
+        assert "sent to the QuantEcon reviewer" in out
 
     def test_missing_email_summary_warns(self):
         out = compose_comment(
@@ -154,7 +154,7 @@ class TestEmailLineOnRerun:
             submission=HOURLY_SUBMISSION, ledger=HOURLY_LEDGER, issue_number=1,
             email_summary={**EMAIL_SUMMARY, "already_sent": True},
         )
-        assert "sent to reviewer@example.org at 2026-06-12 01:00:00 UTC" in body
+        assert "sent to the QuantEcon reviewer at 2026-06-12 01:00:00 UTC" in body
         assert "by an earlier run; not sent again" in body
 
     def test_forced_resend_is_labelled(self):
@@ -162,7 +162,7 @@ class TestEmailLineOnRerun:
             submission=HOURLY_SUBMISSION, ledger=HOURLY_LEDGER, issue_number=1,
             email_summary={**EMAIL_SUMMARY, "resent": True},
         )
-        assert "re-sent on request to reviewer@example.org" in body
+        assert "re-sent on request to the QuantEcon reviewer" in body
 
     def test_body_carries_the_sentinel(self):
         body = compose_comment(
@@ -216,3 +216,16 @@ class TestUpsertComment:
         assert nc.upsert_comment(39, "body", repo="Q/r") == "updated"
         verbs = [c[2] if c[1] == "issue" else c[3] if c[2] == "--method" else "list" for c in calls]
         assert verbs == ["list", "PATCH", "unlock", "PATCH", "lock"]
+
+
+
+def test_comment_never_echoes_an_address_from_an_old_record():
+    """Summaries built from records written before #20 carry addresses."""
+    body = compose_comment(
+        submission=HOURLY_SUBMISSION, ledger=HOURLY_LEDGER, issue_number=1,
+        email_summary={**EMAIL_SUMMARY, "to": "psl@example.org",
+                       "cc": "reviewer@example.org", "testing_mode": False,
+                       "already_sent": True},
+    )
+    assert "@example.org" not in body
+    assert "sent to PSL (Cc the QuantEcon reviewer)" in body

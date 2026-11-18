@@ -36,11 +36,12 @@ quantecon:
 #
 # Recipient addresses are intentionally NOT stored in this file. The engine
 # repo is public, so committing real email addresses here would expose them
-# to harvesters. Instead, recipients live as GitHub org-level Variables and
-# are injected into the workflow at runtime:
+# to harvesters. Instead, recipients live as GitHub org-level Secrets (masked
+# in the Actions log, which contractors can read) and are injected into the
+# workflow at runtime:
 #
-#   vars.PSL_EMAIL                 → primary recipient (PSL Foundation contact)
-#   vars.QUANTECON_EMAIL_REVIEWER  → Cc (QuantEcon human reviewer/approver)
+#   secrets.PSL_EMAIL                 → primary recipient (PSL Foundation contact)
+#   secrets.QUANTECON_EMAIL_REVIEWER  → Cc (QuantEcon human reviewer/approver)
 #
 # What stays here is the policy flag below. It is the engine-wide DEFAULT;
 # each contractor repo can override it in its own `config/settings.yml`
@@ -49,7 +50,7 @@ quantecon:
 #   2. this file (engine-wide default)
 #   3. true (fail-safe — never email PSL if nothing is set)
 # While the effective `testing_mode` is `true`, approval emails go to
-# `vars.QUANTECON_EMAIL_REVIEWER` only — `vars.PSL_EMAIL` is never contacted.
+# `QUANTECON_EMAIL_REVIEWER` only — `PSL_EMAIL` is never contacted.
 # Keep this default `true`; production is opt-in per repo (set
 # `testing_mode: false` in that contractor's settings.yml).
 notifications:

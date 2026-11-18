@@ -31,7 +31,14 @@ replaces the record. Dry runs never record.
 
 Required environment:
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM  (org secrets)
-  PSL_EMAIL, QUANTECON_EMAIL_REVIEWER                         (org variables)
+  PSL_EMAIL, QUANTECON_EMAIL_REVIEWER                         (org secrets)
+
+Addresses stay out of everything the contractor can read: the Actions log,
+the `--output-summary` file (and so the audit comment) and the
+`approval_email` record committed to the submission YAML. Those name
+recipients by role ("psl", "reviewer"); the addresses only go into the
+message headers. Passing the addresses as secrets also masks them in the
+log if anything else prints them.
 
 CLI:
   python -m scripts.notify_email \\
@@ -118,6 +125,27 @@ def _effective_testing_mode(settings: dict, fiscal_host_path: Path) -> tuple[boo
 
 # Key in the submission YAML holding the record of the approval email.
 RECORD_KEY = "approval_email"
+
+# Recipients by role. Which roles receive the email is fixed by testing_mode.
+ROLE_PSL = "psl"
+ROLE_REVIEWER = "reviewer"
+_ROLE_LABELS = {ROLE_PSL: "PSL", ROLE_REVIEWER: "the QuantEcon reviewer"}
+
+
+def recipient_roles(testing_mode: bool) -> tuple[str, Optional[str]]:
+    """(To role, Cc role) for a send: the reviewer alone while testing,
+    otherwise PSL with the reviewer in Cc."""
+    return (ROLE_REVIEWER, None) if testing_mode else (ROLE_PSL, ROLE_REVIEWER)
+
+
+def describe_recipients(record: dict) -> str:
+    """'PSL (Cc the QuantEcon reviewer)' or 'the QuantEcon reviewer'.
+
+    Derived from the record's testing_mode, not its to/cc, so a record written
+    before roles (which held addresses) is never echoed back."""
+    to_role, cc_role = recipient_roles(record.get("testing_mode", True) is not False)
+    label = _ROLE_LABELS[to_role]
+    return f"{label} (Cc {_ROLE_LABELS[cc_role]})" if cc_role else label
 _RECORD_FIELDS = ("to", "cc", "subject", "sent_at", "testing_mode", "testing_mode_source")
 
 
@@ -236,11 +264,22 @@ def send_message(
     user: str,
     password: str,
 ) -> None:
-    """Submit the message via SMTP with STARTTLS."""
+    """Submit the message via SMTP with STARTTLS.
+
+    A refused recipient is re-raised without the addresses: smtplib's own
+    exception carries them, and the traceback lands in the Actions log."""
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(user, password)
-        smtp.send_message(msg)
+        try:
+            smtp.send_message(msg)
+        except smtplib.SMTPRecipientsRefused as e:
+            codes = sorted({code for code, _ in e.recipients.values()})
+            raise RuntimeError(
+                f"the mail server refused {len(e.recipients)} recipient(s) "
+                f"(SMTP {', '.join(map(str, codes))}). Check the PSL_EMAIL and "
+                f"QUANTECON_EMAIL_REVIEWER secrets."
+            ) from None
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -277,8 +316,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # the message can be inspected even after a real send.
     if earlier and not args.force_resend and not args.dry_run:
         print(f"Approval email already sent at {earlier['sent_at']} to "
-              f"{earlier.get('to')} (recorded in {args.submission}); not sending "
-              f"again. Use --force-resend for a deliberate resend.", file=sys.stderr)
+              f"{describe_recipients(earlier)} (recorded in {args.submission}); "
+              f"not sending again. Use --force-resend for a deliberate resend.",
+              file=sys.stderr)
         _write_summary(args.output_summary, {
             **{k: earlier.get(k) for k in _RECORD_FIELDS},
             "dry_run": False,
@@ -299,11 +339,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             "(used as both Cc and testing-mode To)."
         )
 
+    to_role, cc_role = recipient_roles(testing_mode)
     if testing_mode:
         to_addr = reviewer_email
         cc_addr = None
-        print(f"testing_mode=true ({testing_mode_source}) — sending to "
-              f"{reviewer_email} only (PSL will not be contacted).",
+        print(f"testing_mode=true ({testing_mode_source}) — sending to the "
+              f"QuantEcon reviewer only (PSL will not be contacted).",
               file=sys.stderr)
     else:
         if not psl_email:
@@ -312,8 +353,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         to_addr = psl_email
         cc_addr = reviewer_email
-        print(f"testing_mode=false ({testing_mode_source}) — sending to "
-              f"{psl_email} (Cc {reviewer_email}).", file=sys.stderr)
+        print(f"testing_mode=false ({testing_mode_source}) — sending to PSL "
+              f"(Cc the QuantEcon reviewer).", file=sys.stderr)
 
     sender = _require_env("SMTP_FROM") if not args.dry_run else os.environ.get("SMTP_FROM", "<SMTP_FROM>")
     msg = compose_message(
@@ -348,8 +389,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     summary = {
-        "to": to_addr,
-        "cc": cc_addr,
+        # Roles, not addresses: this is printed, written for the audit
+        # comment and recorded in the submission YAML.
+        "to": to_role,
+        "cc": cc_role,
         "subject": str(msg["Subject"]),
         "sent_at": sent_at,
         "testing_mode": testing_mode,
