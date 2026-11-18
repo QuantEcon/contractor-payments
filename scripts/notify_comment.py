@@ -42,6 +42,7 @@ from typing import Optional
 import yaml
 
 from scripts.money import format_hours, format_money
+from scripts.notify_email import describe_recipients
 
 
 # Same emoji conventions used in the running-ledger issue body, so admins
@@ -115,10 +116,9 @@ def compose_comment(
     if email_summary is None:
         email_line = "📧 **Email:** ⚠️ not sent — see workflow logs."
     else:
-        recipients = email_summary.get("to", "—")
-        cc = email_summary.get("cc")
-        if cc:
-            recipients = f"{recipients} (Cc {cc})"
+        # By role, derived from testing_mode, so no address reaches the
+        # contractor-visible comment (even from a record that stored one).
+        recipients = describe_recipients(email_summary)
         sent_at = email_summary.get("sent_at", "—")
         testing_mode = email_summary.get("testing_mode", True)
         source = email_summary.get("testing_mode_source")

@@ -727,7 +727,8 @@ nothing else. Review `git diff`, then commit and push in each repo.
 ### Secrets reach only the approval pipeline
 
 Callers pass secrets by name instead of `secrets: inherit`. Only
-`process-approved` gets anything: the five `SMTP_*` secrets. The
+`process-approved` gets anything: the five `SMTP_*` secrets and the two
+recipient addresses (`PSL_EMAIL`, `QUANTECON_EMAIL_REVIEWER`). The
 submission and reminder workflows get none (they use only the
 `GITHUB_TOKEN` every run has). `tests/test_workflows.py` enforces both
 sides.

@@ -54,9 +54,11 @@ jobs:
       # this runs a different commit's code. Keep the two in step; the
       # engine's tests/test_workflows.py asserts they agree.
       engine_ref: v1
-    # Only the mail credentials, by name: the engine gets nothing else from
-    # the org's secrets.
+    # Only the mail credentials and recipients, by name: the engine gets
+    # nothing else from the org's secrets.
     secrets:
+      PSL_EMAIL: ${{ secrets.PSL_EMAIL }}
+      QUANTECON_EMAIL_REVIEWER: ${{ secrets.QUANTECON_EMAIL_REVIEWER }}
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
