@@ -346,3 +346,124 @@ def test_merge_commit_is_fetched_before_it_is_diffed():
     run = next(s for s in _steps(wf) if _id(s) == "find_submission")["run"]
     fetch = run.index('git fetch --no-tags --depth=2 origin "$MERGE_SHA"')
     assert fetch < run.index("git diff")
+
+
+# ─── Safe re-runs (issue #11) ───────────────────────────────────────────────
+
+APPROVED_WF = REPO_ROOT / ".github" / "workflows" / "process-approved.yml"
+CALLER_APPROVED = REPO_ROOT / "contractor-template" / ".github" / "workflows" / "process-approved.yml"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not available")
+class TestResolveJob:
+    """The `resolve` step decides whether the pipeline runs at all, so execute
+    its shell for real against a stubbed `gh` returning a PR payload."""
+
+    def _run(self, tmp_path, pr, force_resend="false"):
+        import json
+        import os
+        step = _load(APPROVED_WF)["jobs"]["resolve"]["steps"][0]
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (tmp_path / "pr.json").write_text(json.dumps(pr))
+        gh = bindir / "gh"
+        gh.write_text(f"#!/bin/sh\ncat {tmp_path / 'pr.json'}\n")
+        gh.chmod(0o755)
+        out, summary = tmp_path / "out", tmp_path / "summary"
+        result = subprocess.run(
+            ["bash", "-e", "-c", step["run"]], capture_output=True, text=True,
+            env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}",
+                 "REPO": "Q/r", "PR_NUMBER": "12", "FORCE_RESEND": force_resend,
+                 "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary)},
+        )
+        outputs = dict(
+            line.split("=", 1) for line in (out.read_text().splitlines() if out.exists() else [])
+        )
+        return result, outputs
+
+    PR = {"merged": True, "merge_commit_sha": "abc123", "merged_by": {"login": "mmcky"},
+          "body": "Submission.\n\nCloses #7\n", "labels": [{"name": "submission"}]}
+
+    def test_merged_submission_runs(self, tmp_path):
+        result, out = self._run(tmp_path, self.PR)
+        assert result.returncode == 0, result.stderr
+        assert out == {"merge_sha": "abc123", "merged_by": "mmcky",
+                       "issue_number": "7", "run": "true"}
+
+    def test_processed_pr_is_left_alone(self, tmp_path):
+        pr = {**self.PR, "labels": [{"name": "submission"}, {"name": "processed"}]}
+        result, out = self._run(tmp_path, pr)
+        assert result.returncode == 0, result.stderr
+        assert out["run"] == "false"
+
+    def test_force_resend_runs_a_processed_pr(self, tmp_path):
+        pr = {**self.PR, "labels": [{"name": "submission"}, {"name": "processed"}]}
+        _, out = self._run(tmp_path, pr, force_resend="true")
+        assert out["run"] == "true"
+
+    def test_body_without_closes_falls_back_to_the_pr(self, tmp_path):
+        result, out = self._run(tmp_path, {**self.PR, "body": None})
+        assert result.returncode == 0, result.stderr
+        assert out["issue_number"] == "12"
+
+    @pytest.mark.parametrize("change", [{"merged": False}, {"labels": []}])
+    def test_refuses_unmerged_or_non_submission_prs(self, tmp_path, change):
+        result, out = self._run(tmp_path, {**self.PR, **change})
+        assert result.returncode != 0
+        assert "run" not in out
+
+
+class TestApprovalPipelineIsRerunSafe:
+    def _steps(self):
+        return {_id(s): s for s in _steps(_load(APPROVED_WF))}
+
+    def test_process_job_skips_finished_prs_and_serialises_per_pr(self):
+        job = _load(APPROVED_WF)["jobs"]["process"]
+        assert job["needs"] == "resolve"
+        assert job["if"] == "needs.resolve.outputs.run == 'true'"
+        assert "inputs.pr_number" in job["concurrency"]["group"]
+        assert job["concurrency"]["cancel-in-progress"] is False
+
+    def test_pr_facts_come_from_resolve_not_caller_inputs(self):
+        """Callers may omit these (a dispatch passes only the PR number)."""
+        process = yaml.safe_dump(_load(APPROVED_WF)["jobs"]["process"])
+        for name in ("inputs.merged_by", "inputs.merge_commit_sha", "inputs.pr_body"):
+            assert name not in process
+
+    def test_email_send_is_recorded_on_main_right_after_it(self):
+        ids = list(self._steps())
+        assert ids.index("record_email") == ids.index("email") + 1
+        record = self._steps()["record_email"]
+        assert "if" not in record          # implicit success(): only after a send
+        assert "scripts.push_main" in record["run"]
+
+    def test_force_resend_reaches_the_email_script(self):
+        email = self._steps()["email"]
+        assert email["env"]["FORCE_RESEND"] == "${{ inputs.force_resend }}"
+        assert "--force-resend" in email["run"]
+
+    def test_both_commits_use_the_retrying_push(self):
+        for step_id in ("commit_back", "record_email"):
+            assert "python -m scripts.push_main" in self._steps()[step_id]["run"]
+
+    def test_failure_report_covers_the_record_step(self):
+        report = self._steps()["Report pipeline failure on the PR and issue"]
+        assert report["env"]["O_RECORD"] == "${{ steps.record_email.outcome }}"
+
+
+class TestCallerCanRedriveAPr:
+    def test_dispatch_takes_a_pr_number_and_force_resend(self):
+        wf = _load(CALLER_APPROVED)
+        triggers = wf.get("on") or wf.get(True)
+        inputs = triggers["workflow_dispatch"]["inputs"]
+        assert inputs["pr_number"]["required"] is True
+        assert inputs["force_resend"]["type"] == "boolean"
+        assert inputs["force_resend"]["default"] is False
+
+    def test_job_passes_the_pr_number_for_both_triggers(self):
+        job = _load(CALLER_APPROVED)["jobs"]["process"]
+        assert "workflow_dispatch" in job["if"]
+        assert job["with"]["pr_number"] == (
+            "${{ github.event.pull_request.number || inputs.pr_number }}"
+        )
+        assert job["with"]["force_resend"] == "${{ inputs.force_resend == true }}"

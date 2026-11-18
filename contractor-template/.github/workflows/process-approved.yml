@@ -5,27 +5,44 @@ name: Process approved submission
 # re-render, ledger append + issue update, email notify, audit comment,
 # `processed` label).
 #
-# See PLAN.md §8 Phase 2.
+# If a run fails part-way, fix the cause and use "Re-run failed jobs": steps
+# that already completed are skipped and the approval email is sent at most
+# once. For a run too old to re-run, start this workflow by hand (Actions →
+# Process approved submission → Run workflow) with the PR number.
+#
+# See PLAN.md §8 Phase 2 and notes/ADMIN_RUNBOOK.md Scenario 6.
 
 on:
   pull_request_target:
     types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Merged submission PR to process
+        required: true
+        type: number
+      force_resend:
+        description: >
+          Send the approval email again even if it was already sent
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   process:
     if: >-
+      github.event_name == 'workflow_dispatch' || (
       github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'submission')
+      contains(github.event.pull_request.labels.*.name, 'submission'))
     uses: QuantEcon/contractor-payments/.github/workflows/process-approved.yml@main
     permissions:
       contents: write
       pull-requests: write
       issues: write
     with:
-      pr_number: ${{ github.event.pull_request.number }}
-      pr_body: ${{ github.event.pull_request.body }}
-      merge_commit_sha: ${{ github.event.pull_request.merge_commit_sha }}
-      merged_by: ${{ github.event.pull_request.merged_by.login }}
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+      # Always false for a merge (there are no inputs on that event).
+      force_resend: ${{ inputs.force_resend == true }}
       # Must match the `@ref` on the `uses:` line above. The engine checks
       # its own scripts out at this ref, and there is no context value that
       # would let it derive one — so pinning the workflow without pinning

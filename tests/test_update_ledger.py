@@ -13,6 +13,7 @@ from scripts.update_ledger import (
     _build_entry,
     _empty_ledger,
     append_submission,
+    is_already_applied,
 )
 
 
@@ -349,11 +350,77 @@ class TestRevisionEdgeCases:
         with pytest.raises(ValueError, match="Currency mismatch"):
             append_submission(bad, ledger)
 
-    def test_duplicate_submission_id_raises(self):
+    def test_duplicate_submission_id_with_different_content_raises(self):
         ledger = _empty_ledger(HOURLY_SUBMISSION)
         ledger = append_submission(HOURLY_SUBMISSION, ledger)
-        with pytest.raises(ValueError, match="already in the ledger"):
-            append_submission(HOURLY_SUBMISSION, ledger)
+        changed = {**HOURLY_SUBMISSION,
+                   "totals": {**HOURLY_SUBMISSION["totals"], "amount": 800.0}}
+        with pytest.raises(ValueError, match=r"already in the ledger, but with different content \(amount\)"):
+            append_submission(changed, ledger)
+
+
+# ─── Re-runs (issue #11) ────────────────────────────────────────────────────
+
+class TestRerun:
+    """`Re-run failed jobs` replays the ledger step on a main that may already
+    hold this submission's entry. Re-applying the same entry is a no-op;
+    anything else is a real inconsistency and still raises."""
+
+    def test_reapplying_the_same_hourly_entry_is_a_no_op(self):
+        once = append_submission(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+        assert is_already_applied(HOURLY_SUBMISSION, once)
+        assert append_submission(HOURLY_SUBMISSION, once) == once
+
+    def test_reapplying_the_same_milestone_claim_is_a_no_op(self):
+        once = append_submission(MILESTONE_SUBMISSION, _empty_ledger(MILESTONE_SUBMISSION))
+        assert append_submission(MILESTONE_SUBMISSION, once) == once
+        assert once["totals"]["claims_count"] == 1
+
+    def test_not_applied_when_absent(self):
+        assert not is_already_applied(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+
+    def test_different_approval_date_is_not_a_rerun(self):
+        once = append_submission(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+        restamped = {**HOURLY_SUBMISSION, "approved_date": "2026-05-14"}
+        with pytest.raises(ValueError, match="approved_date"):
+            is_already_applied(restamped, once)
+
+    def test_reapplying_a_revision_is_a_no_op(self):
+        original = append_submission(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+        revision = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04",
+            "totals": {**HOURLY_SUBMISSION["totals"], "hours": 16.0, "amount": 800.0},
+        }
+        revised = append_submission(revision, original)
+        assert append_submission(revision, revised) == revised
+        assert revised["totals"]["amount_to_date"] == 800.0
+
+    def test_revision_present_but_target_not_marked_raises(self):
+        original = append_submission(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+        revision = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04",
+        }
+        revised = append_submission(revision, original)
+        revised["submissions"][0].pop("superseded_by")
+        with pytest.raises(ValueError, match="superseded entry"):
+            is_already_applied(revision, revised)
+
+    def test_an_entry_later_superseded_still_counts_as_applied(self):
+        """The original's ledger entry gains `status: superseded` when a
+        revision lands; re-driving the original must not read that as a
+        content change."""
+        original = append_submission(HOURLY_SUBMISSION, _empty_ledger(HOURLY_SUBMISSION))
+        revision = {
+            **HOURLY_SUBMISSION,
+            "submission_id": "janedoe-timesheet-2026-04-v2",
+            "supersedes": "janedoe-timesheet-2026-04",
+        }
+        revised = append_submission(revision, original)
+        assert is_already_applied(HOURLY_SUBMISSION, revised)
 
 
 # ─── Currency-aware rounding ───────────────────────────────────────────────

@@ -20,6 +20,12 @@ preceding step — including whether the email send succeeded.
 Reads the email summary from a JSON file written by `scripts.notify_email`
 (see its `--output-summary` flag).
 
+One comment per target, updated in place: the body ends with SENTINEL, and a
+re-run (`Re-run failed jobs` after a partial failure) edits the existing
+comment instead of adding another. So a first run that couldn't send the email
+reads "not sent", and the re-run that sends it turns the same comment into
+"sent".
+
 See PLAN.md §8 Phase 2.
 """
 from __future__ import annotations
@@ -40,6 +46,9 @@ from scripts.money import format_hours, format_money
 
 # Same emoji conventions used in the running-ledger issue body, so admins
 # learn one visual vocabulary across both surfaces.
+
+# Marks the approval-summary comment so a re-run finds and updates it.
+SENTINEL = "<!-- contractor-payments-approval-summary -->"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -121,6 +130,15 @@ def compose_comment(
                 f"📧 **Email:** dry-run only (no message sent). "
                 f"Would have gone to {recipients}{mode_note}."
             )
+        elif email_summary.get("already_sent"):
+            email_line = (
+                f"📧 **Email:** sent to {recipients} at {sent_at}{mode_note} "
+                f"by an earlier run; not sent again."
+            )
+        elif email_summary.get("resent"):
+            email_line = (
+                f"📧 **Email:** re-sent on request to {recipients} at {sent_at}{mode_note}."
+            )
         else:
             email_line = (
                 f"📧 **Email:** sent to {recipients} at {sent_at}{mode_note}."
@@ -136,7 +154,7 @@ def compose_comment(
         ledger_line,
         email_line,
         "",
-        "<!-- contractor-payments-approval-summary -->",
+        SENTINEL,
     ]
     return "\n".join(lines) + "\n"
 
@@ -152,11 +170,16 @@ def _gh_issue(verb: str, target_number: int, repo: Optional[str],
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -> None:
-    """Post a new comment on the issue or PR via `gh issue comment --body-file`.
+def _write_body(body: str) -> Path:
+    fd, path = tempfile.mkstemp(suffix=".md", prefix="approval-comment-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(body)
+    return Path(path)
 
-    Works for both issues and PRs because they share GitHub's issue
-    numbering and the issue-comment endpoint accepts either.
+
+def _run_unlocking(target_number: int, repo: Optional[str], attempt, what: str) -> None:
+    """Run `attempt()` (a gh call returning CompletedProcess); if GitHub refuses
+    because the issue is locked, unlock, retry once and re-lock.
 
     Submission issues are *locked* when they are filed, and GitHub rejects
     comments on a locked issue outright:
@@ -166,54 +189,112 @@ def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -
     That made this audit comment — the record that the submission was merged,
     ledgered and emailed — impossible to post on the normal happy path, and
     because nothing gated on failure it also silently skipped the `processed`
-    label on every affected submission. So on a lock rejection: unlock,
-    comment, re-lock. The lock is restored in a `finally`, because leaving a
-    submission issue unlocked is a worse outcome than a missing comment.
+    label on every affected submission. The lock is restored in a `finally`,
+    because leaving a submission issue unlocked is a worse outcome than a
+    missing comment.
+    """
+    result = attempt()
+    if result.returncode == 0:
+        return
+
+    if _LOCKED_MARKER not in (result.stderr or "").lower():
+        raise RuntimeError(
+            f"{what} failed (exit {result.returncode}). "
+            f"stderr:\n{result.stderr}"
+        )
+
+    print(f"Issue #{target_number} is locked; unlocking to post the audit "
+          f"comment, then re-locking.", file=sys.stderr)
+    unlock = _gh_issue("unlock", target_number, repo)
+    if unlock.returncode != 0:
+        raise RuntimeError(
+            f"issue #{target_number} is locked and `gh issue unlock` failed "
+            f"(exit {unlock.returncode}), so the audit comment cannot be "
+            f"posted. stderr:\n{unlock.stderr}"
+        )
+    try:
+        retry = attempt()
+        if retry.returncode != 0:
+            raise RuntimeError(
+                f"{what} failed after unlocking (exit "
+                f"{retry.returncode}). stderr:\n{retry.stderr}"
+            )
+    finally:
+        relock = _gh_issue("lock", target_number, repo)
+        if relock.returncode != 0:
+            print(f"WARNING: could not re-lock issue #{target_number} "
+                  f"({relock.stderr.strip() or 'gh failed'}). Re-lock it by "
+                  f"hand: gh issue lock {target_number}"
+                  + (f" --repo {repo}" if repo else ""),
+                  file=sys.stderr)
+
+
+def post_comment(target_number: int, body: str, *, repo: Optional[str] = None) -> None:
+    """Post a new comment on the issue or PR via `gh issue comment --body-file`.
+
+    Works for both issues and PRs because they share GitHub's issue
+    numbering and the issue-comment endpoint accepts either. Handles a locked
+    issue (see `_run_unlocking`).
     """
     repo = repo or os.environ.get("GITHUB_REPOSITORY")
-    fd, path = tempfile.mkstemp(suffix=".md", prefix="approval-comment-")
-    body_path = Path(path)
+    body_path = _write_body(body)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        result = _gh_issue("comment", target_number, repo,
-                           "--body-file", str(body_path))
-        if result.returncode == 0:
-            return
-
-        if _LOCKED_MARKER not in (result.stderr or "").lower():
-            raise RuntimeError(
-                f"gh issue comment failed (exit {result.returncode}). "
-                f"stderr:\n{result.stderr}"
-            )
-
-        print(f"Issue #{target_number} is locked; unlocking to post the audit "
-              f"comment, then re-locking.", file=sys.stderr)
-        unlock = _gh_issue("unlock", target_number, repo)
-        if unlock.returncode != 0:
-            raise RuntimeError(
-                f"issue #{target_number} is locked and `gh issue unlock` failed "
-                f"(exit {unlock.returncode}), so the audit comment cannot be "
-                f"posted. stderr:\n{unlock.stderr}"
-            )
-        try:
-            retry = _gh_issue("comment", target_number, repo,
-                              "--body-file", str(body_path))
-            if retry.returncode != 0:
-                raise RuntimeError(
-                    f"gh issue comment failed after unlocking (exit "
-                    f"{retry.returncode}). stderr:\n{retry.stderr}"
-                )
-        finally:
-            relock = _gh_issue("lock", target_number, repo)
-            if relock.returncode != 0:
-                print(f"WARNING: could not re-lock issue #{target_number} "
-                      f"({relock.stderr.strip() or 'gh failed'}). Re-lock it by "
-                      f"hand: gh issue lock {target_number}"
-                      + (f" --repo {repo}" if repo else ""),
-                      file=sys.stderr)
+        _run_unlocking(
+            target_number, repo,
+            lambda: _gh_issue("comment", target_number, repo, "--body-file", str(body_path)),
+            "gh issue comment",
+        )
     finally:
         body_path.unlink(missing_ok=True)
+
+
+def find_summary_comment(target_number: int, *, repo: Optional[str] = None) -> Optional[int]:
+    """ID of the existing approval-summary comment on the issue or PR, if any.
+
+    Only comments by a bot count, so a person pasting the marker into their
+    own comment can't redirect the update. The jq filter runs per page under
+    --paginate, so this finds the comment however long the thread is.
+    """
+    repo = repo or os.environ.get("GITHUB_REPOSITORY") or "{owner}/{repo}"
+    jq = (f'.[] | select(.user.type == "Bot" and (.body | contains({json.dumps(SENTINEL)})))'
+          f' | .id')
+    result = subprocess.run(
+        ["gh", "api", "--paginate", f"repos/{repo}/issues/{target_number}/comments",
+         "--jq", jq],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"could not list comments on #{target_number} (exit "
+            f"{result.returncode}). stderr:\n{result.stderr}"
+        )
+    ids = [int(x) for x in result.stdout.split()]
+    return ids[0] if ids else None
+
+
+def upsert_comment(target_number: int, body: str, *, repo: Optional[str] = None) -> str:
+    """Update the existing approval-summary comment, or post one. Returns
+    "updated" or "posted"."""
+    repo = repo or os.environ.get("GITHUB_REPOSITORY")
+    existing = find_summary_comment(target_number, repo=repo)
+    if existing is None:
+        post_comment(target_number, body, repo=repo)
+        return "posted"
+    body_path = _write_body(body)
+    try:
+        _run_unlocking(
+            target_number, repo,
+            lambda: subprocess.run(
+                ["gh", "api", "--method", "PATCH",
+                 f"repos/{repo or '{owner}/{repo}'}/issues/comments/{existing}",
+                 "-F", f"body=@{body_path}"],
+                capture_output=True, text=True,
+            ),
+            f"updating comment {existing}",
+        )
+    finally:
+        body_path.unlink(missing_ok=True)
+    return "updated"
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -256,11 +337,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(body)
         return 0
 
-    post_comment(args.issue, body, repo=args.repo)
-    print(f"Posted comment on issue #{args.issue}")
+    outcome = upsert_comment(args.issue, body, repo=args.repo)
+    print(f"Approval summary {outcome} on issue #{args.issue}")
     if args.pr is not None:
-        post_comment(args.pr, body, repo=args.repo)
-        print(f"Posted comment on PR #{args.pr}")
+        outcome = upsert_comment(args.pr, body, repo=args.repo)
+        print(f"Approval summary {outcome} on PR #{args.pr}")
     return 0
 
 
