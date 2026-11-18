@@ -14,6 +14,7 @@ from scripts.parse_issue import (
     _parse_date,
     _parse_hours,
     cross_check_milestone_ids,
+    date_error,
     parse_issue,
 )
 
@@ -156,7 +157,6 @@ class TestDateFormats:
     @pytest.mark.parametrize("date_str,expected", [
         ("2025-01-05", "2025-01-05"),
         ("2025/01/05", "2025-01-05"),
-        ("05-01-2025", "2025-01-05"),  # DD-MM-YYYY unambiguous
         ("2025-1-5", "2025-01-05"),    # single-digit components
     ])
     def test_accepted_date_formats(self, date_str, expected):
@@ -404,9 +404,11 @@ class TestHelpers:
         from datetime import date
         assert _parse_date("2025/01/05") == date(2025, 1, 5)
 
-    def test_parse_date_dmy(self):
-        from datetime import date
-        assert _parse_date("05-01-2025") == date(2025, 1, 5)
+    def test_parse_date_year_last_is_refused(self):
+        # Used to be read as day-first, silently misdating month-first entries.
+        assert _parse_date("05-01-2025") is None
+        assert _parse_date("25-01-2025") is None
+        assert _parse_date("05/01/2025") is None
 
     def test_parse_date_invalid_returns_none(self):
         assert _parse_date("not a date") is None
@@ -747,3 +749,43 @@ class TestHandTypedHeaderVariants:
         from scripts.parse_issue import _looks_like_header
         assert _looks_like_header("ID | Date | Amount | Notes", "|")
         assert not _looks_like_header("3 | 2025-11-15 | 77000 | Monthly", "|")
+
+
+# ─── Year-last dates: refused, with the fix spelled out (issue #12) ─────────
+
+class TestYearLastDates:
+    """`05-01-2025` is 5 January to some contractors and 1 May to others.
+    The parser used to read it as day-first; now it refuses any year-last date
+    and says exactly what to write instead."""
+
+    @pytest.mark.parametrize("given,expected", [
+        ("25-01-2026", "write it as `2026-01-25`"),   # day-first, day > 12
+        ("01-25-2026", "write it as `2026-01-25`"),   # month-first, day > 12
+        ("25/01/2026", "write it as `2026-01-25`"),   # slashes too
+        ("07-07-2026", "write it as `2026-07-07`"),   # both readings agree
+    ])
+    def test_unambiguous_year_last_gets_exact_fix(self, given, expected):
+        assert expected in date_error(given, "2025-01-05")
+
+    def test_ambiguous_year_last_shows_both_readings(self):
+        msg = date_error("05-01-2026", "2025-01-05")
+        assert "ambiguous" in msg
+        assert "5 January 2026 (`2026-01-05`)" in msg
+        assert "1 May 2026 (`2026-05-01`)" in msg
+
+    @pytest.mark.parametrize("given", ["31-02-2026", "Jan 5 2026", "garbage", "2026-13-01"])
+    def test_other_bad_dates_keep_the_generic_message(self, given):
+        assert date_error(given, "2025-01-05").startswith(f"couldn't read a date from `{given}`")
+
+    def test_timesheet_row_is_rejected_with_the_fix(self):
+        result = parse_issue(build_body(entries="05-01-2025 | 4.0 | work"))
+        assert not result.ok
+        assert any("ambiguous" in m for m in error_messages(result))
+
+    def test_milestone_row_is_rejected_with_the_fix(self):
+        # Milestone dates may fall outside the period, so nothing else would
+        # have caught a swapped day and month here.
+        body = build_milestone_body(entries="1 | 15-11-2025 | 77000 | September")
+        result = parse_issue(body)
+        assert not result.ok
+        assert any("write it as `2025-11-15`" in m for m in error_messages(result))
