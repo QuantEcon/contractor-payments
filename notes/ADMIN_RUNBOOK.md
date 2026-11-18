@@ -643,6 +643,93 @@ rounding.
 
 ---
 
+## Engine releases
+
+**Contractor repos run the engine at a release tag, not `main`.** Each
+contractor repo's three callers pin `@v1` (and `engine_ref: v1`). This
+repo is public and its workflows run in every contractor repo with write
+access and the mail credentials, so a merge to `main` should not reach
+them by itself. Only moving the `v1` tag ships engine changes.
+
+- `vX.Y.Z`: one immutable tag per release, for the record and rollback.
+- `v1`: a moving tag that always points at the current release. Live
+  contractor repos pin this.
+- `test-contractor-payments` pins `main`. It is the canary: it runs what
+  is merged before any contractor does.
+
+A new major (`v2`) is only for a change old callers can't run, such as a
+renamed input. That needs every repo's callers updated (below).
+
+### Releasing
+
+1. Merge to `main` as usual: review, CI green.
+2. Exercise it on the test repo (it already runs `main`). For changes to
+   the approval or submission path, put one submission through.
+3. Tag the release and move `v1` to it:
+
+   ```bash
+   git fetch origin main --tags
+   git tag -a v1.1.0 -m "Short description" origin/main
+   git tag -f v1 v1.1.0^{}
+   git push origin v1.1.0
+   git push -f origin v1
+   ```
+
+   Contractor repos use it from their next run.
+
+**Rolling back:** point `v1` at the previous release and force-push the
+tag:
+
+```bash
+git tag -f v1 v1.0.0^{}
+git push -f origin v1
+```
+
+### Changing the callers themselves
+
+Most releases change only the engine's reusable workflows and scripts;
+the callers in contractor repos don't change. When
+`contractor-template/.github/workflows/` does change (a new trigger,
+different secrets), existing repos need the new files. New repos get them
+at onboarding. For existing repos:
+
+```bash
+python onboarding/sync_callers.py contractors/contractor-*        # pins v1
+python onboarding/sync_callers.py --ref main ../test-contractor-payments
+python onboarding/sync_callers.py --check contractors/contractor-*  # drift only
+```
+
+It writes the template callers into each checkout at the given ref and
+nothing else. Review `git diff`, then commit and push in each repo.
+
+### Secrets reach only the approval pipeline
+
+Callers pass secrets by name instead of `secrets: inherit`. Only
+`process-approved` gets anything: the five `SMTP_*` secrets. The
+submission and reminder workflows get none (they use only the
+`GITHUB_TOKEN` every run has). `tests/test_workflows.py` enforces both
+sides.
+
+The Typst tarball each workflow downloads is checked against a pinned
+sha256 (`TYPST_SHA256`, next to `TYPST_VERSION`) before it is extracted.
+When bumping Typst, update both in `process-submission.yml` and
+`process-approved.yml`. The tests require them to agree, and CI derives
+its own install from them.
+
+### One-time settings (repo admin)
+
+These live in GitHub settings, not in code:
+
+1. **Ruleset on this repo's `main`:** require a pull request with at
+   least one approving review, require the `pytest (3.12)` and
+   `pytest (3.13)` checks, and block force pushes and deletion. PRs opened
+   by `quantecon-services` are approved by the admin. An admin's own PR
+   needs a second reviewer or the ruleset's bypass.
+2. **Tag ruleset for `v*`:** restrict creating, updating and deleting
+   release tags to admins, so moving `v1` stays a deliberate act.
+
+---
+
 ## Branch protection (deferred)
 
 **Status as of 2026-05-20: contractor repos run without branch protection.**
@@ -834,7 +921,8 @@ push step currently runs as `github-actions[bot]` with the auto-issued
    — click into the App, the URL contains it.)
 
 The thin caller `contractor-template/.github/workflows/process-approved.yml`
-needs no change; it just pins `@main` and inherits the new behaviour.
+needs no change; it pins the release tag and picks up the new behaviour
+once a release containing it is tagged (see "Engine releases").
 
 #### Step 5 — Verify the App appears in the bypass picker
 

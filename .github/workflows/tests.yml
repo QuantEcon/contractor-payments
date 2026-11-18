@@ -63,9 +63,19 @@ jobs:
                  "do not hard-code a version." >&2
             exit 1
           fi
+          TYPST_SHA256=$(grep -ohE 'TYPST_SHA256="[0-9a-f]{64}"' \
+            .github/workflows/process-submission.yml \
+            | head -1 | cut -d'"' -f2)
+          if [ -z "$TYPST_SHA256" ]; then
+            echo "ERROR: could not derive TYPST_SHA256 from" \
+                 ".github/workflows/process-submission.yml." >&2
+            exit 1
+          fi
           echo "Installing Typst ${TYPST_VERSION} (from process-submission.yml)"
-          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
-            | tar -xJ -C /tmp
+          curl -fsSL -o /tmp/typst.tar.xz \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c -
+          tar -xJ -C /tmp -f /tmp/typst.tar.xz
           sudo mv /tmp/typst-*/typst /usr/local/bin/typst
           typst --version
 
