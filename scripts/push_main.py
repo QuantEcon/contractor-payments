@@ -41,17 +41,33 @@ def _replay(replay: str, paths: Sequence[str], message: str,
     True if the change turns out to be on main already, False on failure."""
     print("Rebase conflicted: another run changed the same files. Rebuilding "
           "this change on the updated main instead.", file=sys.stderr)
-    _git("reset", "--hard", "FETCH_HEAD", cwd=cwd)
+    # Every git step is checked: running the rebuild on the wrong base, or
+    # staging nothing and reading that as "already on main", would report a
+    # push that never happened.
+    reset = _git("reset", "--hard", "FETCH_HEAD", cwd=cwd)
+    if reset.returncode != 0:
+        print(f"ERROR: could not reset to the updated branch: "
+              f"{reset.stderr.strip()}. Nothing was pushed.", file=sys.stderr)
+        return False
     rebuilt = subprocess.run(["bash", "-ec", replay], cwd=cwd)
     if rebuilt.returncode != 0:
         print(f"ERROR: the rebuild command failed (exit {rebuilt.returncode}). "
               f"Nothing was pushed.", file=sys.stderr)
         return False
-    _git("add", "-A", "--", *paths, cwd=cwd)
-    if _git("diff", "--cached", "--quiet", cwd=cwd).returncode == 0:
+    added = _git("add", "-A", "--", *paths, cwd=cwd)
+    if added.returncode != 0:
+        print(f"ERROR: could not stage the rebuilt files: "
+              f"{added.stderr.strip()}. Nothing was pushed.", file=sys.stderr)
+        return False
+    staged = _git("diff", "--cached", "--quiet", cwd=cwd)
+    if staged.returncode == 0:
         print("Nothing left to commit after rebuilding: the change is already "
               "on main.")
         return True
+    if staged.returncode != 1:
+        print(f"ERROR: could not inspect the rebuilt changes: "
+              f"{staged.stderr.strip()}. Nothing was pushed.", file=sys.stderr)
+        return False
     commit = _git("commit", "-m", message, cwd=cwd)
     if commit.returncode != 0:
         print(f"ERROR: commit after rebuild failed: {commit.stderr.strip()}",

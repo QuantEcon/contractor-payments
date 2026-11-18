@@ -129,3 +129,31 @@ def test_rebuild_that_changes_nothing_means_already_on_main(repos):
 def test_replay_requires_paths():
     with pytest.raises(ValueError):
         push_with_retry(replay="true")
+
+
+def test_rebuild_with_a_bad_path_fails_instead_of_claiming_success(repos):
+    """A failed `git add` stages nothing, which used to read as "already on
+    main" and report success with nothing pushed."""
+    origin, run1, run2 = repos
+    _commit(run1, "ledger.yml", "entries:\n- a\n- run1\n")
+    _git(run1, "push", "-q", "origin", "HEAD:main")
+    before = _git(origin, "rev-parse", "main")
+    _commit(run2, "ledger.yml", "entries:\n- a\n- run2\n")
+    assert not push_with_retry(cwd=str(run2), sleep=lambda s: None,
+                               replay=_append_run2(), paths=["no-such-dir/"])
+    assert _git(origin, "rev-parse", "main") == before
+
+
+def test_failed_reset_stops_the_rebuild_before_it_runs(monkeypatch, tmp_path):
+    import scripts.push_main as pm
+    ran = []
+
+    def fake_git(*args, cwd=None):
+        rc = 1 if args[:2] == ("reset", "--hard") else 0
+        return subprocess.CompletedProcess(["git", *args], rc, "", "fatal: bad ref")
+
+    monkeypatch.setattr(pm, "_git", fake_git)
+    monkeypatch.setattr(pm.subprocess, "run", lambda *a, **k: ran.append(a) or
+                        subprocess.CompletedProcess(a, 0, "", ""))
+    assert pm._replay("touch x", ["x"], "msg", str(tmp_path)) is False
+    assert ran == []        # the replay command never ran on the wrong base
