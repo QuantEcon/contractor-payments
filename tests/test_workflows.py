@@ -561,3 +561,71 @@ def test_python_dependency_is_pinned_in_the_engine_workflows():
             run = step.get("run") or ""
             if run.strip().startswith("pip install pyyaml"):
                 assert re.search(r"pyyaml==\d+\.\d+\.\d+", run), f"{path.name}: {run.strip()}"
+
+
+# ─── Concurrency (issue #10) ────────────────────────────────────────────────
+
+def test_submissions_run_one_at_a_time_per_issue():
+    job = _load(REPO_ROOT / ".github" / "workflows" / "process-submission.yml")["jobs"]["process"]
+    assert "inputs.issue_number" in job["concurrency"]["group"]
+    assert job["concurrency"]["cancel-in-progress"] is False
+
+
+class TestCommitBackRebuildsOnConflict:
+    """Two approvals on one contract both append to its ledger, so the second
+    push's rebase conflicts. commit_back replays verify + stamp + ledger on
+    the updated main instead of failing. The replay is shell text inside YAML,
+    so execute it, and check it repeats the real steps exactly."""
+
+    def _steps(self):
+        return {_id(s): s for s in _steps(_load(APPROVED_WF))}
+
+    def _replay(self):
+        run = self._steps()["commit_back"]["run"]
+        m = re.search(r"REPLAY='(.*?)'\n", run, re.S)
+        assert m, "commit_back defines no REPLAY='...'"
+        assert '--replay "$REPLAY"' in run
+        assert "--paths submissions/ generated_pdfs/ ledger/" in run
+        return m.group(1)
+
+    @staticmethod
+    def _commands(script):
+        import shlex
+        script = script.replace("\\\n", " ")
+        start = script.index("python -m scripts.")
+        return [shlex.split(line) for line in script[start:].splitlines()
+                if line.strip().startswith("python -m scripts.")]
+
+    def test_replay_repeats_the_verify_stamp_and_ledger_steps(self):
+        replay = self._commands(self._replay())
+        steps = self._steps()
+        expected = [self._commands(steps[s]["run"])[0]
+                    for s in ("verify", "stamp", "update_ledger")]
+        assert replay == expected
+
+    def test_replay_has_the_env_its_commands_use(self):
+        env = self._steps()["commit_back"]["env"]
+        assert env["SUBMISSION_FILE"] == "${{ steps.find_submission.outputs.submission_file }}"
+        assert env["MERGED_BY"] == "${{ needs.resolve.outputs.merged_by }}"
+        assert env["PYTHONPATH"] == "engine"
+
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+    def test_replay_runs_with_values_expanded_by_the_child_shell(self, tmp_path):
+        import os
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        log = tmp_path / "calls"
+        fake = bindir / "python"
+        fake.write_text(f'#!/bin/sh\nprintf "%s|" "$@" >> {log}\necho >> {log}\n')
+        fake.chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-ec", self._replay()], capture_output=True, text=True,
+            env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}",
+                 "SUBMISSION_FILE": "submissions/2026-08/x y.yml", "MERGED_BY": "mmcky"},
+        )
+        assert result.returncode == 0, result.stderr
+        calls = log.read_text().splitlines()
+        assert [c.split("|")[1] for c in calls] == [
+            "scripts.verify_approval", "scripts.finalize_approval", "scripts.update_ledger"]
+        assert all("submissions/2026-08/x y.yml" in c.split("|") for c in calls)
+        assert "mmcky" in calls[1].split("|")

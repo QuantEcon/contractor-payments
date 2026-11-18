@@ -76,6 +76,15 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+    # One run per issue at a time. A `submit` label plus a `/submit` comment
+    # (or two quick `/submit`s) used to start two runs that raced to create
+    # the same submission/issue-N branch, and the loser failed part-way.
+    # Now the second waits, then finds the branch and updates the PR. A newer
+    # waiting run replaces an older waiting one, so the latest request wins
+    # and reads the latest issue body.
+    concurrency:
+      group: process-submission-issue-${{ inputs.issue_number }}
+      cancel-in-progress: false
 
     steps:
       - name: Check out the contractor repo

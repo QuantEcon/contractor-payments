@@ -25,7 +25,7 @@ companion contractor-facing guide will live at
 | [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ✅ | — re-run safe ("Re-run failed jobs") |
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — renewal steps are manual |
 | [8. Wrong currency / contract mismatch](#8-wrong-currency--contract-mismatch) | ✅ | — |
-| [9. Concurrent submissions](#9-concurrent-submissions) | ⚠️ Rare race | Low priority |
+| [9. Concurrent submissions](#9-concurrent-submissions) | ✅ Same issue / parallel approvals · ⚠️ two issues for one period | Low priority (two issues, one period) |
 
 ---
 
@@ -538,6 +538,28 @@ The parser validates against `contracts/<id>.yml`:
 ---
 
 ## 9. Concurrent submissions
+
+Three kinds of "at the same time", and how each is handled.
+
+**One issue, two triggers.** A contractor applies the `submit` label
+and comments `/submit` (or comments `/submit` twice). The submission
+workflow runs one at a time per issue (a concurrency group), so the
+second run waits, then finds the branch and updates the same PR.
+Several quick requests collapse: a newer waiting run replaces an older
+waiting one, so the latest request wins and reads the latest issue
+body.
+
+**Two approvals at once.** Merging two submission PRs within seconds
+starts two approval runs. They run in parallel, one run per PR. Both
+push to `main`. The second rebases over the first and retries. If both
+are for the **same contract**, both appended to its ledger and the
+rebase conflicts. The run then resets to the updated `main` and
+replays the verify, stamp and ledger steps there, so the ledger gets
+both entries and correct totals, with no text merge. Approvals are not
+serialised per repo, because GitHub keeps only one waiting run per
+concurrency group: a third quick merge would cancel the second's run.
+
+**Two issues for one period.** This is the case below.
 
 **Situation.** Two issues are opened on the same contractor repo
 within seconds of each other (improbable in practice — monthly

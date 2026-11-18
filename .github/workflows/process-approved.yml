@@ -336,6 +336,8 @@ jobs:
         env:
           PYTHONPATH: engine
           PR_NUMBER: ${{ inputs.pr_number }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+          MERGED_BY: ${{ needs.resolve.outputs.merged_by }}
         run: |
           git add submissions/ generated_pdfs/ ledger/
           if git diff --cached --quiet; then
@@ -345,8 +347,31 @@ jobs:
           fi
           git commit -m "Process approved submission from PR #${PR_NUMBER} [skip ci]"
           # Two approvals merging close together both push to main; push_main
-          # rebases over the one that landed first and retries.
-          if ! python -m scripts.push_main; then
+          # rebases over the one that landed first and retries. Two approvals
+          # on one contract both append to its ledger, so that rebase
+          # conflicts. Rather than fail (or text-merge a ledger), push_main
+          # resets to the updated main and replays the verify, stamp and
+          # ledger steps, which are re-run safe, then pushes the result.
+          # Approvals aren't serialised per repo instead: GitHub keeps one
+          # waiting run per concurrency group, so a third quick merge would
+          # cancel the second's run.
+          REPLAY='
+          python -m scripts.verify_approval \
+            --submission "$SUBMISSION_FILE" \
+            --changed-files /tmp/changed_files.txt \
+            --merged-by "$MERGED_BY" \
+            --fiscal-host engine/templates/fiscal-host.yml \
+            --report /tmp/verify_report.md
+          python -m scripts.finalize_approval \
+            --submission "$SUBMISSION_FILE" \
+            --settings config/settings.yml \
+            --templates engine/templates \
+            --approver "$MERGED_BY"
+          python -m scripts.update_ledger \
+            --submission "$SUBMISSION_FILE"
+          '
+          if ! python -m scripts.push_main --replay "$REPLAY" \
+               --paths submissions/ generated_pdfs/ ledger/; then
             echo "Nothing was pushed and no email was sent. Once the cause is clear," >&2
             echo "'Re-run failed jobs': the re-run checks out the settled main and" >&2
             echo "appends this submission after any other approval's entry." >&2
