@@ -52,15 +52,11 @@ Each new contractor repo must be added to all seven (admin runbook,
 
 The two recipient addresses used to be org **Variables**. Variables print
 verbatim in the Actions log, and contractors can read their repo's logs, so
-they are now **Secrets**, which the log masks (issue #20). To switch:
-
-1. Create the two org secrets with the same values as the variables (scope:
-   the contractor repos and `test-contractor-payments`).
-2. Sync each contractor repo's callers so `process-approved.yml` passes them
-   (`onboarding/sync_callers.py`; see the admin runbook, "Engine releases").
-   Repos still on `secrets: inherit` get them already.
-3. Delete the old variables, and drop the `|| vars.*` fallback from the
-   engine's `process-approved.yml` email step.
+they are now **Secrets**, which the log masks (issue #20). The engine reads
+only the secrets, and the old variables are deleted. A contractor repo's
+`process-approved.yml` caller must pass both by name (the template does;
+`onboarding/sync_callers.py --check` finds a repo that doesn't). A repo
+still on `secrets: inherit` gets them too.
 
 The engine also never prints, records or comments the addresses themselves:
 the log, the audit comment and the `approval_email` record name recipients

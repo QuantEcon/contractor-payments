@@ -335,8 +335,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     reviewer_email = os.environ.get("QUANTECON_EMAIL_REVIEWER", "").strip()
     if not reviewer_email:
         raise RuntimeError(
-            "QUANTECON_EMAIL_REVIEWER env var is required "
-            "(used as both Cc and testing-mode To)."
+            "QUANTECON_EMAIL_REVIEWER is not set (it is both the testing-mode "
+            "To and the Cc). It is an org secret the approval caller must pass; "
+            "see notes/EMAIL_SETUP.md."
         )
 
     to_role, cc_role = recipient_roles(testing_mode)
@@ -349,7 +350,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         if not psl_email:
             raise RuntimeError(
-                "PSL_EMAIL env var is required when testing_mode=false."
+                "PSL_EMAIL is not set, and testing_mode=false needs it. It is an "
+                "org secret the approval caller must pass; see "
+                "notes/EMAIL_SETUP.md."
             )
         to_addr = psl_email
         cc_addr = reviewer_email
