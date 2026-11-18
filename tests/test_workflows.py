@@ -635,10 +635,12 @@ class TestCommitBackRebuildsOnConflict:
 
 def test_recipient_addresses_are_read_as_secrets():
     """Org variables print verbatim in the step's env block of the log, which
-    contractors can read; secrets are masked (issue #20). The vars fallback
-    is for the switch-over only."""
+    contractors can read; secrets are masked (issue #20). The switch-over
+    fallback to `vars.*` is gone, and must not come back."""
     email = next(s for s in _steps(_load(APPROVED_WF)) if _id(s) == "email")
     for name in ("PSL_EMAIL", "QUANTECON_EMAIL_REVIEWER"):
-        assert email["env"][name] == f"${{{{ secrets.{name} || vars.{name} }}}}"
+        assert email["env"][name] == f"${{{{ secrets.{name} }}}}"
+    for path in ENGINE_WORKFLOWS + CALLER_WORKFLOWS:
+        assert "vars." not in path.read_text(encoding="utf-8"), path.name
     others = [s for s in _steps(_load(APPROVED_WF)) if _id(s) != "email"]
     assert not any("PSL_EMAIL" in yaml.safe_dump(s) for s in others)

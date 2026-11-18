@@ -408,11 +408,11 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          # Secrets, so the log masks them. The `vars.*` fallback covers the
-          # switch-over only (issue #20): drop it once the org secrets exist and
-          # every caller passes them, then delete the old org variables.
-          PSL_EMAIL: ${{ secrets.PSL_EMAIL || vars.PSL_EMAIL }}
-          QUANTECON_EMAIL_REVIEWER: ${{ secrets.QUANTECON_EMAIL_REVIEWER || vars.QUANTECON_EMAIL_REVIEWER }}
+          # Secrets, so the log masks them (issue #20). They used to be org
+          # variables, which the log prints verbatim to anyone who can read
+          # the contractor repo's Actions runs.
+          PSL_EMAIL: ${{ secrets.PSL_EMAIL }}
+          QUANTECON_EMAIL_REVIEWER: ${{ secrets.QUANTECON_EMAIL_REVIEWER }}
           SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
           PERIOD: ${{ steps.find_submission.outputs.period }}
           SUBMISSION_ID: ${{ steps.find_submission.outputs.submission_id }}
