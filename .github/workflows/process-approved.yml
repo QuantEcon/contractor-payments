@@ -12,9 +12,18 @@ name: Process approved submission (reusable)
 #   4. Edit the pinned ledger issue with the updated running totals.
 #   5. Send the approval email to PSL (or admin only, if testing_mode=true)
 #      with the approved PDF attached.
-#   6. Post an internal audit comment on the original submission issue
+#   6. Record the email send in the submission YAML and commit it to main.
+#   7. Post (or update) the audit comment on the original submission issue
 #      confirming the merge, the ledger update, and the email send.
-#   7. Apply the `processed` label to the closed PR.
+#   8. Apply the `processed` label to the closed PR.
+#
+# Re-run safe (issue #11). Every step skips work that is already done, so
+# "Re-run failed jobs" is the recovery for a partial failure: the stamp keeps
+# its original date, the ledger entry isn't appended twice, the email is sent
+# at most once (its send is recorded on main), and the audit comment is
+# edited in place. A PR already labelled `processed` is left alone unless
+# `force_resend` is set. Contractor repos can also start this by hand
+# (workflow_dispatch in the caller) for a run too old to re-run.
 #
 # Branch-protection note: this workflow pushes directly to main (step 3).
 # That requires either no branch protection on main OR `github-actions[bot]`
@@ -32,15 +41,29 @@ on:
       pr_number:
         required: true
         type: number
+      # The PR's body, merge commit and merger are read from the API in the
+      # `resolve` job, so a manual dispatch with only a PR number takes the
+      # same path as a merge. These three stay declared (and ignored) so
+      # callers that still pass them keep validating.
       pr_body:
-        required: true
+        required: false
         type: string
+        default: ""
       merge_commit_sha:
-        required: true
+        required: false
         type: string
+        default: ""
       merged_by:
-        required: true
+        required: false
         type: string
+        default: ""
+      force_resend:
+        description: >
+          Send the approval email even if an earlier run already sent it (and
+          process a PR already labelled `processed`). For a deliberate resend.
+        required: false
+        type: boolean
+        default: false
 
       engine_ref:
         description: >
@@ -54,12 +77,74 @@ on:
         default: "main"
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      merge_sha: ${{ steps.pr.outputs.merge_sha }}
+      merged_by: ${{ steps.pr.outputs.merged_by }}
+      issue_number: ${{ steps.pr.outputs.issue_number }}
+      run: ${{ steps.pr.outputs.run }}
+    steps:
+      - name: Read the merged PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          FORCE_RESEND: ${{ inputs.force_resend }}
+        run: |
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" > /tmp/pr.json
+          if [ "$(jq -r .merged /tmp/pr.json)" != "true" ]; then
+            echo "ERROR: PR #${PR_NUMBER} is not merged; nothing to process." >&2
+            exit 1
+          fi
+          if ! jq -e '.labels | map(.name) | index("submission")' /tmp/pr.json > /dev/null; then
+            echo "ERROR: PR #${PR_NUMBER} has no \`submission\` label; not a submission PR." >&2
+            exit 1
+          fi
+          echo "merge_sha=$(jq -r .merge_commit_sha /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+          echo "merged_by=$(jq -r .merged_by.login /tmp/pr.json)" >> "$GITHUB_OUTPUT"
+
+          # PR body contains "Closes #N" per create_submission_pr.py
+          ISSUE_NUMBER=$(jq -r '.body // ""' /tmp/pr.json \
+            | grep -oE 'Closes #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "WARN: No 'Closes #N' found in PR body; falling back to PR number $PR_NUMBER" >&2
+            ISSUE_NUMBER="$PR_NUMBER"
+          fi
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Original issue: #$ISSUE_NUMBER"
+
+          # `processed` is applied only when every step succeeded, email
+          # included, so there is nothing left to do (re-running a successful
+          # run, or dispatching a finished PR) unless a resend is asked for.
+          if jq -e '.labels | map(.name) | index("processed")' /tmp/pr.json > /dev/null \
+             && [ "$FORCE_RESEND" != "true" ]; then
+            {
+              echo "PR #${PR_NUMBER} is already labelled \`processed\`: an earlier run"
+              echo "completed every step, including the approval email. Nothing to do."
+              echo "To send the approval email again, run with \`force_resend\`."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   process:
+    needs: resolve
+    if: needs.resolve.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       issues: write
+    # One run per PR at a time: a merge-triggered run, a re-run and a manual
+    # dispatch for the same PR queue rather than racing to send the email.
+    concurrency:
+      group: process-approved-pr-${{ inputs.pr_number }}
+      cancel-in-progress: false
 
     steps:
       - name: Check out the contractor repo at main
@@ -111,7 +196,7 @@ jobs:
       - name: Find the submission YAML in the merge commit
         id: find_submission
         env:
-          MERGE_SHA: ${{ inputs.merge_commit_sha }}
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
         run: |
           # The checkout is main at depth 2, so if another approval's
           # `[skip ci]` commit landed on main before this job started, the
@@ -156,21 +241,6 @@ jobs:
           echo "period=$PERIOD" >> "$GITHUB_OUTPUT"
           echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Extract original issue number from PR body
-        id: find_issue
-        env:
-          PR_BODY: ${{ inputs.pr_body }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          # PR body contains "Closes #N" per create_submission_pr.py
-          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oE 'Closes #[0-9]+' | head -1 | grep -oE '[0-9]+')
-          if [ -z "$ISSUE_NUMBER" ]; then
-            echo "WARN: No 'Closes #N' found in PR body; falling back to PR number $PR_NUMBER" >&2
-            ISSUE_NUMBER="$PR_NUMBER"
-          fi
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "Original issue: #$ISSUE_NUMBER"
-
       # Gate everything outward-facing on three checks (scripts/verify_approval.py):
       #   - the person who merged is on the engine's approver list
       #     (quantecon.approvers in templates/fiscal-host.yml). The list lives
@@ -192,8 +262,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          MERGE_SHA: ${{ inputs.merge_commit_sha }}
-          MERGED_BY: ${{ inputs.merged_by }}
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+          MERGED_BY: ${{ needs.resolve.outputs.merged_by }}
           SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
         run: |
           {
@@ -210,13 +280,16 @@ jobs:
             --fiscal-host engine/templates/fiscal-host.yml \
             --report /tmp/verify_report.md
 
+      # On a re-run after the commit-back, the YAML on main is already stamped:
+      # finalize_approval keeps that stamp (and the PDF that may already have
+      # been emailed) instead of restamping with today's date.
       - name: Stamp approval + re-render PDF/PNG
         id: stamp
         env:
           PYTHONPATH: engine
           GITHUB_REPOSITORY: ${{ github.repository }}
           SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
-          MERGED_BY: ${{ inputs.merged_by }}
+          MERGED_BY: ${{ needs.resolve.outputs.merged_by }}
         run: |
           python -m scripts.finalize_approval \
             --submission "$SUBMISSION_FILE" \
@@ -224,6 +297,8 @@ jobs:
             --templates engine/templates \
             --approver "$MERGED_BY"
 
+      # No-op when the ledger already holds this exact entry (a re-run); still
+      # fails if it holds the same submission_id with different content.
       - name: Append to ledger YAML
         id: update_ledger
         env:
@@ -236,51 +311,25 @@ jobs:
       - name: Commit re-rendered PDF/PNG + ledger to main
         id: commit_back
         env:
+          PYTHONPATH: engine
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           git add submissions/ generated_pdfs/ ledger/
           if git diff --cached --quiet; then
-            echo "Nothing to commit (idempotent re-run on already-processed PR?)"
+            echo "Nothing to commit (re-run: an earlier attempt already committed this)."
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "Process approved submission from PR #${PR_NUMBER} [skip ci]"
-            # Two approvals merging close together both push to main. Without
-            # a retry the loser is simply rejected — and because nothing
-            # downstream is failure-gated that used to silently cost the
-            # email, the audit comment and the label.
-            PUSHED=false
-            for ATTEMPT in 1 2 3 4 5; do
-              if git push origin HEAD:main; then
-                PUSHED=true
-                echo "Pushed to main on attempt ${ATTEMPT}."
-                break
-              fi
-              echo "Push rejected (attempt ${ATTEMPT}/5) — another approval likely landed first."
-              git fetch origin main
-              if ! git rebase FETCH_HEAD; then
-                git rebase --abort || true
-                echo "ERROR: rebase onto the updated main conflicted." >&2
-                echo "Another approval touched the same ledger lines. Nothing has been" >&2
-                echo "pushed and no email was sent; the ledger on main still has only" >&2
-                echo "the other approval's entry." >&2
-                echo "Fix: 'Re-run failed jobs' — the re-run checks out the settled main" >&2
-                echo "and appends this submission after the other entry, which replays" >&2
-                echo "cleanly." >&2
-                exit 1
-              fi
-              # No point backing off after the final attempt.
-              if [ "$ATTEMPT" -lt 5 ]; then
-                sleep $((ATTEMPT * 3))
-              fi
-            done
-            if [ "$PUSHED" != "true" ]; then
-              echo "ERROR: could not push to main after 5 attempts (persistent" >&2
-              echo "contention, or a rejected push such as branch protection)." >&2
-              echo "Nothing downstream ran: no email, no audit comment, no label." >&2
-              exit 1
-            fi
-            echo "did_commit=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git commit -m "Process approved submission from PR #${PR_NUMBER} [skip ci]"
+          # Two approvals merging close together both push to main; push_main
+          # rebases over the one that landed first and retries.
+          if ! python -m scripts.push_main; then
+            echo "Nothing was pushed and no email was sent. Once the cause is clear," >&2
+            echo "'Re-run failed jobs': the re-run checks out the settled main and" >&2
+            echo "appends this submission after any other approval's entry." >&2
+            exit 1
+          fi
+          echo "did_commit=true" >> "$GITHUB_OUTPUT"
 
       - name: Update pinned ledger issue
         id: ledger_issue
@@ -294,6 +343,9 @@ jobs:
             --ledger "ledger/${CONTRACT_ID}.yml" \
             --repo "$REPO"
 
+      # Sent at most once: notify_email records the send in the submission
+      # YAML (committed by the next step) and a re-run finds the record and
+      # reports it instead of sending again, unless force_resend is set.
       - name: Send approval email
         id: email
         env:
@@ -309,18 +361,45 @@ jobs:
           PERIOD: ${{ steps.find_submission.outputs.period }}
           SUBMISSION_ID: ${{ steps.find_submission.outputs.submission_id }}
           REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.resolve.outputs.issue_number }}
+          FORCE_RESEND: ${{ inputs.force_resend }}
         run: |
+          EXTRA=()
+          if [ "$FORCE_RESEND" = "true" ]; then
+            EXTRA+=(--force-resend)
+          fi
           python -m scripts.notify_email \
             --submission "$SUBMISSION_FILE" \
             --settings config/settings.yml \
             --pdf "generated_pdfs/${PERIOD}/${SUBMISSION_ID}.pdf" \
             --fiscal-host engine/templates/fiscal-host.yml \
             --issue-url "https://github.com/${REPO}/issues/${ISSUE_NUMBER}" \
-            --output-summary /tmp/email_summary.json
+            --output-summary /tmp/email_summary.json \
+            "${EXTRA[@]}"
+
+      - name: Record the email send on main
+        id: record_email
+        env:
+          PYTHONPATH: engine
+          PR_NUMBER: ${{ inputs.pr_number }}
+          SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
+        run: |
+          git add "$SUBMISSION_FILE"
+          if git diff --cached --quiet; then
+            echo "Nothing to record (the send was recorded by an earlier run)."
+            exit 0
+          fi
+          git commit -m "Record approval email for PR #${PR_NUMBER} [skip ci]"
+          if ! python -m scripts.push_main; then
+            echo "The approval email WAS sent, but the record of it is not on main," >&2
+            echo "so a re-run would send it again. See the failure comment." >&2
+            exit 1
+          fi
 
       - name: Post audit comment on the original issue
         id: audit_comment
+        # Upserted: a re-run edits the same comment (by its sentinel) rather
+        # than adding another, so "Email: not sent" becomes "sent".
         # Not implicit-success(): this comment asserts the submission was
         # located, stamped, ledgered and pushed. When those hold it should
         # post even if a LATER step failed — an SMTP failure then yields
@@ -336,7 +415,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SUBMISSION_FILE: ${{ steps.find_submission.outputs.submission_file }}
           CONTRACT_ID: ${{ steps.find_submission.outputs.contract_id }}
-          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.resolve.outputs.issue_number }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO: ${{ github.repository }}
         run: |
@@ -383,6 +462,14 @@ jobs:
             echo "(The revision still landed cleanly; this is a non-fatal audit gap.)"
             exit 0
           fi
+          # Re-runs: post it once.
+          EXISTING=$(gh api --paginate "repos/${REPO}/issues/${PREV_PR}/comments" \
+            --jq ".[] | select(.body | startswith(\"**Superseded by #${PR_NUMBER}.**\")) | .id" \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$PREV_PR already carries the forward reference; skipping."
+            exit 0
+          fi
           echo "Found previous PR: #$PREV_PR. Posting forward-reference comment."
           gh pr comment "$PREV_PR" --repo "$REPO" --body \
             "**Superseded by #${PR_NUMBER}.** The PDF and audit trail above remain as the record of what was originally issued to PSL on this date. The revision's PDF is the current authoritative version."
@@ -413,7 +500,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          ISSUE_NUMBER: ${{ steps.find_issue.outputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.resolve.outputs.issue_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           O_FIND: ${{ steps.find_submission.outcome }}
           O_VERIFY: ${{ steps.verify.outcome }}
@@ -422,6 +509,7 @@ jobs:
           O_COMMIT: ${{ steps.commit_back.outcome }}
           O_ISSUE: ${{ steps.ledger_issue.outcome }}
           O_EMAIL: ${{ steps.email.outcome }}
+          O_RECORD: ${{ steps.record_email.outcome }}
           O_AUDIT: ${{ steps.audit_comment.outcome }}
         run: |
           row() {
@@ -437,8 +525,10 @@ jobs:
           # The email is the outward-facing consequence, so state it plainly:
           # recovery differs entirely depending on whether the fiscal host has
           # already been contacted.
-          if [ "$O_EMAIL" = "success" ]; then
-            EMAIL_LINE='The approval email **was sent** — do not re-send it during recovery.'
+          if [ "$O_EMAIL" = "success" ] && [ "$O_RECORD" = "failure" ]; then
+            EMAIL_LINE='The approval email **was sent**, but recording that on main failed, so a re-run **would send it again**. If every other step above completed, finish by hand instead: apply the `processed` label to this PR.'
+          elif [ "$O_EMAIL" = "success" ]; then
+            EMAIL_LINE='The approval email **was sent** and recorded; a re-run will not send it again.'
           else
             EMAIL_LINE='**No approval email was sent.** The fiscal host has not been contacted for this submission.'
           fi
@@ -454,12 +544,18 @@ jobs:
             row "5. Commit back to main"  "$O_COMMIT"
             row "6. Pinned ledger issue"  "$O_ISSUE"
             row "7. Approval email"       "$O_EMAIL"
-            row "8. Audit comment"        "$O_AUDIT"
+            row "8. Record email on main" "$O_RECORD"
+            row "9. Audit comment"        "$O_AUDIT"
             printf '\n%s\n\n' "$EMAIL_LINE"
             # The verifier's refusal report says why and what to do.
             if [ -f /tmp/verify_report.md ]; then
               cat /tmp/verify_report.md
               printf '\n'
+            else
+              printf '**To recover:** fix the cause, then use **Re-run failed jobs** on the run below. '
+              printf 'Steps that already completed are skipped, and the approval email is sent at most once. '
+              printf 'If the run is too old to re-run, start *Process approved submission* from the '
+              printf 'Actions tab with this PR number.\n\n'
             fi
             printf 'Run log: %s\n\n' "$RUN_URL"
             printf 'The `processed` label was deliberately not applied, so this PR stays visible as unfinished.\n'

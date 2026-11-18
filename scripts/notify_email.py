@@ -22,6 +22,13 @@ where the conversation labels under the existing "payments" filter;
 "Reply All" additionally reaches $QUANTECON_EMAIL_REVIEWER (the human
 approver Cc'd on the original send).
 
+Sent once: after a real send the recipients and time are recorded in the
+submission YAML under `approval_email`, and the workflow commits that to main.
+A later run (`Re-run failed jobs` after a failure further on) finds the record
+and does not send again; it writes the recorded details to --output-summary so
+the audit comment still reports the send. `--force-resend` sends anyway and
+replaces the record. Dry runs never record.
+
 Required environment:
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM  (org secrets)
   PSL_EMAIL, QUANTECON_EMAIL_REVIEWER                         (org variables)
@@ -107,6 +114,38 @@ def _effective_testing_mode(settings: dict, fiscal_host_path: Path) -> tuple[boo
     if repo_value is not None:
         return bool(repo_value), "repo settings.yml"
     return _read_testing_mode(fiscal_host_path), "engine fiscal-host.yml default"
+
+
+# Key in the submission YAML holding the record of the approval email.
+RECORD_KEY = "approval_email"
+_RECORD_FIELDS = ("to", "cc", "subject", "sent_at", "testing_mode", "testing_mode_source")
+
+
+def previous_send(submission: dict) -> Optional[dict]:
+    """The recorded approval email for this submission, or None."""
+    record = submission.get(RECORD_KEY)
+    if isinstance(record, dict) and record.get("sent_at"):
+        return record
+    return None
+
+
+def record_send(submission_path: Path, summary: dict) -> None:
+    """Write the send's details into the submission YAML (`approval_email`)."""
+    submission = _load_yaml(submission_path)
+    submission[RECORD_KEY] = {k: summary.get(k) for k in _RECORD_FIELDS}
+    with open(submission_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            submission, f,
+            default_flow_style=False, sort_keys=False, allow_unicode=True, width=100,
+        )
+
+
+def _write_summary(path: Optional[Path], summary: dict) -> None:
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    print(json.dumps(summary, indent=2))
 
 
 def _require_env(name: str) -> str:
@@ -226,9 +265,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="Compose the message and print it; don't actually send. "
                         "Useful for local development without SMTP credentials.")
+    p.add_argument("--force-resend", action="store_true",
+                   help="Send even if the submission records an earlier send, and "
+                        "replace that record. For a deliberate resend only.")
     args = p.parse_args(argv)
 
     submission = _load_yaml(args.submission)
+
+    earlier = previous_send(submission)
+    # A dry run always composes and prints (it never sends or records), so
+    # the message can be inspected even after a real send.
+    if earlier and not args.force_resend and not args.dry_run:
+        print(f"Approval email already sent at {earlier['sent_at']} to "
+              f"{earlier.get('to')} (recorded in {args.submission}); not sending "
+              f"again. Use --force-resend for a deliberate resend.", file=sys.stderr)
+        _write_summary(args.output_summary, {
+            **{k: earlier.get(k) for k in _RECORD_FIELDS},
+            "dry_run": False,
+            "already_sent": True,
+        })
+        return 0
     settings = _load_yaml(args.settings)
     contractor = settings.get("contractor", {})
 
@@ -294,19 +350,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     summary = {
         "to": to_addr,
         "cc": cc_addr,
-        "subject": msg["Subject"],
+        "subject": str(msg["Subject"]),
         "sent_at": sent_at,
         "testing_mode": testing_mode,
         "testing_mode_source": testing_mode_source,
         "dry_run": args.dry_run,
+        "resent": bool(earlier) and not args.dry_run,
     }
 
-    if args.output_summary:
-        args.output_summary.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output_summary, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
+    if not args.dry_run:
+        # Record before anything else can fail, so a re-run doesn't send again.
+        record_send(args.submission, summary)
 
-    print(json.dumps(summary, indent=2))
+    _write_summary(args.output_summary, summary)
     return 0
 
 

@@ -90,3 +90,116 @@ class TestEffectiveTestingMode:
         fh = _write_fiscal_host(tmp_path, True)
         settings = {"notifications": {"testing_mode": None}}
         assert _effective_testing_mode(settings, fh) == (True, _ENGINE_DEFAULT)
+
+
+# ─── Sent once (issue #11) ──────────────────────────────────────────────────
+
+import json
+
+import pytest
+import yaml
+
+import scripts.notify_email as ne
+
+
+class TestSentOnce:
+    """`Re-run failed jobs` replays the email step when something after it
+    failed. The send is recorded in the submission YAML so the re-run reports
+    the earlier send instead of emailing the fiscal host a second time."""
+
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        for k, v in {
+            "SMTP_HOST": "smtp.example.org", "SMTP_PORT": "587", "SMTP_USER": "u",
+            "SMTP_PASSWORD": "p", "SMTP_FROM": "payments@example.org",
+            "QUANTECON_EMAIL_REVIEWER": "reviewer@example.org",
+            "PSL_EMAIL": "psl@example.org",
+        }.items():
+            monkeypatch.setenv(k, v)
+        sent = []
+        monkeypatch.setattr(ne, "send_message", lambda msg, **kw: sent.append(msg))
+        sub = tmp_path / "sub.yml"
+        sub.write_text(yaml.safe_dump({
+            "submission_id": "jdoe-timesheet-2026-05", "type": "timesheet",
+            "contract_id": "QE-PSL-2026-001", "period": "2026-05",
+            "status": "approved", "approved_by": "mmcky", "approved_date": "2026-06-02",
+            "totals": {"hours": 10.0, "rate": 50.0, "amount": 500.0, "currency": "AUD"},
+        }, sort_keys=False))
+        settings = tmp_path / "settings.yml"
+        settings.write_text(yaml.safe_dump({"contractor": {"name": "Jane Doe", "github": "jdoe"}}))
+        pdf = tmp_path / "sub.pdf"
+        pdf.write_bytes(b"%PDF-1.7 approved")
+        fiscal = _write_fiscal_host(tmp_path, True)
+
+        def run(*extra):
+            summary = tmp_path / "summary.json"
+            assert ne.main([
+                "--submission", str(sub), "--settings", str(settings), "--pdf", str(pdf),
+                "--fiscal-host", str(fiscal), "--output-summary", str(summary), *extra,
+            ]) == 0
+            return json.loads(summary.read_text())
+
+        return sub, sent, run
+
+    def test_first_run_sends_and_records(self, env):
+        sub, sent, run = env
+        summary = run()
+        assert len(sent) == 1
+        record = yaml.safe_load(sub.read_text())["approval_email"]
+        assert record["to"] == "reviewer@example.org"
+        assert record["sent_at"] == summary["sent_at"]
+        assert record["testing_mode"] is True
+        assert not summary.get("already_sent")
+
+    def test_rerun_reports_the_earlier_send_without_sending(self, env):
+        sub, sent, run = env
+        first = run()
+        before = sub.read_text()
+        again = run()
+        assert len(sent) == 1
+        assert again["already_sent"] is True
+        assert again["sent_at"] == first["sent_at"]
+        assert again["to"] == first["to"]
+        assert sub.read_text() == before
+
+    def test_force_resend_sends_again_and_replaces_the_record(self, env, monkeypatch):
+        sub, sent, run = env
+        run()
+        record = yaml.safe_load(sub.read_text())["approval_email"]
+        record["sent_at"] = "2026-06-02 00:00:00 UTC"
+        data = yaml.safe_load(sub.read_text())
+        data["approval_email"] = record
+        sub.write_text(yaml.safe_dump(data, sort_keys=False))
+        summary = run("--force-resend")
+        assert len(sent) == 2
+        assert summary["resent"] is True
+        assert yaml.safe_load(sub.read_text())["approval_email"]["sent_at"] == summary["sent_at"]
+        assert summary["sent_at"] != "2026-06-02 00:00:00 UTC"
+
+    def test_failed_send_records_nothing(self, env, monkeypatch):
+        sub, sent, run = env
+
+        def boom(msg, **kw):
+            raise OSError("SMTP down")
+        monkeypatch.setattr(ne, "send_message", boom)
+        with pytest.raises(OSError):
+            run()
+        assert "approval_email" not in yaml.safe_load(sub.read_text())
+
+    def test_dry_run_records_nothing(self, env):
+        sub, sent, run = env
+        run("--dry-run")
+        assert "approval_email" not in yaml.safe_load(sub.read_text())
+
+    def test_dry_run_after_a_send_still_previews_without_touching_the_record(self, env, capsys):
+        sub, sent, run = env
+        run()
+        before = sub.read_text()
+        capsys.readouterr()
+        summary = run("--dry-run")
+        out = capsys.readouterr().out
+        assert "--- email (dry-run, not sent) ---" in out
+        assert summary["dry_run"] is True
+        assert not summary.get("already_sent") and not summary["resent"]
+        assert len(sent) == 1
+        assert sub.read_text() == before

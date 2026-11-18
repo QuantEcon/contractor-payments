@@ -17,8 +17,10 @@ For milestone contracts:
   contract_id, type=milestone, currency,
   claims[], totals.{amount_to_date, claims_count}
 
-Errors out if the same submission_id is already in the ledger (treated
-as a workflow bug to surface, not silently dedup).
+Re-run safe: if the submission is already in the ledger with exactly the
+entry this run would append (an earlier attempt committed it before failing
+further on), nothing changes. The same submission_id with *different* content
+still raises: that is a real inconsistency, not a re-run.
 
 See PLAN.md §8 Phase 2.
 """
@@ -128,11 +130,47 @@ def _build_entry(submission: dict) -> dict:
     raise ValueError(f"Unknown submission type `{submission_type}`.")
 
 
+def _list_key(ledger: dict) -> str:
+    return "submissions" if ledger.get("type") == "hourly" else "claims"
+
+
+def is_already_applied(submission: dict, ledger: dict) -> bool:
+    """True if `ledger` already holds exactly what `append_submission` would
+    add for `submission`: the same entry, and for a revision, the superseded
+    entry already pointing at it.
+
+    Raises ValueError if the submission_id is present with different content.
+    Only the fields `_build_entry` writes are compared, so a later revision
+    marking this entry superseded doesn't count as a difference.
+    """
+    submission_id = submission["submission_id"]
+    items = ledger.get(_list_key(ledger)) or []
+    existing = next((i for i in items if i.get("submission_id") == submission_id), None)
+    if existing is None:
+        return False
+    entry = _build_entry(submission)
+    differing = sorted(k for k in entry if existing.get(k) != entry[k])
+    supersedes = submission.get("supersedes")
+    if supersedes:
+        target = next((i for i in items if i.get("submission_id") == supersedes), None)
+        if target is None or target.get("superseded_by") != submission_id:
+            differing.append(f"superseded entry `{supersedes}`")
+    if differing:
+        raise ValueError(
+            f"Submission `{submission_id}` is already in the ledger, but with "
+            f"different content ({', '.join(differing)}). A re-run would leave "
+            f"the ledger unchanged; this means the submission or ledger changed "
+            f"after it was recorded. Investigate before retrying."
+        )
+    return True
+
+
 def append_submission(submission: dict, ledger: dict) -> dict:
     """Pure transform: apply a submission to a ledger and recompute totals.
 
     Validates that the ledger and submission agree on contract_id, type,
-    and currency. Raises on duplicate submission_id.
+    and currency. A submission already recorded identically is a no-op (a
+    re-run); the same submission_id with different content raises.
 
     Branches on `submission.get("supersedes")`:
 
@@ -169,17 +207,14 @@ def append_submission(submission: dict, ledger: dict) -> dict:
             f"submission says `{submission_currency}`."
         )
 
-    list_key = "submissions" if ledger["type"] == "hourly" else "claims"
+    list_key = _list_key(ledger)
     items = list(ledger.get(list_key, []))
 
-    # Idempotency: duplicate submission_id is treated as a workflow bug.
+    # Re-run: already recorded exactly as this run would record it. Raises if
+    # it was recorded with different content.
     submission_id = submission["submission_id"]
-    if any(item["submission_id"] == submission_id for item in items):
-        raise ValueError(
-            f"Submission `{submission_id}` is already in the ledger. "
-            f"process-approved.yml should only fire once per merge — investigate "
-            f"the workflow run history before retrying."
-        )
+    if is_already_applied(submission, ledger):
+        return dict(ledger)
 
     # Revision: mark the superseded entry. Phase 2.5.
     supersedes = submission.get("supersedes")
@@ -283,7 +318,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     ledger_path = ledger_path_for_submission(submission, repo_root)
     ledger = load_or_create_ledger(ledger_path, submission)
-    updated = append_submission(submission, ledger)
+    try:
+        if is_already_applied(submission, ledger):
+            print(f"`{submission['submission_id']}` is already in "
+                  f"{ledger_path.relative_to(repo_root)} (earlier run); unchanged.")
+            return 0
+        updated = append_submission(submission, ledger)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     with open(ledger_path, "w", encoding="utf-8") as f:

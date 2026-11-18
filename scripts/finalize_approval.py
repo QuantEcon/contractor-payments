@@ -57,6 +57,41 @@ def stamp_approval(
     return out
 
 
+def existing_approval(submission: dict, *, approver: str) -> Optional[str]:
+    """The `approved_date` of a submission that is already stamped, else None.
+
+    The pipeline is re-run ("Re-run failed jobs") after a partial failure.
+    When an earlier attempt got as far as committing back, main already holds
+    the stamped YAML and the approved PDF, and that PDF may already be in the
+    fiscal host's inbox. Stamping again would move `approved_date` to today
+    and re-render a PDF that no longer matches the one that was sent, so the
+    caller keeps the original stamp instead.
+
+    Raises ValueError when the existing state can't belong to this merge:
+    approved by someone else, or already superseded by a later revision
+    (re-stamping would flip it back to `approved`).
+    """
+    status = submission.get("status")
+    if status == "superseded":
+        raise ValueError(
+            f"`{submission.get('submission_id')}` has been superseded by "
+            f"`{submission.get('superseded_by')}`; refusing to re-approve it. "
+            f"Nothing to re-run for this PR."
+        )
+    if status != "approved":
+        return None
+    approved_by = submission.get("approved_by")
+    approved_date = submission.get("approved_date")
+    if approved_by != approver or not approved_date:
+        raise ValueError(
+            f"`{submission.get('submission_id')}` is already stamped approved by "
+            f"@{approved_by} on {approved_date}, but this run is processing a "
+            f"merge by @{approver}. Refusing to re-stamp; investigate the "
+            f"submission's history on main."
+        )
+    return str(approved_date)
+
+
 def stamp_superseded(submission: dict, *, superseded_by: str) -> dict:
     """Pure transform: mark a previously-approved submission as superseded.
 
@@ -158,6 +193,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     with open(submission_path, encoding="utf-8") as f:
         submission = yaml.safe_load(f)
 
+    try:
+        earlier = existing_approval(submission, approver=args.approver)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if earlier is not None:
+        # A re-run after this step's work was committed. Keep the original
+        # stamp, the superseded marker committed with it, and the rendered
+        # files (re-render only if one is somehow missing).
+        print(f"Already approved by @{args.approver} on {earlier} by an earlier "
+              f"run; keeping that stamp.")
+        pdf_path = submission_pdf_path(submission, repo_root)
+        png_path = submission_png_path(submission, repo_root)
+        if pdf_path.exists() and png_path.exists():
+            return 0
+        print("Approved PDF/PNG missing on main; re-rendering from the existing stamp.")
+        _render(submission, submission_path, settings_path, templates_dir,
+                repo_root, repo=args.repo, png_ppi=args.png_ppi)
+        return 0
+
     stamped = stamp_approval(
         submission,
         approver=args.approver,
@@ -185,28 +240,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Marked superseded: {superseded_path.relative_to(repo_root)}")
 
     # Re-render PDF + PNG, overwriting the pending versions.
-    pdf_path = submission_pdf_path(stamped, repo_root)
-    png_path = submission_png_path(stamped, repo_root)
+    _render(stamped, submission_path, settings_path, templates_dir,
+            repo_root, repo=args.repo, png_ppi=args.png_ppi)
+    return 0
 
+
+def _render(submission: dict, submission_path: Path, settings_path: Path,
+            templates_dir: Path, repo_root: Path, *, repo: Optional[str],
+            png_ppi: int) -> None:
+    pdf_path = submission_pdf_path(submission, repo_root)
+    png_path = submission_png_path(submission, repo_root)
     render_submission_pdf(
         submission_path=submission_path,
         settings_path=settings_path,
         template_dir=templates_dir,
         output_path=pdf_path,
-        repo=args.repo,
+        repo=repo,
     )
     render_submission_png(
         submission_path=submission_path,
         settings_path=settings_path,
         template_dir=templates_dir,
         output_path=png_path,
-        ppi=args.png_ppi,
-        repo=args.repo,
+        ppi=png_ppi,
+        repo=repo,
     )
     print(f"Re-rendered: {pdf_path.relative_to(repo_root)}")
     print(f"Re-rendered: {png_path.relative_to(repo_root)}")
-
-    return 0
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ companion contractor-facing guide will live at
 | [3. Admin requests changes via PR review](#3-admin-requests-changes-via-pr-review) | ⚠️ Partial | Convention documented (Path A is the supported flow) |
 | [4. Post-merge correction — revision or independent second invoice](#4-post-merge-correction--revision-or-supplemental) | ✅ | Two-mechanism model implemented + E2E verified (Phase 2.5) |
 | [5. PR closed without merging](#5-pr-closed-without-merging) | ⚠️ Partial | Minor |
-| [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ⚠️ Partial | Yes — no targeted re-run |
+| [6. Workflow failure mid-pipeline](#6-workflow-failure-mid-pipeline) | ✅ | — re-run safe ("Re-run failed jobs") |
 | [7. Contract end / renewal](#7-contract-end--renewal) | ⚠️ Partial | Minor — renewal steps are manual |
 | [8. Wrong currency / contract mismatch](#8-wrong-currency--contract-mismatch) | ✅ | — |
 | [9. Concurrent submissions](#9-concurrent-submissions) | ⚠️ Rare race | Low priority |
@@ -374,59 +374,60 @@ closes the PR without merging.
 
 ## 6. Workflow failure mid-pipeline
 
-**Situation.** `process-approved.yml` fails on one of its seven steps.
-Most common causes:
+**Situation.** `process-approved.yml` fails part-way. Most common causes:
 
-- SMTP outage / credential rotation (email step fails).
-- Transient `gh` API rate limit.
-- A `git push` collision (unlikely, but possible if two
-  approvals run within seconds).
+- SMTP outage or credential rotation (the email step fails).
+- A transient `gh` API error or rate limit.
+- A `git push` collision with another approval that couldn't be rebased.
 
-**What happens (current behaviour).**
+**What you see.** A red run, and a "pipeline failed part-way" comment on
+the PR and the submission issue with a table of which steps completed. It
+says plainly whether the approval email was sent. The PR does **not** get
+the `processed` label, so it stays visible as unfinished.
 
-Steps run in order: `finalize_approval` → `update_ledger` → commit →
-`update_ledger_issue` → `notify_email` → `notify_comment` → apply
-label.
+**Recovery: fix the cause, then "Re-run failed jobs".** Every step skips
+work that an earlier attempt already finished, so re-running the whole job
+is safe:
 
-If step N fails, steps N+1..7 are skipped. The state at that point is
-inconsistent: e.g. if `notify_email` fails, the ledger has been
-updated and committed, the pinned issue is refreshed, but no email
-was sent and no audit comment was posted.
+| Step | On a re-run |
+|---|---|
+| Verify | Re-checks; it already ignores this submission's own ledger entry. |
+| Stamp + render | If main already has the stamped YAML, keeps the original `approved_date` and the PDF that may already have been emailed. Nothing is re-rendered. |
+| Ledger | If the entry is already there and identical, leaves the ledger alone. If the same `submission_id` is there with *different* content, fails: that is a real inconsistency to investigate. |
+| Commit to main | Nothing to commit, so nothing is pushed. |
+| Pinned ledger issue | Re-rendered from the ledger (same content). |
+| Approval email | Sent at most once. A send is recorded in the submission YAML (`approval_email`: recipients, time, testing mode) and committed to main; a re-run that finds the record doesn't send again. |
+| Audit comment | Edited in place (found by its hidden marker), so "Email: not sent" becomes "sent" rather than a second comment appearing. |
+| Superseded-PR note (revisions) | Posted once. |
+| `processed` label | Applied when everything succeeds. |
 
-> **Dev note — gap: no targeted re-run path.**
-> The whole workflow is wired to fire on `pull_request.merged`. If it
-> fails mid-way, you can't re-run *just* the failed step from the
-> GitHub Actions UI in a way that produces correct output — `git push`
-> would fail on the already-committed steps, etc.
->
-> **Workaround:** re-run individual scripts locally with the right
-> args. The scripts are designed to be idempotent where possible:
-> - `notify_email` — safe to re-run (sends another email).
-> - `notify_comment` — safe to re-run (posts another comment; not
->   idempotent against itself but the duplicate is obvious).
-> - `update_ledger` — **NOT safe to re-run**; raises on duplicate
->   `submission_id`.
-> - `finalize_approval` — re-running mutates the YAML again; safe but
->   noisy.
->
-> **Possible adjustment:** add a `workflow_dispatch` trigger that
-> takes a PR number + step name and runs just that step. Useful for
-> manual recovery. Defer until we see what failures actually look
-> like in practice — the failure modes will shape the right UX.
+A run that already succeeded is safe too: a PR labelled `processed` is left
+alone entirely.
 
-**Admin actions.**
+**Typical case: SMTP was down.** The ledger and commit already succeeded
+and no email went out. Fix the SMTP secret, then "Re-run failed jobs". The
+email is sent, recorded on main, the audit comment flips to "sent", and the
+PR is labelled `processed`.
 
-1. Inspect the failed run in the Actions UI; identify which step
-   failed.
-2. **If the failure was after the ledger commit** (i.e. ledger is
-   updated, pinned issue is refreshed, but email/comment didn't fire):
-   - Re-run `notify_email` and `notify_comment` locally with the
-     paths from the failed PR.
-   - Apply the `processed` label manually via `gh pr edit`.
-3. **If the failure was at or before the ledger commit**: the workflow
-   can probably be re-run from the Actions UI ("Re-run failed jobs")
-   if the underlying cause (e.g. transient API error) is gone. If
-   not, fix the cause first.
+**Run too old to re-run** (GitHub allows re-runs for 30 days), or the
+original run is missing: go to **Actions → Process approved submission →
+Run workflow** in the contractor repo and enter the PR number. It takes the
+same path as the merge did, including the approver check against the
+person who merged. This needs the updated caller workflow (from
+`contractor-template/`, added with issue #11); repos onboarded earlier need
+that file copied in before the button appears.
+
+**Resending the approval email on purpose** (e.g. PSL lost it): the same
+**Run workflow** form with **force_resend** ticked. It sends the email
+again, replaces the `approval_email` record, and updates the audit comment
+to say it was re-sent on request. Nothing else changes.
+
+**One case to handle by hand.** If the failure table shows the email
+**sent** but *Record email on main* **failed**, the record isn't on main and
+a re-run would send the email a second time. If every other step
+completed, apply the `processed` label to the PR by hand instead of
+re-running. (This needs the push to main to fail right after a successful
+send, after retries; it should be rare.)
 
 ### Known failure mode — bot push rejected by branch protection
 
@@ -453,10 +454,8 @@ targeting `contractor-*` repos; new contractor repos inherit it
 automatically.
 
 **Recovery if it fires:** re-run the workflow ("Re-run failed jobs")
-after removing/correcting the protection. The pipeline is
-re-entrant in this case — `finalize_approval` is idempotent against
-already-stamped YAMLs (it re-writes the same content), and the
-ledger entry hasn't been committed yet at the push-rejection point.
+after removing/correcting the protection. Nothing was committed or emailed
+at the push-rejection point, and every step is re-run safe (see above).
 
 ---
 
@@ -932,8 +931,10 @@ Capturing the development implications in one place for triage:
    semantics. See PLAN §8 Phase 2.5 for the verified flow.
 2. **No close-without-merge feedback to contractor (Scenario 5).**
    Low priority; revisit if rejected PRs become common.
-3. **No targeted re-run for failed workflow step (Scenario 6).**
-   Defer until failures are observed and the right UX is clear.
+3. ~~**No targeted re-run for failed workflow step (Scenario 6).**~~
+   ✅ Resolved (issue #11): every step is re-run safe, so "Re-run failed
+   jobs" is the recovery, and a manual dispatch covers runs too old to
+   re-run.
 4. **Contract dropdown is statically committed (Scenario 7).** Could
    generate at workflow time from `contracts/`. Adjustment recommended
    when first real renewal hits.
@@ -949,6 +950,6 @@ Capturing the development implications in one place for triage:
    revision, and excluded from the running totals. Keeps the audit
    trail discoverable while keeping totals accurate.
 
-Items 1 and 8 are resolved (Phase 2.5). Items 2–7 are quality-of-life
+Items 1 and 8 are resolved (Phase 2.5), item 3 by issue #11. Items 2 and 4–7 are quality-of-life
 improvements to revisit once we have live operational data; none
 block Phase 4.
