@@ -76,6 +76,23 @@ on:
         type: string
         default: "main"
 
+    # The only secrets this pipeline uses (GITHUB_TOKEN is always available).
+    # Callers pass these explicitly rather than `secrets: inherit`, so nothing
+    # else in the org reaches the engine. Not `required`: a caller still on
+    # `secrets: inherit` passes them anyway, and notify_email names any that
+    # are missing.
+    secrets:
+      SMTP_HOST:
+        required: false
+      SMTP_PORT:
+        required: false
+      SMTP_USER:
+        required: false
+      SMTP_PASSWORD:
+        required: false
+      SMTP_FROM:
+        required: false
+
 jobs:
   resolve:
     runs-on: ubuntu-latest
@@ -178,13 +195,19 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install pyyaml
+        run: pip install pyyaml==6.0.3
 
       - name: Install Typst
         run: |
+          # Bump the version and the sha256 together (the tarball's, for this
+          # version); tests/test_workflows.py checks every workflow agrees.
           TYPST_VERSION="0.13.0"
-          curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
-            | tar -xJ -C /tmp
+          TYPST_SHA256="cd1148da61d6844e62c330fc6222e988480acafe33b76daec8eb5d221258feb6"
+          curl -fsSL -o /tmp/typst.tar.xz \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          # Refuse a tarball that isn't the one we pinned (bash -e stops here).
+          echo "${TYPST_SHA256}  /tmp/typst.tar.xz" | sha256sum -c -
+          tar -xJ -C /tmp -f /tmp/typst.tar.xz
           sudo mv /tmp/typst-*/typst /usr/local/bin/typst
           typst --version
 

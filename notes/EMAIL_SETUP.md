@@ -269,8 +269,11 @@ service-account mailbox by default. Two ways to handle:
   secret's "Repository access" scope on
   <https://github.com/organizations/QuantEcon/settings/secrets/actions>
   includes the contractor repo where the workflow ran.
-- The thin caller workflow is missing `secrets: inherit` — the reusable
-  workflow can't see secrets the caller didn't pass through.
+- The thin caller `process-approved.yml` doesn't pass the `SMTP_*`
+  secrets. It must list each one under `secrets:` (the template does); the
+  reusable workflow can't see secrets the caller didn't pass through. Run
+  `python onboarding/sync_callers.py --check <repo>` to compare a repo's
+  callers with the template.
 
 **Rate limits hit**
 - Gmail SMTP allows ~2,000 messages/day per account. We're nowhere near

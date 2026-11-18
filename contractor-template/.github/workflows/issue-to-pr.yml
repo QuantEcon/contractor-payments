@@ -49,7 +49,7 @@ jobs:
           )
         )
       )
-    uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@main
+    uses: QuantEcon/contractor-payments/.github/workflows/process-submission.yml@v1
     permissions:
       contents: write
       pull-requests: write
@@ -67,7 +67,7 @@ jobs:
       # would let it derive one — so pinning the workflow without pinning
       # this runs a different commit's code. Keep the two in step; the
       # engine's tests/test_workflows.py asserts they agree.
-      engine_ref: main
+      engine_ref: v1
       mode: >-
         ${{ (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/validate')) && 'validate' || 'submit' }}
-    secrets: inherit
+    # No secrets: the engine needs only the GITHUB_TOKEN it always gets.

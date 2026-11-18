@@ -185,6 +185,28 @@ class TestTypstPinIsConsistent:
                     f"MAJOR.MINOR.PATCH so renders are reproducible."
                 )
 
+    def test_every_workflow_pins_the_same_checksum(self):
+        """The tarball is checked against a sha256 next to the version; a
+        bump that updates one workflow's hash but not another's would fail
+        that workflow's install (or, worse, leave one unverified)."""
+        hashes = {}
+        for path in ENGINE_WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            if re.search(r'TYPST_VERSION="[0-9.]+"', text):
+                hashes[path.name] = set(re.findall(r'TYPST_SHA256="([0-9a-f]{64})"', text))
+                assert hashes[path.name], f"{path.name} pins a version but no TYPST_SHA256"
+        assert len(set().union(*hashes.values())) == 1, f"conflicting Typst hashes: {hashes}"
+
+    @pytest.mark.parametrize("path", ENGINE_WORKFLOWS + [REPO_ROOT / ".github/workflows/tests.yml"],
+                             ids=lambda p: p.name)
+    def test_tarball_is_verified_before_it_is_extracted(self, path):
+        for step in _steps(_load(path)):
+            run = step.get("run") or ""
+            if "typst-x86_64-unknown-linux-musl.tar.xz" not in run:
+                continue
+            assert "| tar" not in run, f"{_id(step)} pipes the download straight into tar"
+            assert run.index("sha256sum -c") < run.index("tar -xJ"), _id(step)
+
 
 class TestEngineCheckoutIsPinnedToTheWorkflow:
     """Every reusable workflow must run the engine scripts from a pinned ref.
@@ -472,3 +494,70 @@ class TestCallerCanRedriveAPr:
         assert job["with"]["force_resend"] == (
             "${{ inputs.force_resend == true || inputs.force_resend == 'true' }}"
         )
+
+
+
+# ─── Supply chain (issue #9) ────────────────────────────────────────────────
+
+class TestSecretsAreExplicit:
+    """`secrets: inherit` handed every org secret to whatever the engine ref
+    pointed at. Only the approval pipeline needs any (the mail credentials)."""
+
+    SMTP = {"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"}
+
+    @pytest.mark.parametrize("path", CALLER_WORKFLOWS, ids=lambda p: p.name)
+    def test_no_caller_inherits_secrets(self, path):
+        for name, job in (_load(path).get("jobs") or {}).items():
+            assert job.get("secrets") != "inherit", f"{path.name}: job `{name}`"
+
+    def test_only_the_approval_caller_passes_secrets_and_only_smtp(self):
+        for path in CALLER_WORKFLOWS:
+            for job in (_load(path).get("jobs") or {}).values():
+                passed = set(job.get("secrets") or {})
+                if path.name == "process-approved.yml":
+                    assert passed == self.SMTP
+                else:
+                    assert not passed, f"{path.name} passes {sorted(passed)}"
+
+    @pytest.mark.parametrize("path", ENGINE_WORKFLOWS, ids=lambda p: p.name)
+    def test_engine_uses_only_secrets_it_declares(self, path):
+        workflow = _load(path)
+        triggers = workflow.get("on") or workflow.get(True) or {}
+        call = triggers.get("workflow_call") if isinstance(triggers, dict) else None
+        if call is None:
+            pytest.skip("not a reusable workflow")
+        declared = set((call or {}).get("secrets") or {})
+        used = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", path.read_text(encoding="utf-8")))
+        assert used - {"GITHUB_TOKEN"} <= declared, (
+            f"{path.name} uses undeclared secrets {sorted(used - {'GITHUB_TOKEN'} - declared)}"
+        )
+        if path.name == "process-approved.yml":
+            assert declared == self.SMTP
+        else:
+            assert not declared
+
+
+class TestCallersPinAReleaseTag:
+    """Callers at `@main` ran every merge to this public repo's main in every
+    contractor repo straight away, with write access and the mail secrets.
+    They pin a release tag; only a deliberate tag move ships engine changes."""
+
+    @pytest.mark.parametrize("path", CALLER_WORKFLOWS, ids=lambda p: p.name)
+    def test_template_callers_use_a_version_tag(self, path):
+        for name, job in (_load(path).get("jobs") or {}).items():
+            uses = job.get("uses") or ""
+            if "contractor-payments" not in uses:
+                continue
+            ref = uses.rsplit("@", 1)[-1]
+            assert re.fullmatch(r"v\d+(\.\d+\.\d+)?", ref), (
+                f"{path.name}: job `{name}` pins the engine at @{ref}; pin a "
+                f"release tag (v1 or vX.Y.Z), not a branch."
+            )
+
+
+def test_python_dependency_is_pinned_in_the_engine_workflows():
+    for path in ENGINE_WORKFLOWS:
+        for step in _steps(_load(path)):
+            run = step.get("run") or ""
+            if run.strip().startswith("pip install pyyaml"):
+                assert re.search(r"pyyaml==\d+\.\d+\.\d+", run), f"{path.name}: {run.strip()}"

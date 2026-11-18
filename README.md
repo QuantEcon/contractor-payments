@@ -34,7 +34,7 @@ QuantEcon/contractor-payments       ← THIS REPO (public)
 
 QuantEcon/contractor-{handle}       ← per-contractor (private)
   ├── .github/workflows/
-  │     └── issue-to-pr.yml         ← thin caller, references this repo @main
+  │     └── issue-to-pr.yml         ← thin caller, pins this repo's release tag (@v1)
   ├── .github/ISSUE_TEMPLATE/       ← submission forms
   ├── config/settings.yml           ← contractor identity
   ├── contracts/*.yml               ← contract terms

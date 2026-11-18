@@ -34,7 +34,7 @@ jobs:
       github.event_name == 'workflow_dispatch' || (
       github.event.pull_request.merged == true &&
       contains(github.event.pull_request.labels.*.name, 'submission'))
-    uses: QuantEcon/contractor-payments/.github/workflows/process-approved.yml@main
+    uses: QuantEcon/contractor-payments/.github/workflows/process-approved.yml@v1
     permissions:
       contents: write
       pull-requests: write
@@ -53,5 +53,12 @@ jobs:
       # would let it derive one — so pinning the workflow without pinning
       # this runs a different commit's code. Keep the two in step; the
       # engine's tests/test_workflows.py asserts they agree.
-      engine_ref: main
-    secrets: inherit
+      engine_ref: v1
+    # Only the mail credentials, by name: the engine gets nothing else from
+    # the org's secrets.
+    secrets:
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}
