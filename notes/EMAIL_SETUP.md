@@ -32,8 +32,13 @@ Recipient (secrets.PSL_EMAIL, Cc secrets.QUANTECON_EMAIL_REVIEWER) lands the app
 
 ## What you'll set
 
-By the end you'll have these GitHub **org-level Secrets** (scope: Private
-repositories — same as the others):
+By the end you'll have these GitHub **org-level Secrets**, all with
+Repository access set to **Selected repositories**: the contractor repos
+and `test-contractor-payments`, nothing else. Any repo that can see a
+secret can read it from a workflow, so "Private repositories" would hand
+the mail password and both addresses to every private repo in the org.
+Each new contractor repo must be added to all seven (admin runbook,
+"Engine releases" → "Secrets reach only the approval pipeline").
 
 | Name | Value | Set in this runbook? |
 |---|---|---|
@@ -167,7 +172,8 @@ main login password. Several benefits this gives you:
 
 UI: <https://github.com/organizations/QuantEcon/settings/secrets/actions>
 
-Add three new secrets (scope: **Private repositories**):
+Add three new secrets (Repository access: **Selected repositories**, the
+same repos as `SMTP_HOST` / `SMTP_PORT`):
 
 | Name | Value |
 |---|---|
@@ -179,19 +185,25 @@ Or via `gh` CLI (needs `admin:org` scope — refresh with
 `gh auth refresh -h github.com -s admin:org` if needed):
 
 ```bash
-gh secret set SMTP_USER --org QuantEcon --visibility private \
+REPOS=contractor-Honaminto,contractor-xuanguang-li,contractor-Chihiro2000GitHub,test-contractor-payments
+
+gh secret set SMTP_USER --org QuantEcon --visibility selected --repos "$REPOS" \
   --body '<underlying-account-address>'
 
-gh secret set SMTP_FROM --org QuantEcon --visibility private \
+gh secret set SMTP_FROM --org QuantEcon --visibility selected --repos "$REPOS" \
   --body '<sending-identity-address>'   # alias if Step 1.A, else same as SMTP_USER
 
-gh secret set SMTP_PASSWORD --org QuantEcon --visibility private \
+gh secret set SMTP_PASSWORD --org QuantEcon --visibility selected --repos "$REPOS" \
   --body '<16-char-app-password>'
 ```
 
-`--visibility private` matches the existing scope choice for `SMTP_HOST` /
-`SMTP_PORT` — all current and future private repos in the org get access
-automatically.
+List the repos that exist when you run this. `--repos` replaces the whole
+list, so to add one repo later use the per-repo command in the admin
+runbook rather than re-running `gh secret set` with a partial list.
+
+Check a repo's access with
+`gh api repos/QuantEcon/<repo>/actions/organization-secrets --jq '[.secrets[].name]'`
+(expect all seven names).
 
 ## Step 5 — Smoke test from a local Python session
 

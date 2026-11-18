@@ -733,6 +733,25 @@ submission and reminder workflows get none (they use only the
 `GITHUB_TOKEN` every run has). `tests/test_workflows.py` enforces both
 sides.
 
+All seven org secrets have Repository access set to **Selected
+repositories**: the contractor repos and `test-contractor-payments`. Any
+repo that can see a secret can read it from a workflow, so the list stays
+that narrow. `onboarding/new-contractor.py` does not grant access, so after
+onboarding add the new repo to each secret (needs `admin:org`):
+
+```bash
+REPO_ID=$(gh api repos/QuantEcon/contractor-HANDLE --jq .id)
+for s in PSL_EMAIL QUANTECON_EMAIL_REVIEWER SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_FROM; do
+  gh api -X PUT "orgs/QuantEcon/actions/secrets/$s/repositories/$REPO_ID"
+done
+gh api repos/QuantEcon/contractor-HANDLE/actions/organization-secrets --jq '[.secrets[].name]'
+```
+
+The last line should list all seven. A repo missing any of them fails at
+the email step of its first approval (`notify_email` names the missing
+secret); fix the access, then "Re-run failed jobs". When a contractor
+leaves, remove the repo with the same loop using `-X DELETE`.
+
 The Typst tarball each workflow downloads is checked against a pinned
 sha256 (`TYPST_SHA256`, next to `TYPST_VERSION`) before it is extracted.
 When bumping Typst, update both in `process-submission.yml` and
