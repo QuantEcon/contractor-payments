@@ -40,9 +40,14 @@ jobs:
       pull-requests: write
       issues: write
     with:
-      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
-      # Always false for a merge (there are no inputs on that event).
-      force_resend: ${{ inputs.force_resend == true }}
+      # A dispatched run can deliver its inputs as strings, and the engine's
+      # inputs are typed: passing "51" to a `number` input fails the run
+      # before any job starts. Convert explicitly; it is a no-op for the
+      # number a merge event carries.
+      pr_number: ${{ fromJSON(format('{0}', github.event.pull_request.number || inputs.pr_number)) }}
+      # Always false for a merge (there are no inputs on that event). Accepts
+      # the dispatch's boolean or its string form.
+      force_resend: ${{ inputs.force_resend == true || inputs.force_resend == 'true' }}
       # Must match the `@ref` on the `uses:` line above. The engine checks
       # its own scripts out at this ref, and there is no context value that
       # would let it derive one — so pinning the workflow without pinning

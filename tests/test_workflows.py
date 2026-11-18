@@ -463,7 +463,12 @@ class TestCallerCanRedriveAPr:
     def test_job_passes_the_pr_number_for_both_triggers(self):
         job = _load(CALLER_APPROVED)["jobs"]["process"]
         assert "workflow_dispatch" in job["if"]
+        # Dispatch inputs can arrive as strings; the engine input is a number,
+        # and a type mismatch fails the run before any job starts (seen in the
+        # E2E for #11). So the caller must convert, not pass through.
         assert job["with"]["pr_number"] == (
-            "${{ github.event.pull_request.number || inputs.pr_number }}"
+            "${{ fromJSON(format('{0}', github.event.pull_request.number || inputs.pr_number)) }}"
         )
-        assert job["with"]["force_resend"] == "${{ inputs.force_resend == true }}"
+        assert job["with"]["force_resend"] == (
+            "${{ inputs.force_resend == true || inputs.force_resend == 'true' }}"
+        )
