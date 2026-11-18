@@ -190,3 +190,16 @@ class TestSentOnce:
         sub, sent, run = env
         run("--dry-run")
         assert "approval_email" not in yaml.safe_load(sub.read_text())
+
+    def test_dry_run_after_a_send_still_previews_without_touching_the_record(self, env, capsys):
+        sub, sent, run = env
+        run()
+        before = sub.read_text()
+        capsys.readouterr()
+        summary = run("--dry-run")
+        out = capsys.readouterr().out
+        assert "--- email (dry-run, not sent) ---" in out
+        assert summary["dry_run"] is True
+        assert not summary.get("already_sent") and not summary["resent"]
+        assert len(sent) == 1
+        assert sub.read_text() == before

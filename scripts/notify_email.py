@@ -273,7 +273,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     submission = _load_yaml(args.submission)
 
     earlier = previous_send(submission)
-    if earlier and not args.force_resend:
+    # A dry run always composes and prints (it never sends or records), so
+    # the message can be inspected even after a real send.
+    if earlier and not args.force_resend and not args.dry_run:
         print(f"Approval email already sent at {earlier['sent_at']} to "
               f"{earlier.get('to')} (recorded in {args.submission}); not sending "
               f"again. Use --force-resend for a deliberate resend.", file=sys.stderr)
@@ -353,7 +355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "testing_mode": testing_mode,
         "testing_mode_source": testing_mode_source,
         "dry_run": args.dry_run,
-        "resent": bool(earlier),
+        "resent": bool(earlier) and not args.dry_run,
     }
 
     if not args.dry_run:
